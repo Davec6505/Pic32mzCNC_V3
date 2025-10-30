@@ -1,0 +1,23 @@
+/**
+ * @brief Y-axis step execution (OCMP1 callback) - THIN TRAMPOLINE
+ */
+static void OCMP1_StepCounter_Y(uintptr_t context)
+{
+    ProcessSegmentStep(AXIS_Y);
+}
+
+/**
+ * @brief Z-axis step execution (OCMP4 callback) - THIN TRAMPOLINE
+ */
+static void OCMP4_StepCounter_Z(uintptr_t context)
+{
+    ProcessSegmentStep(AXIS_Z);
+}
+
+/**
+ * @brief A-axis step execution (OCMP3 callback) - THIN TRAMPOLINE
+ */
+static void OCMP3_StepCounter_A(uintptr_t context)
+{
+    ProcessSegmentStep(AXIS_A);
+}

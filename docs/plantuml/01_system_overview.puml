@@ -1,0 +1,65 @@
+@startuml
+title CNC Step Flow with TMR2 + OCx + Bresenham + Acceleration
+
+participant Planner
+participant TMR2
+participant OC1 as "OC1 ISR (X Axis - Dominant)"
+participant OC2 as "OC2 (Y Axis)"
+participant OC3 as "OC3 (Z Axis)"
+participant OC4 as "OC4 (A Axis)"
+
+== Initialization ==
+Planner -> OC1 : Load segment (X=100, Y=25, Z=10, A=5)
+Planner -> OC1 : Set delta values and error terms
+Planner -> OC1 : Load acceleration profile
+Planner -> TMR2 : Start free-running timer
+Planner -> OC1 : Set initial OC1R/OC1RS
+
+== Runtime Loop ==
+TMR2 -> OC1 : Match event triggers ISR
+activate OC1
+OC1 -> OC1 : Step X axis
+OC1 -> OC1 : Update Bresenham error for Y, Z, A
+
+alt Y axis needs step
+    OC1 -> OC2 : Schedule Y step (set OC2R/OC2RS)
+end
+alt Z axis needs step
+    OC1 -> OC3 : Schedule Z step
+end
+alt A axis needs step
+    OC1 -> OC4 : Schedule A step
+end
+
+OC1 -> OC1 : Update acceleration state
+OC1 -> OC1 : Compute next pulse interval
+OC1 -> OC1 : Schedule next X pulse (OC1R/OC1RS)
+deactivate OC1
+
+alt OC2 match occurs
+    TMR2 -> OC2 : Match triggers Y pulse
+end
+alt OC3 match occurs
+    TMR2 -> OC3 : Match triggers Z pulse
+end
+alt OC4 match occurs
+    TMR2 -> OC4 : Match triggers A pulse
+end
+
+== Repeat ==
+loop Until segment complete
+    TMR2 -> OC1 : Match triggers ISR
+    activate OC1
+    OC1 -> OC1 : Bresenham + Acceleration logic
+    OC1 -> OC2 : Schedule Y step if needed
+    OC1 -> OC3 : Schedule Z step if needed
+    OC1 -> OC4 : Schedule A step if needed
+    OC1 -> OC1 : Schedule next X pulse
+    deactivate OC1
+end
+
+== Completion ==
+OC1 -> Planner : Segment complete
+Planner -> OC1 : Load next segment
+
+@enduml
