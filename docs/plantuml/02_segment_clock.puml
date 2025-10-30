@@ -1,0 +1,56 @@
+@startuml
+title Segment Clock Timing Driven by Dominant Axis ISR
+
+scale 1.5
+
+participant TMR2
+participant OC1 as "OC1 ISR (X Axis - Dominant)"
+participant OC2 as "OC2 (Y Axis)"
+participant OC3 as "OC3 (Z Axis)"
+participant OC4 as "OC4 (A Axis)"
+
+== Segment Start ==
+TMR2 -> OC1 : First match event (OC1R)
+activate OC1
+OC1 -> OC1 : Step X axis
+OC1 -> OC1 : Update Bresenham error terms
+OC1 -> OC2 : Schedule Y step if error_y >= delta_x
+OC1 -> OC3 : Schedule Z step if error_z >= delta_x
+OC1 -> OC4 : Schedule A step if error_a >= delta_x
+OC1 -> OC1 : Schedule next OC1R/OC1RS
+deactivate OC1
+
+== Segment Clock Ticks ==
+loop Every OC1 match (segment clock tick)
+    TMR2 -> OC1 : Match event
+    activate OC1
+    OC1 -> OC1 : Step X axis
+    OC1 -> OC1 : Bresenham logic
+    OC1 -> OC2 : Schedule Y step if needed
+    OC1 -> OC3 : Schedule Z step if needed
+    OC1 -> OC4 : Schedule A step if needed
+    OC1 -> OC1 : Schedule next OC1R/OC1RS
+    deactivate OC1
+end
+
+== Subordinate Axis Pulses ==
+alt Y match occurs
+    TMR2 -> OC2 : Match triggers Y pulse
+end
+alt Z match occurs
+    TMR2 -> OC3 : Match triggers Z pulse
+end
+alt A match occurs
+    TMR2 -> OC4 : Match triggers A pulse
+end
+
+== Segment Completion ==
+OC1 -> OC1 : Check steps_remaining
+alt If complete
+    OC1 -> OC1 : Stop scheduling pulses
+    OC1 -> OC2 : Stop Y axis pulses
+    OC1 -> OC3 : Stop Z axis pulses
+    OC1 -> OC4 : Stop A axis pulses
+end
+
+@enduml
