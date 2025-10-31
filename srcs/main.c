@@ -25,7 +25,11 @@
 #include <stddef.h>                     // Defines NULL
 #include <stdbool.h>                    // Defines true
 #include <stdlib.h>                     // Defines EXIT_FAILURE
+#include <string.h>
+#include <stdio.h>
 #include "definitions.h"                // SYS function prototypes
+
+#include "gcode_parser.h"                // GCODE parser function prototypes
 
 
 // *****************************************************************************
@@ -39,10 +43,12 @@ int main ( void )
     /* Initialize all modules */
     SYS_Initialize ( NULL );
 
+    /* Initialize the GCODE USART */
+    GCODE_USART_Initialize();
+
     while ( true )
     {
-        /* Maintain state machines of all polled MPLAB Harmony modules. */
-        SYS_Tasks ( );
+ 
     }
 
     /* Execution should not come here during normal operation */
