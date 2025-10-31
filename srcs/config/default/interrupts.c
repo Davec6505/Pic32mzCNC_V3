@@ -80,22 +80,22 @@ void UART2_TX_Handler (void);
 // Section: System Interrupt Vector definitions
 // *****************************************************************************
 // *****************************************************************************
-void __attribute__((used)) __ISR(_OUTPUT_COMPARE_1_VECTOR, ipl1SRS) OUTPUT_COMPARE_1_Handler (void)
+void __attribute__((used)) __ISR(_OUTPUT_COMPARE_1_VECTOR, ipl4SRS) OUTPUT_COMPARE_1_Handler (void)
 {
     OUTPUT_COMPARE_1_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_OUTPUT_COMPARE_3_VECTOR, ipl1SRS) OUTPUT_COMPARE_3_Handler (void)
+void __attribute__((used)) __ISR(_OUTPUT_COMPARE_3_VECTOR, ipl4SRS) OUTPUT_COMPARE_3_Handler (void)
 {
     OUTPUT_COMPARE_3_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_OUTPUT_COMPARE_4_VECTOR, ipl1SRS) OUTPUT_COMPARE_4_Handler (void)
+void __attribute__((used)) __ISR(_OUTPUT_COMPARE_4_VECTOR, ipl4SRS) OUTPUT_COMPARE_4_Handler (void)
 {
     OUTPUT_COMPARE_4_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_OUTPUT_COMPARE_5_VECTOR, ipl1SRS) OUTPUT_COMPARE_5_Handler (void)
+void __attribute__((used)) __ISR(_OUTPUT_COMPARE_5_VECTOR, ipl4SRS) OUTPUT_COMPARE_5_Handler (void)
 {
     OUTPUT_COMPARE_5_InterruptHandler();
 }
@@ -105,12 +105,12 @@ void __attribute__((used)) __ISR(_UART2_FAULT_VECTOR, ipl1SRS) UART2_FAULT_Handl
     UART2_FAULT_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_UART2_RX_VECTOR, ipl1SRS) UART2_RX_Handler (void)
+void __attribute__((used)) __ISR(_UART2_RX_VECTOR, ipl4SRS) UART2_RX_Handler (void)
 {
     UART2_RX_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_UART2_TX_VECTOR, ipl1SRS) UART2_TX_Handler (void)
+void __attribute__((used)) __ISR(_UART2_TX_VECTOR, ipl3SRS) UART2_TX_Handler (void)
 {
     UART2_TX_InterruptHandler();
 }
