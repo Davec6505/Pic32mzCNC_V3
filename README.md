@@ -11,19 +11,20 @@ Pic32mzCNC_V3 is a modular CNC motion control system designed for high-performan
 1. Clone the repository:
   ```sh
   git clone https://github.com/Davec6505/Pic32mzCNC_V3.git
-  ```
+  
 2. Build the project:
   ```sh
-  make
-  ```
+  make  / make all = clean and build
+   
 3. Flash the firmware to your PIC32MZ device:
-  ```
+  ```sh
   MikroE bootloader.
   ```
 4. Clean build artifacts:
   ```sh
   make clean
   ```
+
 
 Refer to the documentation and source code for further details on configuration and usage.
 
@@ -83,3 +84,61 @@ void __ISR(_OC1_VECTOR, IPL5SOFT) OC1Handler(void) {
   *  OC1R = now + segment.x_interval;
   *  OC1RS = OC1R + pulse_width;
 }
+
+
+CONSIDERATIONS:
+## TMR2 is free running.
+### Option 3: Use 32-bit TMR2:TMR3 Pair
+1. 	Gives you a much larger range (up to 4.29 billion ticks).
+2. 	Reduces the chance of overflow or wraparound issues.
+3. 	Lets you schedule OCxR values far ahead without worrying about PR2.
+4.  [OCxR:OCxRS] in absolute mode.
+
+
+There are two alternative initial conditions to consider:  
+1. Initialize TMRy = 0 and set OCxR ≥ 1.  
+2. Initialize TMRy = PRy (PRy > 0) and set OCxR = 0. | Pulse will be delayed by the value in the PRy register, depending on setup |
+
+## Special Cases for Dual Compare Mode (Single Output Pulse)
+
+### 1. PRy ≥ OCxRS and OCxRS > OCxR
+- **Setup:** OCxR = 0, TMRy = 0
+- **Operation:**
+  - No pulse on first timer cycle; OCx pin stays low.
+  - After TMRy resets (period match), OCx pin goes high at OCxR match.
+  - At next OCxRS match, OCx pin goes low and stays low.
+  - OCxIF interrupt flag set on second compare.
+- **Alternative Initializations:**
+  - TMRy = 0, OCxR ≥ 1
+  - TMRy = PRy (>0), OCxR = 0
+- **Output:** Pulse is delayed by PRy value.
+
+### 2. PRy ≥ OCxR and OCxR ≥ OCxRS
+- **Setup:** OCxR ≥ 1, PRy ≥ 1
+- **Operation:**
+  - TMRy counts to OCxR, OCx pin goes high.
+  - TMRy continues, resets at PRy (period match).
+  - Counts to OCxRS, OCx pin goes low.
+  - OCxIF interrupt flag set on second compare.
+- **Output:** Standard pulse.
+
+### 3. OCxRS > PRy and PRy ≥ OCxR
+- **Setup:** None
+- **Operation:**
+  - Only rising edge generated at OCx pin.
+  - OCxIF interrupt flag not set.
+- **Output:** Pin transitions high (rising edge only).
+
+### 4. OCxR > PRy
+- **Setup:** None
+- **Operation:**
+  - Unsupported mode; timer resets before match.
+- **Output:** Pin remains low.
+
+**Legend:**
+- OCxR: Compare Register
+- OCxRS: Secondary Compare Register
+- PRy: Timer Period Register
+- TMRy: Timer Count
+
+**Note:** TMRy is assumed to be initialized to 0x0000 in all cases.
