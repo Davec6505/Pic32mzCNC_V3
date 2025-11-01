@@ -13,16 +13,7 @@
 #define NEWLINE "\n"
 #endif
 
-/* grbl firmware commands */
-#define FIRMWARE_VERSION "1.1"
-// Macro to convert a macro value to a string literal
-#define STRINGIFY(x) #x
-#define TOSTRING(x) STRINGIFY(x)
 
-// Concatenate GRBL prefix with FIRMWARE_VERSION from gcode_parser.h
-#define GRBL_FIRMWARE_VERSION "GRBL v" FIRMWARE_VERSION NEWLINE
-#define GRBL_BUILD_DATE "Build Date: " __DATE__ NEWLINE
-#define GRBL_BUILD_TIME "Build Time: " __TIME__ NEWLINE
 
 /* definitions for GCODE parsing */
 #define GCODE_BUFFER_SIZE 50
@@ -46,13 +37,12 @@ typedef struct {
 /* GCODE State Machine */
 typedef enum {
     GCODE_STATE_IDLE,
-    GCODE_STATE_PROCESSING,
+    GCODE_STATE_CONTROL_CHAR,
     GCODE_STATE_ERROR
 } GCODE_State;
 
 typedef struct{
     GCODE_State state;
-    GCODE_CommandQueue commandQueue;
 } GCODE_Data;
 
 /* GCODE USART function prototypes */
@@ -61,5 +51,5 @@ typedef struct{
 
 
 void GCODE_USART_Initialize(uint32_t RD_thresholds);
-void GCODE_Tasks(void);
+void GCODE_Tasks(GCODE_CommandQueue* commandQueue);
 #endif // GCODE_PARSER_H

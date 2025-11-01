@@ -48,17 +48,14 @@ APP_DATA appData;
 // *****************************************************************************
 
 /* TODO:  Add any necessary callback functions.
+ * 1) Strip out gcode commands received from UART and add them to the command queue.
+ *    place them in appData.gcodeCommandQueue for processing in APP_Tasks function.
+ *    From there place them into look ahead buffer for execution calculations, like
+ *    acceleration, jerk, junction deviation etc.
+ * 2) 
+ * 
 */
 
-// *****************************************************************************
-// *****************************************************************************
-// Section: Application Local Functions
-// *****************************************************************************
-// *****************************************************************************
-
-
-/* TODO:  Add any necessary local functions.
-*/
 
 
 // *****************************************************************************
@@ -79,6 +76,9 @@ void APP_Initialize ( void )
 {
     /* Initialize the app state to wait for media attach. */
     appData.state = APP_CONFIG;
+
+    memset((void*)&appData.gcodeCommandQueue, 0, sizeof(GCODE_CommandQueue));
+
 }
 
 
@@ -102,14 +102,26 @@ void APP_Tasks ( void )
         case APP_CONFIG:
         {
             GCODE_USART_Initialize(5);
+
+            // Initialize subsystems ONCE during configuration
+            STEPPER_Initialize();                           // Hardware timer setup
+            MOTION_Initialize();                           // Motion planning initialization  
+            KINEMATICS_Initialize(&appData.workCoordinates); // Initialize work coordinates
+            
+
             appData.state = APP_IDLE;
             break;
         }
         case APP_IDLE:
         {
-            /* The application comes here when the demo has completed
-             * successfully. Glow LED. */
-            if(++idle_indicator >= 500000)
+
+            // Only state machines that need continuous execution
+            MOTION_Tasks(appData.motionQueue, &appData.motionQueueHead, 
+                        &appData.motionQueueTail, &appData.motionQueueCount);
+
+
+            /* idle status LED */
+             if(++idle_indicator >= 500000)
             {
                 LED2_Toggle();
                 idle_indicator = 0;
@@ -128,6 +140,6 @@ void APP_Tasks ( void )
         }
     }
         // Always call the GCODE task routine to process incoming GCODE commands
-        GCODE_Tasks();
+        GCODE_Tasks(&appData.gcodeCommandQueue);
 
 } //End of APP_Tasks
