@@ -78,14 +78,18 @@ void APP_Initialize ( void )
     appData.state = APP_CONFIG;
 
     // Initialize all single instances in appData (centralized pattern)
-    memset((void*)&appData.gcodeCommandQueue, 0, sizeof(GCODE_CommandQueue));
     memset((void*)&appData.motionQueue, 0, sizeof(appData.motionQueue));
-
+    appData.motionQueueHead = 0;
+    appData.motionQueueTail = 0;
+    appData.motionQueueCount = 0;
     
     // Initialize motion queue management
-    appData.motionQueueHead = 0;
-    appData.motionQueueTail = 0;  
-    appData.motionQueueCount = 0;
+    
+    memset((void*)&appData.gcodeCommandQueue, 0, sizeof(GCODE_CommandQueue));
+    appData.gcodeCommandQueue.head = 0;
+    appData.gcodeCommandQueue.tail = 0;
+    appData.gcodeCommandQueue.count = 0;
+
 
 }
 
@@ -149,5 +153,32 @@ void APP_Tasks ( void )
     }
         // Always call the GCODE task routine to process incoming GCODE commands
         GCODE_Tasks(&appData.gcodeCommandQueue);
+        
+        // Process G-code events through clean interface (respects APP_DATA abstraction)
+        GCODE_Event event;
+        while (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
+            switch (event.type) {
+                case GCODE_EVENT_LINEAR_MOVE:
+                    // Convert to motion segment using kinematics
+                    // MotionSegment segment;
+                    // KINEMATICS_LinearMove(currentPos, targetPos, event.data.linearMove.feedrate, &segment);
+                    // Add to motion queue through YOUR abstraction layer
+                    // TODO: Implement motion segment queueing
+                    break;
+                    
+                case GCODE_EVENT_SPINDLE_ON:
+                    // Handle spindle control
+                    // SPINDLE_SetSpeed(event.data.spindle.rpm);
+                    break;
+                    
+                case GCODE_EVENT_SET_ABSOLUTE:
+                    // Set coordinate mode
+                    break;
+                    
+                default:
+                    // Handle other events or ignore
+                    break;
+            }
+        }
 
 } //End of APP_Tasks

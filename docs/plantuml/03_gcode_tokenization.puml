@@ -1,0 +1,126 @@
+@startuml tokenization
+title G-Code Event System - Professional Event-Driven Processing
+!theme blueprint
+
+participant "UART2\n(GRBL Input)" as UART
+participant "GCODE_Tasks\n(Main Parser)" as GCODE
+participant "UTILS_Module\n(Tokenizer)" as UTILS
+participant "Command Queue\n(16 Entries)" as QUEUE
+participant "APP_Tasks\n(Your Control)" as APP
+
+== Multi-Command Line Processing ==
+UART -> GCODE : "G90G1X100Y25F1000S200M3\\n"
+note right of UART
+  Complex multi-command line
+  Common in CAM software output
+  No spaces between commands
+end note
+
+GCODE -> GCODE : Store in line buffer
+GCODE -> UTILS : UTILS_TokenizeGcodeLine(line, tokens[], &count)
+
+activate UTILS
+UTILS -> UTILS : Initialize parser state
+UTILS -> UTILS : Scan for G-code patterns
+
+loop For each character in line
+    UTILS -> UTILS : Detect command start (G, M, X, Y, Z, F, S)
+    UTILS -> UTILS : Extract numeric parameter
+    UTILS -> UTILS : Store complete token
+end
+
+UTILS -> UTILS : Validate token completeness
+UTILS -> GCODE : Return token array: ["G90", "G1", "X100", "Y25", "F1000", "S200", "M3"]
+deactivate UTILS
+
+== Individual Command Processing ==
+loop For each token
+    GCODE -> GCODE : Parse individual command
+    GCODE -> QUEUE : Add to gcodeCommandQueue (all commands)
+    note right
+      All commands stored for event processing
+      No execution logic in parser
+    end note
+end
+
+== Event-Driven Processing ==
+APP -> GCODE : Call GCODE_GetNextEvent(&cmdQueue, &event)
+GCODE -> GCODE : Parse command → GCODE_Event structure
+
+alt event.type == GCODE_EVENT_LINEAR_MOVE
+    GCODE -> APP : Return linear move event with coordinates & feedrate
+    APP -> APP : Process through YOUR kinematics & motion queue
+    note right of APP
+      Your APP_DATA abstraction
+      controls all motion processing
+    end note
+end
+
+alt event.type == GCODE_EVENT_SPINDLE_ON
+    GCODE -> APP : Return spindle event with RPM
+    APP -> APP : Control spindle through YOUR interface
+end
+
+alt event.type == GCODE_EVENT_SET_ABSOLUTE
+    GCODE -> APP : Return coordinate mode event
+    APP -> APP : Update coordinate system state
+end
+
+== Flow Control System ==
+APP -> APP : Process events at YOUR pace
+note right of APP
+  ✅ No queue overflow - events consumed on demand
+  ✅ Clean separation: parsing vs execution  
+  ✅ Your abstraction layer preserved
+  ✅ Deterministic real-time processing
+end note
+
+alt Commands processed successfully
+    GCODE -> UART : Send "OK\\n" when appropriate
+else Processing busy
+    GCODE -> GCODE : Natural backpressure through event consumption rate
+end
+
+== Real-Time Character Handling ==
+UART -> GCODE : '?' (Status request)
+GCODE -> UART : "<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000>"
+note right
+  Real-time characters bypass
+  tokenization and queue systems
+end note
+
+UART -> GCODE : '!' (Feed hold)  
+GCODE -> MOTION : Immediate hold command
+GCODE -> UART : "[Hold]\\n"
+
+UART -> GCODE : '~' (Resume)
+GCODE -> MOTION : Resume motion
+GCODE -> UART : "[Resume]\\n"
+
+== Error Handling ==
+alt Invalid token format
+    UTILS -> GCODE : Return error code
+    GCODE -> UART : "error:1\\n" (Expected command letter)
+end
+
+alt Queue overflow attempt
+    GCODE -> UART : Continue withholding "OK"
+    note right
+      Prevents buffer overflow
+      by flow control, not errors
+    end note
+end
+
+== Key Features ==
+note over UART, APP
+  ✅ Professional event-driven architecture  
+  ✅ Clean GCODE_GetNextEvent() interface
+  ✅ Comprehensive G-code support: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91
+  ✅ Zero memory allocation - deterministic processing
+  ✅ APP_DATA abstraction layer fully preserved
+  ✅ Real-time characters bypass normal processing  
+  ✅ GRBL v1.1 protocol compliance with proper status format
+  ✅ Perfect separation of concerns: parsing vs execution
+end note
+
+@enduml

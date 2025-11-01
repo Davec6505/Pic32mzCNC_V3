@@ -4,9 +4,14 @@
 This is a CNC motion control system for PIC32MZ microcontrollers using hardware timers and Bresenham interpolation for precise multi-axis stepper motor control.
 
 ## 🚀 Current Implementation Status (November 2025)
+- ✅ **Professional event-driven G-code system** with clean architecture
+- ✅ **Event queue implementation** respecting APP_DATA abstraction layer
+- ✅ **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91
 - ✅ **Core architecture implemented** with absolute compare mode
 - ✅ **Single instance pattern in appData** for clean separation  
-- ✅ **G-code parser complete** with GRBL protocol compliance
+- ✅ **Utils module complete** with professional string tokenization
+- ✅ **Multi-command line support** for complex G-code like "G90G1X10Y10F1000"
+- ✅ **16-command circular buffer** with flow control and overflow protection
 - ✅ **Kinematics module complete** with physics calculations
 - ✅ **Stepper module complete** with hardware abstraction
 - 🚧 **Motion controller in progress** - Bresenham state machine
@@ -43,6 +48,17 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - **No static module data** - clean separation of concerns  
 - **Pass by reference** through function calls for explicit ownership
 - **Work coordinates protected** by private static in kinematics module
+
+### Professional G-Code Event System ✅
+- **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
+- **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91 commands
+- **Abstraction layer respect**: No APP_DATA exposure, maintains clean boundaries
+- **Multi-command tokenization**: "G90G1X10Y10F1000S200M3" → individual events
+- **Zero memory allocation**: Deterministic processing for real-time systems
+- **Utils module**: Professional string parsing with robust tokenization
+- **Flow control**: 16-command circular buffer with "OK" withholding
+- **Real-time characters**: Bypass tokenization for immediate '?!~^X' processing
+- **GRBL compliance**: Full v1.1 protocol support with proper status reporting
 
 ## Code Style Guidelines
 
@@ -101,6 +117,40 @@ OC3R = OC3RS;  // Z axis stops generating pulses
 // - Arc interpolation when axis doesn't need steps
 // - Bresenham cycles where subordinate axis is inactive
 // - Motion completion or emergency stop scenarios
+```
+
+### G-Code Event Processing Pattern
+```c
+// Professional event-driven processing in APP_Tasks
+GCODE_Event event;
+while (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
+    switch (event.type) {
+        case GCODE_EVENT_LINEAR_MOVE:
+            // Convert to motion segment using kinematics
+            MotionSegment segment;
+            KINEMATICS_LinearMove(currentPos, targetPos, 
+                                event.data.linearMove.feedrate, &segment);
+            
+            // Add to motion queue through YOUR abstraction layer
+            if (appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
+                memcpy(&appData.motionQueue[appData.motionQueueHead], 
+                       &segment, sizeof(MotionSegment));
+                appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+                appData.motionQueueCount++;
+            }
+            break;
+            
+        case GCODE_EVENT_SPINDLE_ON:
+            // Handle spindle control through your interfaces
+            SPINDLE_SetSpeed(event.data.spindle.rpm);
+            break;
+            
+        case GCODE_EVENT_ARC_MOVE:
+            // Handle arc interpolation
+            // Use event.data.arcMove for center, target, direction
+            break;
+    }
+}
 ```
 
 ## Important Constraints
@@ -168,11 +218,12 @@ When implementing velocity profiling in the future:
 - `srcs/main.c` - Entry point, main loop calls APP_Tasks()
 - `srcs/app.c` - Application state machine (single instance pattern)
 - `srcs/gcode/gcode_parser.c` - G-code parsing & GRBL protocol ✅
+- `srcs/gcode/utils.c` - Professional string tokenization utilities ✅
 - `srcs/motion/stepper.c` - Hardware abstraction layer ✅  
 - `srcs/motion/motion.c` - Master motion controller 🚧
 - `srcs/motion/kinematics.c` - Physics calculations ✅
 - `incs/common.h` - Shared constants and enums
-- `docs/plantuml/` - Architecture diagrams
+- `docs/plantuml/` - Architecture diagrams (includes tokenization flow)
 - `README.md` - Complete architecture documentation
 
 ## Development Workflow

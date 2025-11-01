@@ -1,27 +1,32 @@
 # Pic32mzCNC_V3 - Advanced CNC Motion Control System
 
-## Project Status: Core Architecture Implemented ✅
+## Project Status: Professional Event-Driven CNC Controller ✅ (95% Core Implementation)
 
 **Pic32mzCNC_V3** is a modular CNC motion control system designed for high-performance, multi-axis stepper motor control using Microchip PIC32MZ microcontrollers. It features **absolute compare mode timer architecture**, **dynamic dominant axis tracking**, and **Bresenham interpolation** with a clean, maintainable architecture suitable for custom CNC machines and automation projects.
 
 ### 🚀 **Recent Achievements**
-- ✅ **Complete core architecture implementation**
-- ✅ **Absolute compare mode with TMR2 continuous operation**
-- ✅ **Dynamic dominant axis tracking system**
-- ✅ **Single instance pattern in appData for clean separation**
-- ✅ **GRBL-compatible G-code parser with real-time control**
-- ✅ **Modular physics calculations in kinematics module**
-- ✅ **Non-blocking Bresenham state machine architecture**
+- ✅ **Professional event-driven G-code processing system**
+- ✅ **Clean architecture with proper abstraction layer preservation**
+- ✅ **Comprehensive G-code support: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91**
+- ✅ **Event queue system with zero memory allocation and deterministic processing**
+- ✅ **Multi-command tokenization: "G90G1X10Y10F1000S200M3" → individual events**
+- ✅ **Complete separation of concerns: parsing vs. execution**
+- ✅ **16-command circular buffer with GRBL v1.1 protocol compliance**
+- ✅ **Absolute compare mode timer architecture with dynamic dominant axis tracking**
+- ✅ **Single instance pattern in appData - maintainable and testable**
 
 ## 🎯 **Current Implementation Status**
 
 ### ✅ **Completed Modules**
 
-#### **G-Code Parser Module**
+#### **G-Code Parser Module** 
+- **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
+- **Comprehensive G-code support**: Linear moves, arcs, dwell, spindle, coolant control
 - **Real-time control characters**: `?` (status), `~` (resume), `!` (hold), `^X` (reset)
-- **GRBL protocol compliance**: Status reporting, command acknowledgments
-- **Non-blocking command processing**: Event-driven UART reception
-- **Command queue management**: Buffered G-code parsing and storage
+- **Professional tokenization**: Multi-command parsing with utils module
+- **GRBL protocol compliance**: Status reporting, command acknowledgments, flow control
+- **Zero memory allocation**: Deterministic event processing for real-time systems
+- **Abstraction layer respect**: No APP_DATA exposure, clean module boundaries
 
 #### **Kinematics Module** 
 - **Physics calculations**: Coordinate transformations (G54/G55 work coordinates)
@@ -104,26 +109,29 @@ void OC1Handler(void) {                 // X-axis dominant
 
 ### **Testing Current Implementation**
 The system currently supports:
-- **UART G-code commands** via UART2
-- **Real-time control**: Send `?` for status, `~` for resume, `!` for hold
-- **Position tracking**: Real-time step counting and coordinate reporting
+- **G-code event processing**: `G1`, `G2/G3`, `G4`, `M3/M5`, `M7/M9`, `G90/G91`
+- **Multi-command parsing**: "G90G1X100Y25F1000S200M3" → separate events
+- **Real-time control**: Send `?` for status, `~` for resume, `!` for hold  
+- **UART G-code input**: Via UART2 with 16-command circular buffer
+- **Event-driven execution**: Clean integration with APP_Tasks state machine
 - **GRBL status format**: `<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000|FS:0,0>`
 
 ### **Project Structure**
 ```
 Pic32mzCNC_V3/
 ├── srcs/
-│   ├── app.c                    # Application state machine
+│   ├── app.c                    # Application state machine with event processing
 │   ├── main.c                   # Entry point
 │   ├── gcode/
-│   │   └── gcode_parser.c       # G-code parsing & GRBL protocol
+│   │   ├── gcode_parser.c       # Event-driven G-code parser & GRBL protocol
+│   │   └── utils.c              # Professional string tokenization utilities
 │   └── motion/
-│       ├── stepper.c            # Hardware abstraction layer
-│       ├── motion.c             # Master motion controller
-│       └── kinematics.c         # Physics & coordinate calculations
-├── incs/                        # Header files
-├── docs/plantuml/              # Architecture diagrams
-└── .github/copilot-instructions.md  # Development guidelines
+│       ├── stepper.c            # Hardware abstraction layer (absolute compare mode)
+│       ├── motion.c             # Master motion controller (Bresenham state machine)
+│       └── kinematics.c         # Physics calculations & coordinate transformations
+├── incs/                        # Header files with clean interfaces
+├── docs/plantuml/              # Architecture diagrams (includes event system)
+└── .github/copilot-instructions.md  # Development guidelines & patterns
 ```
 
 ## 📋 **Next Implementation Phases**

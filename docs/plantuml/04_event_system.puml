@@ -1,0 +1,120 @@
+@startuml event_system
+title G-Code Event System Architecture - Clean Abstraction Layer Respect
+!theme blueprint
+
+participant "UART2\n(G-code Input)" as UART
+participant "GCODE_Tasks\n(Parser)" as GCODE
+participant "APP_Tasks\n(Your Control)" as APP
+participant "Motion Queue\n(appData)" as MOTION
+participant "Kinematics\n(Physics)" as KINEMATICS
+participant "Stepper\n(Hardware)" as STEPPER
+
+== Event System Overview ==
+note over UART, STEPPER
+  ✅ Clean Architecture: Parser never touches APP_DATA
+  ✅ Event-Driven: GCODE_GetNextEvent() is only interface  
+  ✅ Your Control: APP_Tasks routes all events through YOUR abstraction
+  ✅ Professional: Zero memory allocation, deterministic processing
+end note
+
+== G-Code Reception & Parsing ==
+UART -> GCODE : "G90G1X100Y25F1000S200M3\\n"
+GCODE -> GCODE : Tokenize → ["G90", "G1X100Y25F1000", "S200", "M3"]
+GCODE -> GCODE : Store in gcodeCommandQueue (16-command buffer)
+note right of GCODE
+  Parser focuses purely on parsing
+  No execution logic or APP_DATA access
+  Clean separation of concerns
+end note
+
+== Event Processing Loop ==
+APP -> GCODE : GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)
+
+activate GCODE
+GCODE -> GCODE : Parse next command → GCODE_Event structure
+alt Command: "G90"
+    GCODE -> APP : event.type = GCODE_EVENT_SET_ABSOLUTE
+end
+deactivate GCODE
+
+APP -> APP : Update coordinate mode in YOUR state management
+note right of APP
+  Your abstraction layer
+  controls all state
+end note
+
+APP -> GCODE : GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)
+activate GCODE
+alt Command: "G1X100Y25F1000"
+    GCODE -> GCODE : Extract coordinates & feedrate
+    GCODE -> APP : event.type = GCODE_EVENT_LINEAR_MOVE\\nevent.data.linearMove = {x:100, y:25, z:0, a:0, feedrate:1000}
+end
+deactivate GCODE
+
+== Your Motion Processing ==
+APP -> KINEMATICS : KINEMATICS_LinearMove(currentPos, event.data.linearMove, &segment)
+KINEMATICS -> KINEMATICS : Physics calculations, Bresenham parameters
+KINEMATICS -> APP : Return MotionSegment
+
+APP -> APP : Add to YOUR motion queue through YOUR abstraction
+note right of APP
+  if (appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
+      memcpy(&appData.motionQueue[appData.motionQueueHead], 
+             &segment, sizeof(MotionSegment));
+      appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+      appData.motionQueueCount++;
+  }
+end note
+
+== Auxiliary Command Processing ==
+APP -> GCODE : GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)
+activate GCODE
+alt Command: "S200"  
+    GCODE -> APP : event.type = GCODE_EVENT_SPINDLE_ON\\nevent.data.spindle.rpm = 200
+end
+deactivate GCODE
+
+APP -> APP : Handle spindle control through YOUR interfaces
+note right of APP
+  SPINDLE_SetSpeed(event.data.spindle.rpm);
+  Your hardware control layer
+end note
+
+APP -> GCODE : GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)
+activate GCODE
+alt Command: "M3"
+    GCODE -> APP : event.type = GCODE_EVENT_SPINDLE_ON\\n(RPM from previous S command)
+end  
+deactivate GCODE
+
+== Motion Execution (Your Existing System) ==
+APP -> MOTION : Process segments from appData.motionQueue
+MOTION -> STEPPER : Execute via absolute compare mode
+STEPPER -> STEPPER : TMR2-based pulse generation
+note right of STEPPER
+  Your existing motion system
+  unchanged and unaffected
+end note
+
+== Event System Benefits ==
+note over UART, STEPPER
+  🏆 **Architecture Benefits:**
+  • Perfect abstraction layer preservation
+  • APP_DATA can evolve without breaking parser
+  • Clean testable interfaces
+  • Professional separation of concerns
+  
+  🚀 **Performance Benefits:**  
+  • Zero memory allocation
+  • Deterministic processing time
+  • Real-time system compatibility
+  • Event consumption at YOUR pace
+  
+  🔧 **Maintenance Benefits:**
+  • Easy to add new G-code commands
+  • Independent module testing  
+  • Clear debugging boundaries
+  • Future-proof architecture
+end note
+
+@enduml

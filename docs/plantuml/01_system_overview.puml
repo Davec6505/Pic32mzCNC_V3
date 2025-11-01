@@ -3,6 +3,7 @@ title CNC Motion Control - Current Implementation Status (November 2025)
 !theme blueprint
 
 participant "GCODE_Tasks\n(✅ Complete)" as GCODE
+participant "UTILS_Module\n(✅ Complete)" as UTILS  
 participant "KINEMATICS\n(✅ Complete)" as KINEMATICS
 participant "MOTION_Tasks\n(🚧 In Progress)" as MOTION
 participant "TMR2\n(Free-Running)" as TMR2
@@ -13,13 +14,37 @@ participant "OC4 ISR\n(A Axis)" as OC4
 participant "Bresenham\nState Machine" as Bresenham
 
 == Current Implementation Flow ==
-GCODE -> GCODE : Parse G01 X100 Y25 Z10 F1000
-GCODE -> GCODE : Extract command to gcodeCommandQueue (✅)
-GCODE -> KINEMATICS : Call KINEMATICS_LinearMove()
-KINEMATICS -> KINEMATICS : Convert work → machine coordinates (✅)
-KINEMATICS -> KINEMATICS : Calculate Bresenham parameters (✅)
-KINEMATICS -> KINEMATICS : Determine dominant axis = X (highest Δ) (✅)
-KINEMATICS -> MOTION : Return pre-calculated MotionSegment
+GCODE -> GCODE : Receive "G90G1X100Y25F1000S200M3" (multi-command line)
+GCODE -> UTILS : Call UTILS_TokenizeGcodeLine()
+UTILS -> UTILS : Split into tokens: ["G90", "G1", "X100", "Y25", "F1000", "S200", "M3"]
+UTILS -> GCODE : Return tokenized commands
+GCODE -> GCODE : Store commands in gcodeCommandQueue (✅)
+note right of GCODE
+  ✅ Commands ready for event processing
+  ✅ Clean separation: parsing vs execution
+  ✅ APP_DATA abstraction layer preserved
+end note
+== Event-Driven Processing in APP_Tasks ==
+participant "APP_Tasks" as APP
+APP -> GCODE : Call GCODE_GetNextEvent(&cmdQueue, &event)
+GCODE -> GCODE : Parse next command to GCODE_Event
+GCODE -> APP : Return event (G1, G90, M3, etc.)
+
+APP -> APP : Process event through APP_DATA abstraction
+note right of APP
+  ✅ Event-driven architecture
+  ✅ Clean interface: GCODE_GetNextEvent()
+  ✅ Your APP_DATA controls all routing
+  ✅ Separation of concerns maintained
+end note
+
+alt event.type == GCODE_EVENT_LINEAR_MOVE
+    APP -> KINEMATICS : Convert coordinates using event data
+    KINEMATICS -> KINEMATICS : Calculate Bresenham parameters (✅)
+    KINEMATICS -> KINEMATICS : Determine dominant axis = X (highest Δ) (✅)
+    KINEMATICS -> APP : Return pre-calculated MotionSegment
+    APP -> APP : Add to appData.motionQueue through YOUR abstraction
+end
 MOTION -> TMR2 : Initialize TMR2 continuous operation (✅)
 note right of TMR2
   ✅ TMR2 runs continuously at 10µs/tick

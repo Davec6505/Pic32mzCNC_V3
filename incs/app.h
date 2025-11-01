@@ -1,4 +1,3 @@
-
 #ifndef APP_H
 #define APP_H
 
@@ -93,12 +92,9 @@ typedef struct
     /* The application's current state */
     APP_STATES state;
 
-    /* TODO: Define any additional data used by the application. */
-    
-    // Single instances of all major data structures (centralized pattern)
+    // Single instances following single instance pattern in appData
     GCODE_CommandQueue gcodeCommandQueue;           // G-code command processing
-    MotionSegment motionQueue[MAX_MOTION_SEGMENTS];                          // Motion planning segments
-  
+    MotionSegment motionQueue[MAX_MOTION_SEGMENTS]; // Motion planning segments  
     
     // Motion queue management
     uint32_t motionQueueHead;     // Next segment to write

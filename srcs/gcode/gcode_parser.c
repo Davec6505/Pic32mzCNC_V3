@@ -1,3 +1,19 @@
+/*
+ * All G-code command prefixes that UGS sends:
+ * - G commands: G0, G1, G2, G3, G4, G10, G17, G18, G19, G20, G21, G28, G30, G38.x, G43, G49, G53, G54-G59, G80, G90, G91, G92, G93, G94
+ * - M commands: M0, M1, M2, M3, M4, M5, M7, M8, M9, M30
+ * - S commands: S1000 (spindle speed)
+ * - F commands: F1000 (feed rate)
+ * - T commands: T1 (tool select)
+ * - P commands: P0.5 (dwell time for G4)
+ * - Coordinate commands: X10 Y20 Z5 (modal coordinate moves)
+ * - Comment lines: (This is a comment)
+ * - Empty lines: Just whitespace and line terminators
+ 
+ */
+
+
+
 #include <stddef.h>                     // Defines NULL
 #include <stdbool.h>                    // Defines true
 #include <stdlib.h>                     // Defines EXIT_FAILURE
@@ -9,7 +25,8 @@
 #include "stepper.h"
 #include "motion.h"
 #include "kinematics.h"
-
+#include "utils.h"
+// Note: APP_DATA structure access available through parameter - no include needed
 
 /* USART Buffers */
 static uint8_t txBuffer[128];
@@ -23,8 +40,15 @@ GCODE_Data gcodeData = {
     .state = GCODE_STATE_IDLE,
 };
 
+
+/* local scope prototypes */
 void usartReadEventHandler(UART_EVENT event, uintptr_t context );
 void usartWriteEventHandler(UART_EVENT event, uintptr_t context );
+GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t length, GCODE_CommandQueue* commandQueue);
+void GCODE_ProcessQueuedCommand(GCODE_CommandQueue* cmdQueue);
+CoordinatePoint parse_coordinate_values(const char* command);
+float parse_feedrate(const char* command);
+bool parse_command_to_event(const char* command, GCODE_Event* event);
 
 const char GRBL_CONTROL_CHARS[] = {'?', '~', 0x18, '!', 0x84, '$'}; // add more as needed
 
@@ -97,58 +121,99 @@ void GCODE_USART_Initialize( uint32_t RD_thresholds)
 }
 
 
+/* @brief Extract G-code command line from buffer and queue it
+ * @param buffer Pointer to input buffer containing G-code line
+ * @param length Length of the input buffer
+ * @param commandQueue Pointer to GCODE_CommandQueue to store parsed commands
+ * @return Pointer to updated GCODE_CommandQueue
+ */
+
 GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t length, GCODE_CommandQueue* commandQueue)
 {
     GCODE_CommandQueue* cmdQueue = commandQueue;
-    uint32_t cmdStart = 0;
-
-    for(uint32_t j = 0; j < length; j++){
-        // Skip whitespace at start of potential command
-        if(buffer[j] == ' ' || buffer[j] == '\t'){
-            cmdStart = j + 1;
+    
+    // Null-terminate buffer for string processing
+    char line_buffer[256];
+    uint32_t safe_length = (length < sizeof(line_buffer) - 1) ? length : sizeof(line_buffer) - 1;
+    memcpy(line_buffer, buffer, safe_length);
+    line_buffer[safe_length] = '\0';
+    
+    // Tokenize the line using utils
+    TokenArray tokens;
+    uint32_t token_count = UTILS_TokenizeGcodeLine(line_buffer, &tokens);
+    
+    // Add each token to the command queue
+    for (uint32_t i = 0; i < token_count; i++) {
+        // Skip empty tokens and comments
+        if (UTILS_IsEmptyString(tokens.tokens[i]) || UTILS_IsComment(tokens.tokens[i])) {
             continue;
         }
         
-        // Check for G or M command start
-        if(buffer[j] == 'G' || buffer[j] == 'M'){
-            cmdStart = j;  // Mark start of this command
-            
-            // Find end of current command (next G/M or line terminator)
-            uint32_t cmdEnd = j + 1;
-            while(cmdEnd < length && 
-                    buffer[cmdEnd] != 'G' && 
-                    buffer[cmdEnd] != 'M' && 
-                    buffer[cmdEnd] != '\n' && 
-                    buffer[cmdEnd] != '\r' &&
-                    buffer[cmdEnd] != ';' &&
-                    buffer[cmdEnd] != '#' &&
-                    buffer[cmdEnd] != '\0') { // also stop at comment char
-                cmdEnd++;   
+        // Check if queue has space (circular buffer protection)
+        if (((cmdQueue->head + 1) % GCODE_MAX_COMMANDS) != cmdQueue->tail) {
+            // Copy token to queue
+            uint32_t token_len = UTILS_SafeStrlen(tokens.tokens[i], GCODE_BUFFER_SIZE - 1);
+            if (token_len > 0) {
+                memcpy(cmdQueue->commands[cmdQueue->head].command, 
+                       tokens.tokens[i], token_len);
+                cmdQueue->commands[cmdQueue->head].command[token_len] = '\0';
+                
+                // Advance queue
+                cmdQueue->head = (cmdQueue->head + 1) % GCODE_MAX_COMMANDS;
+                cmdQueue->count++;
             }
-            
-            // Copy command to queue if there's space
-            if(((cmdQueue->head + 1) % GCODE_MAX_COMMANDS) != cmdQueue->tail){
-                uint32_t cmdLen = cmdEnd - cmdStart;
-                if(cmdLen < GCODE_BUFFER_SIZE){
-                    memcpy(cmdQueue->commands[cmdQueue->head].command, 
-                            &buffer[cmdStart], cmdLen);
-                    cmdQueue->commands[cmdQueue->head].command[cmdLen] = '\0';
-                    cmdQueue->head = (cmdQueue->head + 1) % GCODE_MAX_COMMANDS;
-                }
-            }
-            
-            // Move to end of this command for next iteration
-            j = cmdEnd - 1;  // -1 because for loop will increment
-            continue;
         }
-
-        if((buffer[j] == '\n') || (buffer[j] == '\r' || buffer[j] == '\0')){
-            break;
-        }
+        // Note: If queue full, remaining tokens are dropped (GRBL behavior)
     }
+    
     return cmdQueue;
 }
 
+
+/* @brief Process G-code commands from the queue
+ * @param cmdQueue Pointer to GCODE_CommandQueue
+ * Post process queued gcode commands from UGS
+ * @return void
+ */
+
+void GCODE_ProcessQueuedCommand(GCODE_CommandQueue* cmdQueue)
+{
+    // Legacy function - deprecated in favor of GCODE_GetNextEvent()
+    // Keeping for backward compatibility during transition
+    if (cmdQueue->count == 0) return;
+    
+    // Simply remove command from queue - event processing handles parsing
+    cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
+    cmdQueue->count--;
+}
+
+/* @brief Get next G-code event from command queue
+ * @param cmdQueue Pointer to GCODE_CommandQueue
+ * @param event Pointer to GCODE_Event to populate
+ * @return true if event available, false if queue empty
+ * Clean interface - no APP_DATA exposure, respects abstraction layer
+ */
+bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
+{
+    if (!cmdQueue || !event || cmdQueue->count == 0) {
+        return false;
+    }
+    
+    // Get next command from queue
+    GCODE_Command* current_cmd = &cmdQueue->commands[cmdQueue->tail];
+    
+    // Parse command into event
+    bool event_valid = parse_command_to_event(current_cmd->command, event);
+    
+    if (event_valid) {
+        // Remove processed command from queue
+        cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
+        cmdQueue->count--;
+        return true;
+    }
+    
+    return false;
+}
 
 void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
 {
@@ -160,9 +225,12 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
     case GCODE_STATE_IDLE:
         /* check if command has been recieved */
         nBytesAvailable = UART2_ReadCountGet();
+
         if(nBytesAvailable > 0){
+            // Read all bytes from ring buffer.
            nBytesRead = UART2_Read((uint8_t*)&rxBuffer[nBytesRead], nBytesAvailable);  
-            // We need to check the 1st char for control characters like ?,~,^X,!,etc.
+           
+           // We need to check the 1st char for control characters like ?,~,^X,!,etc.
             for(uint16_t i=0; i<sizeof(GRBL_CONTROL_CHARS); i++){
                 if(rxBuffer[0] == GRBL_CONTROL_CHARS[i]){
                     gcodeData.state = GCODE_STATE_CONTROL_CHAR;
@@ -174,9 +242,19 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             // Process the buffer as G-code (null-terminated string)
             cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
          
-            // Send acknowledgment for G-code line
-            UART2_Write((uint8_t*)"OK\r\n", 4);
+           // 🎯 EVENT PROCESSING - Commands ready for processing
+            // Events will be consumed by APP_Tasks via GCODE_GetNextEvent()
+            // This maintains clean separation between parsing and execution
 
+            // Send acknowledgment for next gcode line, stop if buffer is full
+            // wait for free space.
+            if(cmdQueue->count < GCODE_MAX_COMMANDS - 1){
+                     UART2_Write((uint8_t*)"OK\r\n", 4);
+            } else {
+                // Buffer full, do not send OK, wait for space
+            }
+
+            // reset rxBuffer for next line
             nBytesRead = 0; 
             memset(rxBuffer, 0, sizeof(rxBuffer));
             // If line not complete, keep accumulating in rxBuffer
@@ -246,4 +324,153 @@ case GCODE_STATE_CONTROL_CHAR:
     default:
         break;
     }
+}
+
+/* Parse coordinate values from G-code command
+ * @param command G-code command string
+ * @return CoordinatePoint with extracted values
+ */
+CoordinatePoint parse_coordinate_values(const char* command)
+{
+    CoordinatePoint coords = {0.0f, 0.0f, 0.0f, 0.0f};  // Initialize to zero
+    
+    char* x_ptr = strstr(command, "X");
+    char* y_ptr = strstr(command, "Y"); 
+    char* z_ptr = strstr(command, "Z");
+    char* a_ptr = strstr(command, "A");
+    
+    if (x_ptr) coords.x = atof(x_ptr + 1);
+    if (y_ptr) coords.y = atof(y_ptr + 1);
+    if (z_ptr) coords.z = atof(z_ptr + 1);
+    if (a_ptr) coords.a = atof(a_ptr + 1);
+    
+    return coords;
+}
+
+/* Parse feedrate from G-code command  
+ * @param command G-code command string
+ * @return Feedrate value in units/min
+ */
+float parse_feedrate(const char* command)
+{
+    char* f_ptr = strstr(command, "F");
+    if (f_ptr) {
+        return atof(f_ptr + 1);
+    }
+    return 0.0f;  // Default feedrate if not specified
+}
+
+/* Parse G-code command into event structure
+ * @param command G-code command string
+ * @param event Pointer to GCODE_Event to populate
+ * @return true if command parsed successfully, false otherwise
+ */
+bool parse_command_to_event(const char* command, GCODE_Event* event)
+{
+    if (!command || !event) {
+        return false;
+    }
+    
+    // Initialize event
+    event->type = GCODE_EVENT_NONE;
+    
+    // Parse G-code commands
+    if (strstr(command, "G90")) {
+        event->type = GCODE_EVENT_SET_ABSOLUTE;
+        return true;
+    }
+    else if (strstr(command, "G91")) {
+        event->type = GCODE_EVENT_SET_RELATIVE;
+        return true;
+    }
+    else if (strstr(command, "G1") || strstr(command, "G01")) {
+        // Linear motion command
+        event->type = GCODE_EVENT_LINEAR_MOVE;
+        
+        // Extract coordinates
+        CoordinatePoint coords = parse_coordinate_values(command);
+        event->data.linearMove.x = coords.x;
+        event->data.linearMove.y = coords.y;
+        event->data.linearMove.z = coords.z;
+        event->data.linearMove.a = coords.a;
+        
+        // Extract feedrate
+        event->data.linearMove.feedrate = parse_feedrate(command);
+        
+        return true;
+    }
+    else if (strstr(command, "G2") || strstr(command, "G02")) {
+        // Clockwise arc
+        event->type = GCODE_EVENT_ARC_MOVE;
+        event->data.arcMove.clockwise = true;
+        
+        // Extract coordinates
+        CoordinatePoint coords = parse_coordinate_values(command);
+        event->data.arcMove.x = coords.x;
+        event->data.arcMove.y = coords.y;
+        event->data.arcMove.z = coords.z;
+        event->data.arcMove.a = coords.a;
+        
+        // Extract arc center (I, J parameters)
+        char* i_ptr = strstr(command, "I");
+        char* j_ptr = strstr(command, "J");
+        event->data.arcMove.centerX = i_ptr ? atof(i_ptr + 1) : 0.0f;
+        event->data.arcMove.centerY = j_ptr ? atof(j_ptr + 1) : 0.0f;
+        
+        event->data.arcMove.feedrate = parse_feedrate(command);
+        return true;
+    }
+    else if (strstr(command, "G3") || strstr(command, "G03")) {
+        // Counter-clockwise arc
+        event->type = GCODE_EVENT_ARC_MOVE;
+        event->data.arcMove.clockwise = false;
+        
+        // Extract coordinates  
+        CoordinatePoint coords = parse_coordinate_values(command);
+        event->data.arcMove.x = coords.x;
+        event->data.arcMove.y = coords.y;
+        event->data.arcMove.z = coords.z;
+        event->data.arcMove.a = coords.a;
+        
+        // Extract arc center
+        char* i_ptr = strstr(command, "I");
+        char* j_ptr = strstr(command, "J");
+        event->data.arcMove.centerX = i_ptr ? atof(i_ptr + 1) : 0.0f;
+        event->data.arcMove.centerY = j_ptr ? atof(j_ptr + 1) : 0.0f;
+        
+        event->data.arcMove.feedrate = parse_feedrate(command);
+        return true;
+    }
+    else if (strstr(command, "G4") || strstr(command, "G04")) {
+        // Dwell command
+        event->type = GCODE_EVENT_DWELL;
+        char* p_ptr = strstr(command, "P");
+        event->data.dwell.seconds = p_ptr ? atof(p_ptr + 1) : 0.0f;
+        return true;
+    }
+    else if (strstr(command, "M3") || strstr(command, "M03")) {
+        // Spindle on clockwise
+        event->type = GCODE_EVENT_SPINDLE_ON;
+        char* s_ptr = strstr(command, "S");
+        event->data.spindle.rpm = s_ptr ? (uint32_t)atoi(s_ptr + 1) : 1000;
+        return true;
+    }
+    else if (strstr(command, "M5") || strstr(command, "M05")) {
+        // Spindle off
+        event->type = GCODE_EVENT_SPINDLE_OFF;
+        return true;
+    }
+    else if (strstr(command, "M7") || strstr(command, "M07")) {
+        // Coolant on
+        event->type = GCODE_EVENT_COOLANT_ON;
+        return true;
+    }
+    else if (strstr(command, "M9") || strstr(command, "M09")) {
+        // Coolant off
+        event->type = GCODE_EVENT_COOLANT_OFF;
+        return true;
+    }
+    
+    // Command not recognized or not implemented
+    return false;
 }
