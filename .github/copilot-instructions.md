@@ -3,6 +3,15 @@
 ## Project Overview
 This is a CNC motion control system for PIC32MZ microcontrollers using hardware timers and Bresenham interpolation for precise multi-axis stepper motor control.
 
+## 🚀 Current Implementation Status (November 2025)
+- ✅ **Core architecture implemented** with absolute compare mode
+- ✅ **Single instance pattern in appData** for clean separation  
+- ✅ **G-code parser complete** with GRBL protocol compliance
+- ✅ **Kinematics module complete** with physics calculations
+- ✅ **Stepper module complete** with hardware abstraction
+- 🚧 **Motion controller in progress** - Bresenham state machine
+- ✅ **Project compiles successfully** with XC32 compiler
+
 ## Core Architecture Principles
 
 ### Timer Architecture
@@ -23,11 +32,17 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - **Subordinate axes** scheduled on-demand only when Bresenham requires a step
 - **Dominant axis can swap** mid-motion by changing which OCx tracks ahead
 
-### Bresenham Integration
+### Bresenham Integration  
 - Bresenham algorithm runs in **state machine**, NOT in ISR
 - ISRs are minimal: clear flag, schedule next pulse, exit
 - Error term updates happen in main loop or state machine
 - Subordinate axis scheduling based on error accumulation
+
+### Single Instance Pattern in appData ✅
+- **All major data structures** centralized in APP_DATA struct
+- **No static module data** - clean separation of concerns  
+- **Pass by reference** through function calls for explicit ownership
+- **Work coordinates protected** by private static in kinematics module
 
 ## Code Style Guidelines
 
@@ -151,8 +166,12 @@ When implementing velocity profiling in the future:
 
 ## File Organization
 - `srcs/main.c` - Entry point, main loop calls APP_Tasks()
-- `srcs/app.c` - Application state machine
-- `incs/gcode/gcode_parser.h` - G-code parsing definitions
+- `srcs/app.c` - Application state machine (single instance pattern)
+- `srcs/gcode/gcode_parser.c` - G-code parsing & GRBL protocol ✅
+- `srcs/motion/stepper.c` - Hardware abstraction layer ✅  
+- `srcs/motion/motion.c` - Master motion controller 🚧
+- `srcs/motion/kinematics.c` - Physics calculations ✅
+- `incs/common.h` - Shared constants and enums
 - `docs/plantuml/` - Architecture diagrams
 - `README.md` - Complete architecture documentation
 
@@ -168,6 +187,13 @@ When implementing velocity profiling in the future:
 - Use state machines for complex logic, not interrupts
 - Respect the dominant/subordinate axis architecture
 - Consider dynamic axis swapping capability
+
+## Questions to Ask
+When uncertain about implementation details:
+- "Is this the dominant or subordinate axis?"
+- "Should this logic run in ISR or state machine?"
+- "Are we using absolute or relative timer values?"
+- "Does this require scheduling ahead of TMR2?"
 
 ## Questions to Ask
 When uncertain about implementation details:

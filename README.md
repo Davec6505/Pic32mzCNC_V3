@@ -1,37 +1,156 @@
-# Project Introduction
-Pic32mzCNC_V3 is a modular CNC motion control system designed for high-performance, multi-axis stepper motor control using Microchip PIC32MZ microcontrollers. It features precise pulse scheduling, Bresenham interpolation, and a flexible architecture suitable for custom CNC machines and automation projects.
+# Pic32mzCNC_V3 - Advanced CNC Motion Control System
+
+## Project Status: Core Architecture Implemented ✅
+
+**Pic32mzCNC_V3** is a modular CNC motion control system designed for high-performance, multi-axis stepper motor control using Microchip PIC32MZ microcontrollers. It features **absolute compare mode timer architecture**, **dynamic dominant axis tracking**, and **Bresenham interpolation** with a clean, maintainable architecture suitable for custom CNC machines and automation projects.
+
+### 🚀 **Recent Achievements**
+- ✅ **Complete core architecture implementation**
+- ✅ **Absolute compare mode with TMR2 continuous operation**
+- ✅ **Dynamic dominant axis tracking system**
+- ✅ **Single instance pattern in appData for clean separation**
+- ✅ **GRBL-compatible G-code parser with real-time control**
+- ✅ **Modular physics calculations in kinematics module**
+- ✅ **Non-blocking Bresenham state machine architecture**
+
+## 🎯 **Current Implementation Status**
+
+### ✅ **Completed Modules**
+
+#### **G-Code Parser Module**
+- **Real-time control characters**: `?` (status), `~` (resume), `!` (hold), `^X` (reset)
+- **GRBL protocol compliance**: Status reporting, command acknowledgments
+- **Non-blocking command processing**: Event-driven UART reception
+- **Command queue management**: Buffered G-code parsing and storage
+
+#### **Kinematics Module** 
+- **Physics calculations**: Coordinate transformations (G54/G55 work coordinates)
+- **Motion segment generation**: Pre-calculated Bresenham parameters
+- **Dominant axis determination**: Dynamic selection based on highest step count
+- **Protected coordinate management**: Private static work coordinate system
+
+#### **Stepper Module**
+- **Hardware abstraction**: OCx register management with absolute compare mode
+- **Position tracking**: Real-time step counting in ISRs
+- **Pulse generation control**: TMR2-based absolute timer scheduling
+- **Axis disabling**: `OCxR = OCxRS` for clean pulse stopping
+
+#### **Motion Controller** (In Progress)
+- **Master execution engine**: Bresenham interpolation state machine 
+- **Non-blocking execution**: State-based segment processing
+- **Absolute timer integration**: OCx scheduling with TMR2 values
+- **Segment management**: Smooth transitions between motion segments
+
+### 🏗️ **Architecture Highlights**
+
+#### **Single Instance Pattern in appData**
+```c
+APP_DATA appData = {
+    .gcodeCommandQueue = {...},     // Single G-code command queue
+    .motionQueue = {...},           // Single motion segment array  
+    .motionQueueHead/Tail/Count     // Centralized queue management
+};
+```
+
+#### **Absolute Compare Mode Timer Architecture**
+```c
+// All timer values are absolute TMR2 counts
+uint32_t now = TMR2;                    // Read current timer
+OC1R = now + step_interval;             // ABSOLUTE schedule ahead
+OC1RS = OC1R + pulse_width;             // ABSOLUTE pulse width
+```
+
+#### **Dynamic Dominant Axis Tracking**
+```c
+// Dominant axis (highest step count) tracks continuously
+void OC1Handler(void) {                 // X-axis dominant
+    IFS0CLR = _IFS0_OC1IF_MASK;         // Clear flag FIRST
+    uint32_t now = TMR2;
+    OC1R = now + step_interval;         // Schedule next pulse ahead
+    steps_completed++;                  // Update position
+}
+```
 
 ## Hardware & Toolchain Requirements
-- **Microcontroller:** Microchip PIC32MZ (e.g., PIC32MZ2048EFH100)
-- **Development Tools:** MPLAB X IDE, XC32 Compiler
-- **Supported Platforms:** Custom CNC hardware with stepper drivers
-- **Other:** Standard build environment with `make` utility
+- **Microcontroller:** Microchip PIC32MZ2048EFH100
+- **Timer System:** TMR2/TMR3 32-bit pair @ 10µs resolution
+- **Output Compare:** OC1 (X), OC2 (Y), OC3 (Z), OC4 (A) axes
+- **Development Tools:** MPLAB X IDE, XC32 Compiler v4.x
+- **Communication:** UART2 for G-code commands (GRBL compatible)
+- **Build System:** Make utility for modular compilation
 
-## Quick Start / Build Instructions
-1. Clone the repository:
-  ```sh
-  git clone https://github.com/Davec6505/Pic32mzCNC_V3.git
-  
-2. Build the project:
-  ```sh
-  make  / make all = clean and build
-   
-3. Flash the firmware to your PIC32MZ device:
-  ```sh
-  MikroE bootloader.
-  ```
-4. Clean build artifacts:
-  ```sh
-  make clean
-  ```
+## 🚀 **Quick Start / Build Instructions**
 
+### **Current Build Status**: ✅ **Compiles Successfully**
 
-Refer to the documentation and source code for further details on configuration and usage.
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/Davec6505/Pic32mzCNC_V3.git
+   cd Pic32mzCNC_V3
+   ```
 
-# Pic32mzCNC_V3
-CNC Motion Control Architecture
+2. **Build the project:**
+   ```bash
+   make          # Incremental build
+   make all      # Clean + full build
+   make clean    # Clean build artifacts
+   ```
 
-This README provides an overview of the CNC motion control system architecture using TMR2 and OCx modules with Bresenham interpolation and dynamic dominant axis tracking.
+3. **Flash firmware to PIC32MZ:**
+   ```bash
+   # Use MikroE bootloader or MPLAB X IPE
+   # Firmware: bins/Release/CS23.hex
+   ```
+
+### **Testing Current Implementation**
+The system currently supports:
+- **UART G-code commands** via UART2
+- **Real-time control**: Send `?` for status, `~` for resume, `!` for hold
+- **Position tracking**: Real-time step counting and coordinate reporting
+- **GRBL status format**: `<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000|FS:0,0>`
+
+### **Project Structure**
+```
+Pic32mzCNC_V3/
+├── srcs/
+│   ├── app.c                    # Application state machine
+│   ├── main.c                   # Entry point
+│   ├── gcode/
+│   │   └── gcode_parser.c       # G-code parsing & GRBL protocol
+│   └── motion/
+│       ├── stepper.c            # Hardware abstraction layer
+│       ├── motion.c             # Master motion controller
+│       └── kinematics.c         # Physics & coordinate calculations
+├── incs/                        # Header files
+├── docs/plantuml/              # Architecture diagrams
+└── .github/copilot-instructions.md  # Development guidelines
+```
+
+## 📋 **Next Implementation Phases**
+
+### **Phase 1: Motion Controller Completion** (In Progress)
+- [ ] Complete Bresenham execution functions in `motion.c`
+- [ ] Implement segment transition logic for smooth motion
+- [ ] Add velocity profiling (acceleration/deceleration)
+- [ ] Test coordinated multi-axis motion
+
+### **Phase 2: G-code Command Processing**
+- [ ] Parse G01 linear interpolation commands in `gcode_parser.c`
+- [ ] Implement G02/G03 arc interpolation via kinematics
+- [ ] Add G54-G59 work coordinate system commands
+- [ ] Handle feedrate (F) and spindle (S/M3/M5) control
+
+### **Phase 3: Advanced Features**
+- [ ] Look-ahead motion planning for smooth trajectories
+- [ ] Emergency stop and safety systems
+- [ ] Feed hold/resume with position retention
+- [ ] Real-time feed rate and spindle overrides
+
+---
+
+# 🏛️ **CNC Motion Control Architecture**
+
+This section provides detailed technical documentation of the **absolute compare mode** architecture with **dynamic dominant axis tracking** using TMR2 and OCx modules.
 
 ## Core Architecture Principles
 

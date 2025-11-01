@@ -1,7 +1,10 @@
 @startuml
-title CNC Motion Control - Absolute Compare Mode with Dynamic Dominant Axis Tracking
+title CNC Motion Control - Current Implementation Status (November 2025)
+!theme blueprint
 
-participant Planner
+participant "GCODE_Tasks\n(✅ Complete)" as GCODE
+participant "KINEMATICS\n(✅ Complete)" as KINEMATICS
+participant "MOTION_Tasks\n(🚧 In Progress)" as MOTION
 participant "TMR2\n(Free-Running)" as TMR2
 participant "OC1 ISR\n(X Axis)" as OC1
 participant "OC2 ISR\n(Y Axis)" as OC2
@@ -9,19 +12,25 @@ participant "OC3 ISR\n(Z Axis)" as OC3
 participant "OC4 ISR\n(A Axis)" as OC4
 participant "Bresenham\nState Machine" as Bresenham
 
-== Initialization ==
-Planner -> Planner : Analyze segment (X=100, Y=25, Z=10, A=5)
-Planner -> Planner : Determine dominant axis = X (highest step count)
-Planner -> Bresenham : Load delta values and error terms
-Planner -> TMR2 : Start free-running timer (never stops)
+== Current Implementation Flow ==
+GCODE -> GCODE : Parse G01 X100 Y25 Z10 F1000
+GCODE -> GCODE : Extract command to gcodeCommandQueue (✅)
+GCODE -> KINEMATICS : Call KINEMATICS_LinearMove()
+KINEMATICS -> KINEMATICS : Convert work → machine coordinates (✅)
+KINEMATICS -> KINEMATICS : Calculate Bresenham parameters (✅)
+KINEMATICS -> KINEMATICS : Determine dominant axis = X (highest Δ) (✅)
+KINEMATICS -> MOTION : Return pre-calculated MotionSegment
+MOTION -> TMR2 : Initialize TMR2 continuous operation (✅)
 note right of TMR2
-  TMR2 runs continuously
-  at 10µs/tick resolution
-  Never resets during operation
+  ✅ TMR2 runs continuously at 10µs/tick
+  ✅ 32-bit timer (TMR2:TMR3 pair)  
+  ✅ Never stops or resets during operation
+  ✅ Provides stable time base for all axes
 end note
 
-Planner -> OC1 : Set OC1R = TMR2 + interval (absolute value)
-Planner -> OC1 : Set OC1RS = OC1R + pulse_width (absolute value)
+MOTION -> OC1 : Setup dominant axis tracking (✅)
+MOTION -> OC1 : Set OC1R = TMR2 + interval (absolute value)
+MOTION -> OC1 : Set OC1RS = OC1R + pulse_width (absolute value)
 note right of OC1
   X axis tracks ahead of TMR2
   All values are absolute timer counts
