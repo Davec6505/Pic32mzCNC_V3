@@ -15,20 +15,19 @@ typedef struct {
 } WorkCoordinateSystem;
 
 // Initialize work coordinates (single instance pattern)
-void KINEMATICS_Initialize(WorkCoordinateSystem* wcs);
-void KINEMATICS_SetWorkOffset(WorkCoordinateSystem* wcs, float x_offset, float y_offset, float z_offset);
+void KINEMATICS_Initialize(void);  // Fixed: Added void parameter
+void KINEMATICS_SetWorkOffset(float x_offset, float y_offset, float z_offset);  // Fixed: Removed wcs parameter
 
 // Coordinate conversion functions (physics calculations)
-CoordinatePoint KINEMATICS_WorkToMachine(CoordinatePoint work_pos, WorkCoordinateSystem* wcs);
-CoordinatePoint KINEMATICS_MachineToWork(CoordinatePoint machine_pos, WorkCoordinateSystem* wcs);
-WorkCoordinateSystem* KINEMATICS_GetWorkCoordinates();
+CoordinatePoint KINEMATICS_WorkToMachine(CoordinatePoint work_pos);  // Fixed: Removed wcs parameter
+CoordinatePoint KINEMATICS_MachineToWork(CoordinatePoint machine_pos);  // Fixed: Removed wcs parameter
+WorkCoordinateSystem* KINEMATICS_GetWorkCoordinates(void);  // Fixed: Added void parameter
+void KINEMATICS_SetWorkCoordinates(float x, float y, float z);  // Fixed: Removed wcs parameter
 
 // Physics & profiling calculations for motion planning
 MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end, float feedrate, 
-                                   WorkCoordinateSystem* wcs, MotionSegment* segment_buffer);
+                                   MotionSegment* segment_buffer);  // Fixed: Removed wcs parameter
 MotionSegment* KINEMATICS_ArcMove(CoordinatePoint start, CoordinatePoint end, CoordinatePoint center, 
-                                 bool clockwise, WorkCoordinateSystem* wcs, MotionSegment* segment_buffer);
-
-
+                                 bool clockwise, MotionSegment* segment_buffer);  // Fixed: Removed wcs parameter
 
 #endif /* KINEMATICS_H */

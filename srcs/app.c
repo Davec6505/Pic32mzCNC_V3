@@ -77,7 +77,15 @@ void APP_Initialize ( void )
     /* Initialize the app state to wait for media attach. */
     appData.state = APP_CONFIG;
 
+    // Initialize all single instances in appData (centralized pattern)
     memset((void*)&appData.gcodeCommandQueue, 0, sizeof(GCODE_CommandQueue));
+    memset((void*)&appData.motionQueue, 0, sizeof(appData.motionQueue));
+
+    
+    // Initialize motion queue management
+    appData.motionQueueHead = 0;
+    appData.motionQueueTail = 0;  
+    appData.motionQueueCount = 0;
 
 }
 
@@ -106,7 +114,7 @@ void APP_Tasks ( void )
             // Initialize subsystems ONCE during configuration
             STEPPER_Initialize();                           // Hardware timer setup
             MOTION_Initialize();                           // Motion planning initialization  
-            KINEMATICS_Initialize(&appData.workCoordinates); // Initialize work coordinates
+            KINEMATICS_Initialize(); // Initialize work coordinates
             
 
             appData.state = APP_IDLE;

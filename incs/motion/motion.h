@@ -13,6 +13,7 @@ typedef struct {
     
     // Motion parameters
     uint32_t steps_remaining;
+    uint32_t steps_completed;
     uint32_t step_interval;      // Current step interval (for velocity profiling)
     uint32_t pulse_width;        // Pulse width in timer ticks
     

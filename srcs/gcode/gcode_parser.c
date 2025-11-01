@@ -191,25 +191,28 @@ case GCODE_STATE_CONTROL_CHAR:
         /* Handle specific control characters per GRBL protocol */
         switch(rxBuffer[0]) {
             case '?':  // Status query - immediate response required
-           { // Get current position from stepper module
-                StepperPosition* pos = STEPPER_GetPosition();
-                WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-                
-                // Convert to real coordinates
-                float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
-                float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
-                float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
-                
-                float wpos_x = mpos_x - wcs->offset.x;
-                float wpos_y = mpos_y - wcs->offset.y;
-                float wpos_z = mpos_z - wcs->offset.z;
-                
-                nBytesRead = sprintf((char*)txBuffer, 
-                                    "<Idle|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:0,0>\r\n",
-                                    mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z);
-                UART2_Write((uint8_t*)txBuffer, nBytesRead);
-                break;
-           }
+{
+    // Get current position from stepper module
+    StepperPosition* pos = STEPPER_GetPosition();
+    WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();  // Fixed: No parameter needed
+    
+    // Convert step counts to real coordinates
+    float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
+    float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
+    float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
+    
+    // Calculate work coordinates using kinematics internal coordinates
+    float wpos_x = mpos_x - wcs->offset.x;
+    float wpos_y = mpos_y - wcs->offset.y;
+    float wpos_z = mpos_z - wcs->offset.z;
+    
+    // Send GRBL status response
+    nBytesRead = snprintf((char*)txBuffer, sizeof(txBuffer),
+                         "<Idle|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:0,0>\r\n",
+                         mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z);
+    UART2_Write((uint8_t*)txBuffer, nBytesRead);
+    break;
+}
             case '~':  // Cycle start/resume
                 // Resume motion, send "OK\r\n"
                 UART2_Write((uint8_t*)"OK\r\n", 4);

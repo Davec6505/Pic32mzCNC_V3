@@ -98,7 +98,7 @@ typedef struct
     // Single instances of all major data structures (centralized pattern)
     GCODE_CommandQueue gcodeCommandQueue;           // G-code command processing
     MotionSegment motionQueue[MAX_MOTION_SEGMENTS];                          // Motion planning segments
-    WorkCoordinateSystem workCoordinates;           // G54/G55/etc work coordinates
+  
     
     // Motion queue management
     uint32_t motionQueueHead;     // Next segment to write
