@@ -48,7 +48,8 @@ int main ( void )
 
     while ( true )
     {
- 
+        CORETIMER_DelayMs(1000);
+        LED1_Toggle();
     }
 
     /* Execution should not come here during normal operation */

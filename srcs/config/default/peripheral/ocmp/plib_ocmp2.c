@@ -1,20 +1,17 @@
 /*******************************************************************************
-  Data Type definition of Timer PLIB
+  Output Compare OCMP2 Peripheral Library (PLIB)
 
   Company:
     Microchip Technology Inc.
 
   File Name:
-    plib_tmr2.h
+    plib_ocmp2.c
 
   Summary:
-    Data Type definition of the Timer Peripheral Interface Plib.
+    OCMP2 Source File
 
   Description:
-    This file defines the Data Types for the Timer Plib.
-
-  Remarks:
-    None.
+    None
 
 *******************************************************************************/
 
@@ -40,61 +37,85 @@
 * ANY WAY RELATED TO THIS SOFTWARE WILL NOT EXCEED THE AMOUNT OF FEES, IF ANY,
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
-
-#ifndef PLIB_TMR2_H
-#define PLIB_TMR2_H
-
-#include <stddef.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include "device.h"
-#include "plib_tmr_common.h"
-
-// DOM-IGNORE-BEGIN
-#ifdef __cplusplus  // Provide C++ Compatibility
-
-    extern "C" {
-
-#endif
-// DOM-IGNORE-END
+#include "plib_ocmp2.h"
+#include "interrupts.h"
 
 // *****************************************************************************
+
 // *****************************************************************************
-// Section: Data Types
+// Section: OCMP2 Implementation
 // *****************************************************************************
 // *****************************************************************************
 
 // *****************************************************************************
-// *****************************************************************************
-// Section: Interface Routines
-// *****************************************************************************
-// *****************************************************************************
 
 
-// *****************************************************************************
-void TMR2_Initialize(void);
+static volatile OCMP_OBJECT ocmp2Obj;
 
-void TMR2_Start(void);
+void OCMP2_Initialize (void)
+{
+    /*Setup OC2CON        */
+    /*OCM         = 5        */
+    /*OCTSEL       = 0        */
+    /*OC32         = 1        */
+    /*SIDL         = false    */
 
-void TMR2_Stop(void);
+    OC2CON = 0x25;
 
-void TMR2_PeriodSet(uint32_t period);
+    OC2R = 200;
+    OC2RS = 400;
 
-uint32_t TMR2_PeriodGet(void);
+    IEC0SET = _IEC0_OC2IE_MASK;
+}
 
-uint32_t TMR2_CounterGet(void);
+void OCMP2_Enable (void)
+{
+    OC2CONSET = _OC2CON_ON_MASK;
+}
 
-uint32_t TMR2_FrequencyGet(void);
+void OCMP2_Disable (void)
+{
+    OC2CONCLR = _OC2CON_ON_MASK;
+}
 
 
-bool TMR2_PeriodHasExpired(void);
+void OCMP2_CompareValueSet (uint32_t value)
+{
+    OC2R = value;
+}
+
+uint32_t OCMP2_CompareValueGet (void)
+{
+    return OC2R;
+}
+
+void OCMP2_CompareSecondaryValueSet (uint32_t value)
+{
+    OC2RS = value;
+}
+
+uint32_t OCMP2_CompareSecondaryValueGet (void)
+{
+    return OC2RS;
+}
 
 
-// DOM-IGNORE-BEGIN
-#ifdef __cplusplus  // Provide C++ Compatibility
+void OCMP2_CallbackRegister(OCMP_CALLBACK callback, uintptr_t context)
+{
+    ocmp2Obj.callback = callback;
 
+    ocmp2Obj.context = context;
+}
+
+void __attribute__((used)) OUTPUT_COMPARE_2_InterruptHandler (void)
+{
+    /* Additional local variable to prevent MISRA C violations (Rule 13.x) */
+    uintptr_t context = ocmp2Obj.context;
+    IFS0CLR = _IFS0_OC2IF_MASK;    //Clear IRQ flag
+
+    if( (ocmp2Obj.callback != NULL))
+    {
+        ocmp2Obj.callback(context);
     }
-#endif
-// DOM-IGNORE-END
+}
 
-#endif /* PLIB_TMR2_H */

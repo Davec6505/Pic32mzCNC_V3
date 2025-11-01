@@ -34,12 +34,12 @@ OPT_LEVEL ?= 1
 # Usage: make all DEBUG_MOTION_BUFFER=1  (enable motion buffer debug messages)
 #        make all BUILD_CONFIG=Debug     (Debug builds have it enabled by default)
 #        make all                        (disabled by default)
-DEBUG_MOTION_BUFFER ?= 0
+DEBUG ?= 0
 
 # Junction look-ahead control: set to 1 to force exact-stop (disable junction blending)
 # Usage: make all DISABLE_JUNCTION_LOOKAHEAD=1
 # Notes: Root controls policy; sub-Makefile consumes and maps to -DDEBUG_DISABLE_JUNCTION_LOOKAHEAD
-DISABLE_JUNCTION_LOOKAHEAD ?= 0
+DISABLE ?= 0
 
 # Library control: set USE_SHARED_LIB=1 to link against pre-built library
 # Usage: make shared_lib             (builds libCS23shared.a from libs/*.c)

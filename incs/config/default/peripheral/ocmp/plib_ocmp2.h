@@ -1,20 +1,17 @@
 /*******************************************************************************
-  Data Type definition of Timer PLIB
+  Output Compare (OCMP) Peripheral Library Interface Header File
 
   Company:
     Microchip Technology Inc.
 
   File Name:
-    plib_tmr2.h
+    plib_ocmp2.h
 
   Summary:
-    Data Type definition of the Timer Peripheral Interface Plib.
+    OCMP PLIB Header File
 
   Description:
-    This file defines the Data Types for the Timer Plib.
-
-  Remarks:
-    None.
+    None
 
 *******************************************************************************/
 
@@ -41,60 +38,121 @@
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
 
-#ifndef PLIB_TMR2_H
-#define PLIB_TMR2_H
+#ifndef PLIB_OCMP2_H
+#define PLIB_OCMP2_H
 
 #include <stddef.h>
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include "device.h"
-#include "plib_tmr_common.h"
+#include "plib_ocmp_common.h"
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility
-
     extern "C" {
-
 #endif
 // DOM-IGNORE-END
 
-// *****************************************************************************
-// *****************************************************************************
-// Section: Data Types
-// *****************************************************************************
-// *****************************************************************************
 
 // *****************************************************************************
-// *****************************************************************************
-// Section: Interface Routines
+// Section: Interface
 // *****************************************************************************
 // *****************************************************************************
 
+/*************************** OCMP2 API ****************************************/
+// *****************************************************************************
+/* Function:
+   void OCMP2_Initialize (void)
+
+  Summary:
+    Initialization function OCMP2 peripheral
+
+  Description:
+    This function initializes the OCMP2 peripheral with user input
+	from the configurator.
+
+  Parameters:
+    void
+
+  Returns:
+    void
+*/
+void OCMP2_Initialize (void);
 
 // *****************************************************************************
-void TMR2_Initialize(void);
+/* Function:
+   void OCMP2_Enable (void)
 
-void TMR2_Start(void);
+  Summary:
+    Enable function OCMP2 peripheral
 
-void TMR2_Stop(void);
+  Description:
+    This function enables the OCMP2 peripheral
 
-void TMR2_PeriodSet(uint32_t period);
+  Parameters:
+    void
 
-uint32_t TMR2_PeriodGet(void);
+  Returns:
+    void
+*/
+void OCMP2_Enable (void);
 
-uint32_t TMR2_CounterGet(void);
+// *****************************************************************************
+/* Function:
+   void OCMP2_Disable (void)
 
-uint32_t TMR2_FrequencyGet(void);
+  Summary:
+    Disable function OCMP2 peripheral
+
+  Description:
+    This function disables the OCMP2 peripheral.
+
+  Parameters:
+    void
+
+  Returns:
+    void
+*/
+void OCMP2_Disable (void);
 
 
-bool TMR2_PeriodHasExpired(void);
+void OCMP2_CompareValueSet (uint32_t value);
 
+uint32_t OCMP2_CompareValueGet (void);
+
+uint32_t OCMP2_CompareSecondaryValueGet (void);
+void OCMP2_CompareSecondaryValueSet (uint32_t value);
+
+// *****************************************************************************
+/* Function:
+  void OCMP2_CallbackRegister( OCMP_CALLBACK callback, uintptr_t context )
+
+  Summary:
+    Sets the callback function for a ocmp interrupt.
+
+  Description:
+    This function sets the callback function that will be called when the OCMP
+    conditions are met.
+
+  Precondition:
+    None.
+
+  Parameters:
+    *callback   - a pointer to the function to be called when value is reached.
+                  Use NULL to Un Register the compare callback
+
+    context     - a pointer to user defined data to be used when the callback
+                  function is called. NULL can be passed in if no data needed.
+
+  Returns:
+    void
+*/
+void OCMP2_CallbackRegister(OCMP_CALLBACK callback, uintptr_t context);
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility
-
     }
 #endif
-// DOM-IGNORE-END
 
-#endif /* PLIB_TMR2_H */
+// DOM-IGNORE-END
+#endif // PLIB_OCMP2_H

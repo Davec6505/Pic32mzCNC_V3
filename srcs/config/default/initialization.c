@@ -76,7 +76,7 @@
 #pragma config FSOSCEN =    OFF
 #pragma config IESO =       OFF
 #pragma config POSCMOD =    EC
-#pragma config OSCIOFNC =   ON
+#pragma config OSCIOFNC =   OFF
 #pragma config FCKSM =      CSECME
 #pragma config WDTPS =      PS1048576
 #pragma config WDTSPGM =    STOP
@@ -189,11 +189,13 @@ void SYS_Initialize ( void* data )
 
     TMR2_Initialize();
 
-    OCMP1_Initialize();
-
     OCMP4_Initialize();
 
     OCMP5_Initialize();
+
+    OCMP2_Initialize();
+
+    NVM_Initialize();
 
     OCMP3_Initialize();
 

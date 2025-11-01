@@ -356,6 +356,7 @@ build_dir:
 	@$(foreach subdir,$(SRC_SUBDIRS),$(call MKDIR,$(OBJ_DIR)/$(subdir)) && $(call MKDIR,$(INC_DIR)/$(subdir)) &&) echo "Created peripheral directories"
 	@echo "Moving header files from src subdirectories to corresponding inc subdirectories"
 	@$(foreach subdir,$(SRC_SUBDIRS),$(foreach header,$(wildcard $(SRC_DIR)/$(subdir)*.h),$(call MOVE,$(header),$(INC_DIR)/$(subdir)) &&)) echo "Headers moved"
+	@$(foreach file,$(wildcard $(SRC_DIR)/*.h),$(call MOVE,$(file),$(INC_DIR)/) &&) echo "Root headers moved"	
 	@echo "Build directories created successfully"
 
 
