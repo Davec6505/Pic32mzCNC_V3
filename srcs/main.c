@@ -29,7 +29,7 @@
 #include <stdio.h>
 #include "definitions.h"                // SYS function prototypes
 
-#include "gcode_parser.h"                // GCODE parser function prototypes
+#include "app.h"                // GCODE parser function prototypes
 
 
 // *****************************************************************************
@@ -40,16 +40,25 @@
 
 int main ( void )
 {
+  static volatile uint32_t app_indicator = 0;
     /* Initialize all modules */
     SYS_Initialize ( NULL );
 
-    /* Initialize the GCODE USART */
-    GCODE_USART_Initialize();
+    /* Initialize application */
+    APP_Initialize();
 
     while ( true )
     {
-        CORETIMER_DelayMs(1000);
-        LED1_Toggle();
+        /* Maintain state machines of all polled MPLAB Harmony modules. */
+        APP_Tasks();
+
+        /* Toggle LED1 every 1 second for app status indication at the end of the loop
+         * This indicates that the application is running.
+         */
+        if(++app_indicator >= 1000000){
+            app_indicator = 0;
+            LED1_Toggle();
+        }
     }
 
     /* Execution should not come here during normal operation */

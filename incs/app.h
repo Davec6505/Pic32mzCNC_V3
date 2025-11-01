@@ -56,8 +56,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
-#include "configuration.h"
-#include "system/fs/sys_fs.h"
+#include "gcode_parser.h"
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility
@@ -73,6 +72,15 @@ extern "C" {
 // *****************************************************************************
 // *****************************************************************************
 #define BUFFER_SIZE         (100U)
+
+// *****************************************************************************
+// *****************************************************************************
+// Application defines for global use.
+// *****************************************************************************
+// *****************************************************************************
+
+
+
 // *****************************************************************************
 /* Application states
 
@@ -86,26 +94,8 @@ extern "C" {
 
 typedef enum
 {
-    /* The app mounts the disk */
-    APP_MOUNT_DISK = 0,
-
-    /* The app opens the file_1 */
-    APP_OPEN_FILE_1,
-
-    /* The app opens the file_2 */
-    APP_OPEN_FILE_2,
-
-    /* Check for file size */
-    APP_DO_FILE_SIZE_CHECK,
-
-    /* Perform a file seek */
-    APP_DO_FILE_SEEK,
-
-    /* The app reads and verifies the data */
-    APP_READ_VERIFY_CONTENT,
-
-    /* Check for end of file */
-    APP_CHECK_EOF,
+    /* The app configures the system */
+    APP_CONFIG = 0,
 
     /* The app closes the file and idles */
     APP_IDLE,
@@ -132,23 +122,11 @@ typedef enum
 
 typedef struct
 {
-    /* SYS_FS File handle for 1st file */
-    SYS_FS_HANDLE      fileHandle_1;
-
-    /* SYS_FS File handle for 2nd file */
-    SYS_FS_HANDLE      fileHandle_2;
-
     /* Application's current state */
     APP_STATES              state;
 
-    /* Application data buffer */
-    uint8_t                 data[BUFFER_SIZE];
-
-    uint32_t            nBytesWritten;
-
-    uint32_t            nBytesRead;
-
-    SYS_FS_FSTAT        fileStatus;
+    /* APP data buffers */
+    GCODE_CommandQueue gcodeCommandQueue;
 
 
 } APP_DATA;

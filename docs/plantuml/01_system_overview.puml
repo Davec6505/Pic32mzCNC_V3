@@ -1,65 +1,107 @@
 @startuml
-title CNC Step Flow with TMR2 + OCx + Bresenham + Acceleration
+title CNC Motion Control - Absolute Compare Mode with Dynamic Dominant Axis Tracking
 
 participant Planner
-participant TMR2
-participant OC1 as "OC1 ISR (X Axis - Dominant)"
-participant OC2 as "OC2 (Y Axis)"
-participant OC3 as "OC3 (Z Axis)"
-participant OC4 as "OC4 (A Axis)"
+participant "TMR2\n(Free-Running)" as TMR2
+participant "OC1 ISR\n(X Axis)" as OC1
+participant "OC2 ISR\n(Y Axis)" as OC2
+participant "OC3 ISR\n(Z Axis)" as OC3
+participant "OC4 ISR\n(A Axis)" as OC4
+participant "Bresenham\nState Machine" as Bresenham
 
 == Initialization ==
-Planner -> OC1 : Load segment (X=100, Y=25, Z=10, A=5)
-Planner -> OC1 : Set delta values and error terms
-Planner -> OC1 : Load acceleration profile
-Planner -> TMR2 : Start free-running timer
-Planner -> OC1 : Set initial OC1R/OC1RS
+Planner -> Planner : Analyze segment (X=100, Y=25, Z=10, A=5)
+Planner -> Planner : Determine dominant axis = X (highest step count)
+Planner -> Bresenham : Load delta values and error terms
+Planner -> TMR2 : Start free-running timer (never stops)
+note right of TMR2
+  TMR2 runs continuously
+  at 10µs/tick resolution
+  Never resets during operation
+end note
 
-== Runtime Loop ==
-TMR2 -> OC1 : Match event triggers ISR
+Planner -> OC1 : Set OC1R = TMR2 + interval (absolute value)
+Planner -> OC1 : Set OC1RS = OC1R + pulse_width (absolute value)
+note right of OC1
+  X axis tracks ahead of TMR2
+  All values are absolute timer counts
+  Dominant axis continuously scheduled
+end note
+
+== Runtime - Dominant Axis Drives Motion ==
+TMR2 -> OC1 : Match event (TMR2 == OC1R)
 activate OC1
-OC1 -> OC1 : Step X axis
-OC1 -> OC1 : Update Bresenham error for Y, Z, A
-
-alt Y axis needs step
-    OC1 -> OC2 : Schedule Y step (set OC2R/OC2RS)
-end
-alt Z axis needs step
-    OC1 -> OC3 : Schedule Z step
-end
-alt A axis needs step
-    OC1 -> OC4 : Schedule A step
-end
-
-OC1 -> OC1 : Update acceleration state
-OC1 -> OC1 : Compute next pulse interval
-OC1 -> OC1 : Schedule next X pulse (OC1R/OC1RS)
+OC1 -> OC1 : Generate X step pulse
+OC1 -> OC1 : Increment X step counter
+OC1 -> Bresenham : Signal step complete, check subordinates
 deactivate OC1
 
-alt OC2 match occurs
-    TMR2 -> OC2 : Match triggers Y pulse
-end
-alt OC3 match occurs
-    TMR2 -> OC3 : Match triggers Z pulse
-end
-alt OC4 match occurs
-    TMR2 -> OC4 : Match triggers A pulse
+activate Bresenham
+Bresenham -> Bresenham : Update error_y += delta_y
+Bresenham -> Bresenham : Update error_z += delta_z
+Bresenham -> Bresenham : Update error_a += delta_a
+
+alt error_y >= delta_x (Y needs step)
+    Bresenham -> OC2 : Set OC2R = TMR2 + offset (absolute)
+    Bresenham -> OC2 : Set OC2RS = OC2R + pulse_width
+    Bresenham -> Bresenham : error_y -= delta_x
 end
 
-== Repeat ==
-loop Until segment complete
-    TMR2 -> OC1 : Match triggers ISR
-    activate OC1
-    OC1 -> OC1 : Bresenham + Acceleration logic
-    OC1 -> OC2 : Schedule Y step if needed
-    OC1 -> OC3 : Schedule Z step if needed
-    OC1 -> OC4 : Schedule A step if needed
-    OC1 -> OC1 : Schedule next X pulse
-    deactivate OC1
+alt error_z >= delta_x (Z needs step)
+    Bresenham -> OC3 : Set OC3R = TMR2 + offset (absolute)
+    Bresenham -> OC3 : Set OC3RS = OC3R + pulse_width
+    Bresenham -> Bresenham : error_z -= delta_x
 end
 
-== Completion ==
-OC1 -> Planner : Segment complete
-Planner -> OC1 : Load next segment
+alt error_a >= delta_x (A needs step)
+    Bresenham -> OC4 : Set OC4R = TMR2 + offset (absolute)
+    Bresenham -> OC4 : Set OC4RS = OC4R + pulse_width
+    Bresenham -> Bresenham : error_a -= delta_x
+end
+
+Bresenham -> OC1 : Schedule next X pulse (OC1R = TMR2 + interval)
+note right
+  Dominant axis continuously
+  tracks ahead of TMR2
+end note
+deactivate Bresenham
+
+== Subordinate Axis Pulses (On Demand) ==
+alt Y step scheduled
+    TMR2 -> OC2 : Match event (TMR2 == OC2R)
+    activate OC2
+    OC2 -> OC2 : Generate Y pulse
+    OC2 -> OC2 : Increment Y counter
+    deactivate OC2
+end
+
+alt Z step scheduled
+    TMR2 -> OC3 : Match event (TMR2 == OC3R)
+    activate OC3
+    OC3 -> OC3 : Generate Z pulse
+    OC3 -> OC3 : Increment Z counter
+    deactivate OC3
+end
+
+== Dynamic Axis Swapping (Optional) ==
+alt Trajectory changes - Y becomes dominant
+    Planner -> OC1 : Stop tracking ahead
+    Planner -> OC2 : Start tracking ahead of TMR2
+    note right
+      Dominant axis swapped
+      seamlessly during motion
+      No timer reset required
+    end note
+end
+
+== Segment Completion ==
+loop Until all steps complete
+    TMR2 -> OC1 : Continue dominant axis pulses
+    Bresenham -> Bresenham : Update errors, schedule subordinates
+end
+
+OC1 -> Planner : All X steps complete
+Planner -> Planner : Check all axes complete
+Planner -> Planner : Load next segment
 
 @enduml

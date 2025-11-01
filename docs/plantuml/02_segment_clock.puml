@@ -1,56 +1,112 @@
 @startuml
-title Segment Clock Timing Driven by Dominant Axis ISR
+title Absolute Compare Mode - Dominant Axis Tracking with On-Demand Subordinate Scheduling
 
 scale 1.5
 
-participant TMR2
-participant OC1 as "OC1 ISR (X Axis - Dominant)"
-participant OC2 as "OC2 (Y Axis)"
-participant OC3 as "OC3 (Z Axis)"
-participant OC4 as "OC4 (A Axis)"
+participant "TMR2\n(Free-Running)" as TMR2
+participant "OC1 ISR\n(X - Dominant)" as OC1
+participant "OC2 ISR\n(Y - Subordinate)" as OC2
+participant "OC3 ISR\n(Z - Subordinate)" as OC3
+participant "OC4 ISR\n(A - Subordinate)" as OC4
 
 == Segment Start ==
-TMR2 -> OC1 : First match event (OC1R)
+note over TMR2
+  TMR2 = 1000 (current count)
+  Never stops or resets
+end note
+
+note over OC1
+  OC1R = 1500 (absolute)
+  OC1RS = 1520 (absolute)
+  Tracks ahead of TMR2
+end note
+
+TMR2 -> OC1 : Match at TMR2=1500
 activate OC1
-OC1 -> OC1 : Step X axis
-OC1 -> OC1 : Update Bresenham error terms
-OC1 -> OC2 : Schedule Y step if error_y >= delta_x
-OC1 -> OC3 : Schedule Z step if error_z >= delta_x
-OC1 -> OC4 : Schedule A step if error_a >= delta_x
-OC1 -> OC1 : Schedule next OC1R/OC1RS
+OC1 -> OC1 : Generate X step pulse
+OC1 -> OC1 : Update Bresenham errors
+
+alt Y needs step (error_y >= delta_x)
+    OC1 -> OC2 : Set OC2R = 1550 (absolute)
+    OC1 -> OC2 : Set OC2RS = 1570 (absolute)
+    note right of OC2
+      Y scheduled on-demand
+      Only when required by Bresenham
+    end note
+end
+
+alt Z needs step (error_z >= delta_x)
+    OC1 -> OC3 : Set OC3R = 1580 (absolute)
+    OC1 -> OC3 : Set OC3RS = 1600 (absolute)
+end
+
+OC1 -> OC1 : Schedule next X pulse
+OC1 -> OC1 : Set OC1R = 2000 (absolute)
+OC1 -> OC1 : Set OC1RS = 2020 (absolute)
+note right of OC1
+  Dominant axis continuously
+  tracks ahead of TMR2
+  Next pulse at TMR2=2000
+end note
 deactivate OC1
 
-== Segment Clock Ticks ==
-loop Every OC1 match (segment clock tick)
-    TMR2 -> OC1 : Match event
-    activate OC1
-    OC1 -> OC1 : Step X axis
-    OC1 -> OC1 : Bresenham logic
-    OC1 -> OC2 : Schedule Y step if needed
-    OC1 -> OC3 : Schedule Z step if needed
-    OC1 -> OC4 : Schedule A step if needed
-    OC1 -> OC1 : Schedule next OC1R/OC1RS
-    deactivate OC1
+== TMR2 Continues Counting ==
+note over TMR2
+  TMR2 = 1550
+end note
+
+TMR2 -> OC2 : Match at TMR2=1550
+activate OC2
+OC2 -> OC2 : Generate Y step pulse
+deactivate OC2
+
+note over TMR2
+  TMR2 = 1580
+end note
+
+TMR2 -> OC3 : Match at TMR2=1580
+activate OC3
+OC3 -> OC3 : Generate Z step pulse
+deactivate OC3
+
+== Next Dominant Axis Pulse ==
+note over TMR2
+  TMR2 = 2000
+end note
+
+TMR2 -> OC1 : Match at TMR2=2000
+activate OC1
+OC1 -> OC1 : Generate X step pulse
+OC1 -> OC1 : Update Bresenham errors
+
+alt A needs step this cycle
+    OC1 -> OC4 : Set OC4R = 2050 (absolute)
+    OC1 -> OC4 : Set OC4RS = 2070 (absolute)
 end
 
-== Subordinate Axis Pulses ==
-alt Y match occurs
-    TMR2 -> OC2 : Match triggers Y pulse
-end
-alt Z match occurs
-    TMR2 -> OC3 : Match triggers Z pulse
-end
-alt A match occurs
-    TMR2 -> OC4 : Match triggers A pulse
+alt Y does NOT need step this cycle
+    OC1 -> OC2 : Set OC2R = OC2RS (equal values)
+    note right of OC2
+      Y not scheduled - DISABLED
+      OCxR = OCxRS stops pulse generation
+      Prevents spurious pulses
+      Critical for arc & Bresenham sanity
+    end note
 end
 
-== Segment Completion ==
-OC1 -> OC1 : Check steps_remaining
-alt If complete
-    OC1 -> OC1 : Stop scheduling pulses
-    OC1 -> OC2 : Stop Y axis pulses
-    OC1 -> OC3 : Stop Z axis pulses
-    OC1 -> OC4 : Stop A axis pulses
-end
+OC1 -> OC1 : Set OC1R = 2500 (absolute)
+OC1 -> OC1 : Set OC1RS = 2520 (absolute)
+deactivate OC1
+
+== Key Principles ==
+note over TMR2, OC4
+  1. TMR2 runs continuously (never resets)
+  2. All OCxR/OCxRS values are ABSOLUTE timer counts
+  3. Dominant axis tracks continuously ahead of TMR2
+  4. Subordinate axes scheduled ON-DEMAND only
+  5. Dominant axis can swap by changing tracking
+  6. Set OCxR = OCxRS to DISABLE pulse generation
+     (prevents spurious pulses during arc/Bresenham)
+end note
 
 @enduml
