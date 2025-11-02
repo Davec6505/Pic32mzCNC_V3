@@ -238,14 +238,14 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             }
             
             // ✅ CRITICAL: Check for line terminator OR control character
-            bool has_line_terminator = false;
+            static bool has_line_terminator = false;
             for(uint32_t i = 0; i < nBytesRead; i++) {
-                if(rxBuffer[i] == '\n') {
+                if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r') {
                     has_line_terminator = true;
                     break;
                 }
             }
-        
+
            // Process the received data        
            // We need to check the 1st char for control characters like ?,~,^X,!,etc.
            bool control_char_found = false;
@@ -258,13 +258,20 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
                 }
             }
 
+            //must not continue until line terminator is found
+            if(!has_line_terminator){
+                break;
+            }
+
         // ✅ Check for actual G-code ONCE before deciding what to do
         bool has_gcode = false;
         for(uint32_t i = 0; i < nBytesRead; i++) {
-            if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' && 
+            if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' &&
                 rxBuffer[i] != ' ' && rxBuffer[i] != '\t' && rxBuffer[i] != 0) {
-                has_gcode = true;
-                break;
+                    // Found valid G-code character*/
+                    has_gcode = true;               
+                    break;
+              //  }
             }
         }
 
@@ -284,6 +291,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             nBytesRead = 0; 
             memset(rxBuffer, 0, sizeof(rxBuffer));
             gcodeData.state = GCODE_STATE_IDLE;
+            has_line_terminator = false;
             break;
             
         } else if(has_line_terminator && !has_gcode){
@@ -292,6 +300,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             nBytesRead = 0; 
             memset(rxBuffer, 0, sizeof(rxBuffer));
             gcodeData.state = GCODE_STATE_IDLE;
+            has_line_terminator = false;
             break;
             
         } else {

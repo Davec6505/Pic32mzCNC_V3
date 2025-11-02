@@ -68,8 +68,12 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 
 ### GRBL v1.1 Protocol Compliance
 - **One "OK" per G-code line**: Send acknowledgment only after complete line is received and queued
-- **Line-oriented buffering**: Accumulate bytes until `\n` terminator before processing
-- **Control characters bypass buffering**: `?!~^X` process immediately without waiting for `\n`
+- **Line-oriented buffering**: Accumulate bytes until `\n` or `\r` terminator before processing
+- **Static variable pattern**: Use `static bool has_line_terminator` to persist state across polled function calls
+  - Allows state to accumulate during byte reception
+  - **CRITICAL**: Reset to `false` after processing to prevent stale state
+- **Early exit pattern**: Check `!has_line_terminator` and break immediately to prevent premature processing
+- **Control characters bypass buffering**: `?!~^X` process immediately without waiting for terminator
 - **Flow control**: Withhold "OK" when command queue is full (GRBL behavior)
 - **Real-time commands never get "OK"**: 
   - `?` → Status report only
@@ -168,10 +172,11 @@ case GCODE_STATE_IDLE:
             nBytesRead += new_bytes;
         }
         
-        // ✅ CRITICAL: Check for line terminator OR control character
-        bool has_line_terminator = false;
+        // ✅ CRITICAL: Static variable persists across GCODE_Tasks() calls
+        // Allows line terminator state to accumulate during byte reception
+        static bool has_line_terminator = false;
         for(uint32_t i = 0; i < nBytesRead; i++) {
-            if(rxBuffer[i] == '\n') {
+            if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r') {
                 has_line_terminator = true;
                 break;
             }
@@ -187,8 +192,13 @@ case GCODE_STATE_IDLE:
             }
         }
 
-        // ✅ CRITICAL: Check for actual G-code content BEFORE processing
-        // Must be in same scope as has_line_terminator to persist across re-entry
+        // ✅ CRITICAL: Early exit if no line terminator found yet
+        // Prevents premature processing during byte accumulation
+        if(!has_line_terminator){
+            break;
+        }
+
+        // ✅ Check for actual G-code content (not just whitespace)
         bool has_gcode = false;
         for(uint32_t i = 0; i < nBytesRead; i++) {
             if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' && 
@@ -198,8 +208,10 @@ case GCODE_STATE_IDLE:
             }
         }
 
+        // Process complete line based on content
         if(control_char_found){              
             // Fall through to GCODE_STATE_CONTROL_CHAR immediately
+        
         } else if(has_line_terminator && has_gcode){
             // ✅ Complete G-code line with actual content - process it
             cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
@@ -207,21 +219,20 @@ case GCODE_STATE_IDLE:
             // ✅ Send ONE "OK" per complete G-code line (GRBL v1.1 protocol)
             UART2_Write((uint8_t*)"OK\r\n", 4);
             
-            // Clear buffer for next line
+            // Clear buffer and reset static flag for next line
             nBytesRead = 0; 
             memset(rxBuffer, 0, sizeof(rxBuffer));
             gcodeData.state = GCODE_STATE_IDLE;
+            has_line_terminator = false;  // ✅ CRITICAL: Reset static variable
             break;
+            
         } else if(has_line_terminator && !has_gcode){
             // ✅ Line terminator but no G-code (empty line or whitespace only)
             // Clear buffer, don't send "OK", stay in IDLE
             nBytesRead = 0; 
             memset(rxBuffer, 0, sizeof(rxBuffer));
             gcodeData.state = GCODE_STATE_IDLE;
-            break;
-        } else {
-            // ✅ CRITICAL: Incomplete line - wait for more data
-            // Don't clear buffer, don't send "OK", just exit and accumulate more bytes
+            has_line_terminator = false;  // ✅ CRITICAL: Reset static variable
             break;
         }
     } else {
