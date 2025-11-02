@@ -22,8 +22,14 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 ### Timer Architecture
 - **TMR2 runs continuously** - NEVER stop or reset the timer during operation
 - **32-bit timer** (TMR2:TMR3 pair) for extended range without overflow
-- **10µs tick resolution** for precise timing control
-- Timer provides stable time base; no timer interrupts used
+- **Hardware Configuration:**
+  - PBCLK3 = 50MHz (peripheral bus clock)
+  - Prescaler = 1:4 (TCKPS = 2)
+  - Timer Frequency = 12.5MHz (50MHz / 4)
+  - Timer Resolution = **80ns per tick** (1 / 12.5MHz)
+  - Period Register (PR2) = 124 (unused for free-running mode)
+- **No timer interrupts used** - timer provides stable time base only
+- **Step timing** controlled entirely by OC module compare interrupts
 
 ### Absolute Compare Mode
 - All OCx compare registers use **ABSOLUTE timer values**, not relative offsets
@@ -44,6 +50,34 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - Subordinate axis scheduling based on error accumulation
 
 ### Single Instance Pattern in appData ✅
+- **All major data structures** centralized in APP_DATA struct
+- **No static module data** - clean separation of concerns  
+- **Pass by reference** through function calls for explicit ownership
+- **Work coordinates protected** by private static in kinematics module
+
+### Professional G-Code Event System ✅
+- **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
+- **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91 commands
+- **Abstraction layer respect**: No APP_DATA exposure, maintains clean boundaries
+- **Multi-command tokenization**: "G90G1X10Y10F1000S200M3" → individual events
+- **Zero memory allocation**: Deterministic processing for real-time systems
+- **Utils module**: Professional string parsing with robust tokenization
+- **Flow control**: 16-command circular buffer with "OK" withholding
+- **Real-time characters**: Bypass tokenization for immediate '?!~^X' processing
+- **GRBL compliance**: Full v1.1 protocol support with proper status reporting
+
+### GRBL v1.1 Protocol Compliance
+- **One "OK" per G-code line**: Send acknowledgment only after complete line is received and queued
+- **Line-oriented buffering**: Accumulate bytes until `\n` terminator before processing
+- **Control characters bypass buffering**: `?!~^X` process immediately without waiting for `\n`
+- **Flow control**: Withhold "OK" when command queue is full (GRBL behavior)
+- **Real-time commands never get "OK"**: 
+  - `?` → Status report only
+  - `!` → Feed hold, silent
+  - `~` → Resume, silent
+  - `^X` → Reset + banner only
+- **Empty lines ignored**: Whitespace-only input gets no response
+- **Echo disabled**: GRBL doesn't echo commands by default### Single Instance Pattern in appData ✅
 - **All major data structures** centralized in APP_DATA struct
 - **No static module data** - clean separation of concerns  
 - **Pass by reference** through function calls for explicit ownership
@@ -117,6 +151,107 @@ OC3R = OC3RS;  // Z axis stops generating pulses
 // - Arc interpolation when axis doesn't need steps
 // - Bresenham cycles where subordinate axis is inactive
 // - Motion completion or emergency stop scenarios
+```
+
+### G-Code Line Buffering Pattern
+```c
+case GCODE_STATE_IDLE:
+    nBytesAvailable = UART2_ReadCountGet();
+
+    if(nBytesAvailable > 0){
+        // ✅ Accumulate bytes until complete line
+        uint32_t space_available = sizeof(rxBuffer) - nBytesRead - 1;
+        uint32_t bytes_to_read = (nBytesAvailable < space_available) ? nBytesAvailable : space_available;
+        
+        if (bytes_to_read > 0) {
+            uint32_t new_bytes = UART2_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
+            nBytesRead += new_bytes;
+        }
+        
+        // ✅ CRITICAL: Check for line terminator OR control character
+        bool has_line_terminator = false;
+        for(uint32_t i = 0; i < nBytesRead; i++) {
+            if(rxBuffer[i] == '\n') {
+                has_line_terminator = true;
+                break;
+            }
+        }
+        
+        // Check first byte for control characters (bypass line buffering)
+        bool control_char_found = false;
+        for(uint8_t i = 0; i < sizeof(GRBL_CONTROL_CHARS); i++){
+            if(rxBuffer[0] == GRBL_CONTROL_CHARS[i]){
+                control_char_found = true;
+                gcodeData.state = GCODE_STATE_CONTROL_CHAR;   
+                break;          
+            }
+        }
+
+        // ✅ CRITICAL: Check for actual G-code content BEFORE processing
+        // Must be in same scope as has_line_terminator to persist across re-entry
+        bool has_gcode = false;
+        for(uint32_t i = 0; i < nBytesRead; i++) {
+            if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' && 
+                rxBuffer[i] != ' ' && rxBuffer[i] != '\t' && rxBuffer[i] != 0) {
+                has_gcode = true;
+                break;
+            }
+        }
+
+        if(control_char_found){              
+            // Fall through to GCODE_STATE_CONTROL_CHAR immediately
+        } else if(has_line_terminator && has_gcode){
+            // ✅ Complete G-code line with actual content - process it
+            cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
+        
+            // ✅ Send ONE "OK" per complete G-code line (GRBL v1.1 protocol)
+            UART2_Write((uint8_t*)"OK\r\n", 4);
+            
+            // Clear buffer for next line
+            nBytesRead = 0; 
+            memset(rxBuffer, 0, sizeof(rxBuffer));
+            gcodeData.state = GCODE_STATE_IDLE;
+            break;
+        } else if(has_line_terminator && !has_gcode){
+            // ✅ Line terminator but no G-code (empty line or whitespace only)
+            // Clear buffer, don't send "OK", stay in IDLE
+            nBytesRead = 0; 
+            memset(rxBuffer, 0, sizeof(rxBuffer));
+            gcodeData.state = GCODE_STATE_IDLE;
+            break;
+        } else {
+            // ✅ CRITICAL: Incomplete line - wait for more data
+            // Don't clear buffer, don't send "OK", just exit and accumulate more bytes
+            break;
+        }
+    } else {
+        gcodeData.state = GCODE_STATE_IDLE;
+        break;
+    }
+    // ✅ Fall through to GCODE_STATE_CONTROL_CHAR only when control_char_found = true
+
+case GCODE_STATE_CONTROL_CHAR:
+    switch(rxBuffer[0]) {
+        case '?':  // Status query - NO "OK" response
+            // Send status report only
+            break;
+        case '~':  // Cycle start/resume - NO response (real-time)
+            break;
+        case '!':  // Feed hold - NO response (real-time)
+            break;
+        case 0x18: // Soft reset (Ctrl+X) - startup banner ONLY
+            UART2_Write((uint8_t*)GRBL_FIRMWARE_VERSION, sizeof(GRBL_FIRMWARE_VERSION));
+            break;
+        default:
+            // Unknown control char - silently ignore (GRBL behavior)
+            break;
+    }
+    
+    // Clear buffer and return to idle
+    nBytesRead = 0;
+    memset(rxBuffer, 0, sizeof(rxBuffer));
+    gcodeData.state = GCODE_STATE_IDLE;
+    break;
 ```
 
 ### G-Code Event Processing Pattern
@@ -209,9 +344,16 @@ When implementing velocity profiling in the future:
 
 ## Hardware Details
 - **Microcontroller:** PIC32MZ2048EFH100
+- **System Clock:** 200MHz
+- **Peripheral Bus Clock (PBCLK3):** 50MHz
 - **Compiler:** XC32
 - **Build System:** Make
-- **Timer Resolution:** 10µs per tick
+- **Timer Configuration:**
+  - TMR2/TMR3 in 32-bit mode (T32 = 1)
+  - Prescaler: 1:4 (TCKPS = 2)
+  - Timer Frequency: 12.5MHz
+  - **Timer Resolution: 80ns per tick**
+  - Free-running, no period match interrupts
 - **Output Compare Modules:** OC1 (X), OC2 (Y), OC3 (Z), OC4 (A)
 
 ## File Organization
