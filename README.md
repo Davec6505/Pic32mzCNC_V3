@@ -78,7 +78,7 @@ void OC1Handler(void) {                 // X-axis dominant
 
 ## Hardware & Toolchain Requirements
 - **Microcontroller:** Microchip PIC32MZ2048EFH100
-- **Timer System:** TMR2/TMR3 32-bit pair @ 10µs resolution
+- **Timer System:** TMR2/TMR3 32-bit pair @ 80ns resolution (12.5MHz)
 - **Output Compare:** OC1 (X), OC2 (Y), OC3 (Z), OC4 (A) axes
 - **Development Tools:** MPLAB X IDE, XC32 Compiler v4.x
 - **Communication:** UART2 for G-code commands (GRBL compatible)
@@ -163,7 +163,7 @@ This section provides detailed technical documentation of the **absolute compare
 ## Core Architecture Principles
 
 ### Free-Running Timer with Absolute Compare Scheduling
-- **TMR2 (32-bit)** runs continuously at 10µs/tick with **no interrupts** on the timer itself
+- **TMR2 (32-bit)** runs continuously at 80ns/tick (12.5MHz) with **no interrupts** on the timer itself
 - **Never stops or resets** during operation - provides jitter-free time base
 - All OCx modules operate in **absolute compare mode** with TMR2 as the shared time base
 
@@ -199,7 +199,7 @@ Subordinate axes are only scheduled for compare match when Bresenham's algorithm
 
 | Component | Description |
 |-----------|-------------|
-| **TMR2 (32-bit)** | Free-running timer with 10µs tick resolution, never stops or resets |
+| **TMR2 (32-bit)** | Free-running timer at 80ns/tick (12.5MHz), never stops or resets |
 | **OCx (OC1–OC4)** | Output Compare modules for X, Y, Z, A axes in absolute compare mode |
 | **OCx ISR** | Minimal interrupt handlers for pulse scheduling and step counting |
 | **Bresenham Engine** | State machine-based interpolation (non-ISR) for subordinate axis coordination |
@@ -220,7 +220,7 @@ Subordinate axes are only scheduled for compare match when Bresenham's algorithm
 ### Timer Configuration
 - Use 32-bit timer (TMR2:TMR3 pair) to avoid overflow issues
 - Timer runs free continuously - **never stop or reset during operation**
-- Configure for 10µs tick resolution for precise timing control
+- **Actual configuration**: PBCLK3 50MHz / Prescaler 1:4 = 12.5MHz (80ns resolution)
 
 ### Compare Register Management
 - **Always use absolute timer values** for OCxR and OCxRS (not relative offsets)

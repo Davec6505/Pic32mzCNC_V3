@@ -223,94 +223,132 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
     switch (gcodeData.state)
     {
     case GCODE_STATE_IDLE:
-        /* check if command has been recieved */
+        /* check if command has been received */
         nBytesAvailable = UART2_ReadCountGet();
 
+        // sucessive calls buffering to allow all chars to stream in.
         if(nBytesAvailable > 0){
-            // Read all bytes from ring buffer.
-           nBytesRead = UART2_Read((uint8_t*)&rxBuffer[nBytesRead], nBytesAvailable);  
-           
-           // We need to check the 1st char for control characters like ?,~,^X,!,etc.
-            for(uint16_t i=0; i<sizeof(GRBL_CONTROL_CHARS); i++){
-                if(rxBuffer[0] == GRBL_CONTROL_CHARS[i]){
-                    gcodeData.state = GCODE_STATE_CONTROL_CHAR;
+            // ✅ Accumulate bytes until we have a complete line
+            uint32_t space_available = sizeof(rxBuffer) - nBytesRead - 1;
+            uint32_t bytes_to_read = (nBytesAvailable < space_available) ? nBytesAvailable : space_available;
+            
+            if (bytes_to_read > 0) {
+                uint32_t new_bytes = UART2_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
+                nBytesRead += new_bytes;
+            }
+            
+            // ✅ CRITICAL: Check for line terminator OR control character
+            bool has_line_terminator = false;
+            for(uint32_t i = 0; i < nBytesRead; i++) {
+                if(rxBuffer[i] == '\n') {
+                    has_line_terminator = true;
                     break;
                 }
             }
-
-            // If we reach here, no control chars found = G-code command
-            // Process the buffer as G-code (null-terminated string)
-            cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
-         
-           // 🎯 EVENT PROCESSING - Commands ready for processing
-            // Events will be consumed by APP_Tasks via GCODE_GetNextEvent()
-            // This maintains clean separation between parsing and execution
-
-            // Send acknowledgment for next gcode line, stop if buffer is full
-            // wait for free space.
-            if(cmdQueue->count < GCODE_MAX_COMMANDS - 1){
-                     UART2_Write((uint8_t*)"OK\r\n", 4);
-            } else {
-                // Buffer full, do not send OK, wait for space
+        
+           // Process the received data        
+           // We need to check the 1st char for control characters like ?,~,^X,!,etc.
+           bool control_char_found = false;
+            for(uint8_t i=0; i<(sizeof(GRBL_CONTROL_CHARS))/(sizeof(GRBL_CONTROL_CHARS[0])); i++){
+                
+                if(rxBuffer[0] == GRBL_CONTROL_CHARS[i]){
+                    control_char_found = true;
+                    gcodeData.state = GCODE_STATE_CONTROL_CHAR;   
+                    break;          
+                }
             }
+
+        // ✅ Check for actual G-code ONCE before deciding what to do
+        bool has_gcode = false;
+        for(uint32_t i = 0; i < nBytesRead; i++) {
+            if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' && 
+                rxBuffer[i] != ' ' && rxBuffer[i] != '\t' && rxBuffer[i] != 0) {
+                has_gcode = true;
+                break;
+            }
+        }
+
+        // If we reach here, no control chars found = G-code command
+        // Process the buffer as G-code (null-terminated string)
+        if(control_char_found){              
+            // Fall through to GCODE_STATE_CONTROL_CHAR
+        
+        } else if(has_line_terminator && has_gcode){
+            // ✅ Complete G-code line with actual content - process it
+            cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
+
+            // ✅ GRBL v1.1 Protocol: Send "OK" after successfully parsing G-code line
+            UART2_Write((uint8_t*)"OK\r\n", 4);
 
             // reset rxBuffer for next line
             nBytesRead = 0; 
             memset(rxBuffer, 0, sizeof(rxBuffer));
-            // If line not complete, keep accumulating in rxBuffer
+            gcodeData.state = GCODE_STATE_IDLE;
             break;
-
+            
+        } else if(has_line_terminator && !has_gcode){
+            // ✅ Line terminator but no G-code (empty line or whitespace only)
+            // Clear buffer, don't send "OK", stay in IDLE
+            nBytesRead = 0; 
+            memset(rxBuffer, 0, sizeof(rxBuffer));
+            gcodeData.state = GCODE_STATE_IDLE;
+            break;
+            
+        } else {
+            // ✅ Incomplete line - wait for more data
+            // Don't clear buffer, don't send "OK", just exit and accumulate more bytes
+            break;
         }
-        // if we make it here chars read were not recognized.
+
+    } else {
+        // If no bytes break out of switch
         gcodeData.state = GCODE_STATE_IDLE;
         break;
-
+    }
+    // ✅ Fall through to GCODE_STATE_CONTROL_CHAR only when control_char_found = true
+    
 case GCODE_STATE_CONTROL_CHAR:
-        /* Handle specific control characters per GRBL protocol */
-        switch(rxBuffer[0]) {
-            case '?':  // Status query - immediate response required
-{
-    // Get current position from stepper module
-    StepperPosition* pos = STEPPER_GetPosition();
-    WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();  // Fixed: No parameter needed
-    
-    // Convert step counts to real coordinates
-    float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
-    float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
-    float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
-    
-    // Calculate work coordinates using kinematics internal coordinates
-    float wpos_x = mpos_x - wcs->offset.x;
-    float wpos_y = mpos_y - wcs->offset.y;
-    float wpos_z = mpos_z - wcs->offset.z;
-    
-    // Send GRBL status response
-    nBytesRead = snprintf((char*)txBuffer, sizeof(txBuffer),
-                         "<Idle|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:0,0>\r\n",
-                         mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z);
-    UART2_Write((uint8_t*)txBuffer, nBytesRead);
-    break;
-}
-            case '~':  // Cycle start/resume
-                // Resume motion, send "OK\r\n"
-                UART2_Write((uint8_t*)"OK\r\n", 4);
-                break;
-            case '!':  // Feed hold
-                // Pause motion, send "OK\r\n"
-                UART2_Write((uint8_t*)"OK\r\n", 4);
-                break;
-            case 0x18: // Soft reset (Ctrl+X)
-                // Reset system, send GRBL startup message
-                UART2_Write((uint8_t*)GRBL_FIRMWARE_VERSION, sizeof(GRBL_FIRMWARE_VERSION));
-                break;
-            default:
-                UART2_Write((uint8_t*)rxBuffer, 1); // Echo unknown control char
-                break;
+    /* Handle specific control characters per GRBL protocol */
+    switch(rxBuffer[0]) {
+        case '?':  // Status query - NO "OK" response
+        {
+            StepperPosition* pos = STEPPER_GetPosition();
+            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
+            
+            float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
+            float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
+            float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
+            
+            float wpos_x = mpos_x - wcs->offset.x;
+            float wpos_y = mpos_y - wcs->offset.y;
+            float wpos_z = mpos_z - wcs->offset.z;
+            
+            // Send GRBL status response (NO "OK")
+            nBytesRead = snprintf((char*)txBuffer, sizeof(txBuffer),
+                                "<Idle|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:0,0>\r\n",
+                                mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z);
+            UART2_Write((uint8_t*)txBuffer, nBytesRead);
+            break;
         }
-        nBytesRead = 0;
-        memset(rxBuffer, 0, sizeof(rxBuffer));
-        gcodeData.state = GCODE_STATE_IDLE;
-        break;
+        case '~':  // Cycle start/resume
+            UART2_Write((uint8_t*)"OK\r\n", 4);
+            break;
+        case '!':  // Feed hold
+            UART2_Write((uint8_t*)"OK\r\n", 4);
+            break;
+        case 0x18: // Soft reset (Ctrl+X)
+            UART2_Write((uint8_t*)GRBL_FIRMWARE_VERSION, sizeof(GRBL_FIRMWARE_VERSION));
+            break;
+        default:
+            // Unknown control char - silently ignore (GRBL behavior)
+            break;
+    }
+
+    // Clear buffer and return to idle
+    nBytesRead = 0;
+    memset(rxBuffer, 0, sizeof(rxBuffer));
+    gcodeData.state = GCODE_STATE_IDLE;
+    break;
 
     case GCODE_STATE_ERROR:
         // Send GRBL-style error message
