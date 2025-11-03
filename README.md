@@ -4,7 +4,7 @@
 
 **Pic32mzCNC_V3** is a modular CNC motion control system designed for high-performance, multi-axis stepper motor control using Microchip PIC32MZ microcontrollers. It features **absolute compare mode timer architecture**, **dynamic dominant axis tracking**, and **Bresenham interpolation** with a clean, maintainable architecture suitable for custom CNC machines and automation projects.
 
-### 🚀 **Recent Achievements**
+### 🚀 **Recent Achievements** (November 3, 2025)
 - ✅ **Professional event-driven G-code processing system**
 - ✅ **Clean architecture with proper abstraction layer preservation**
 - ✅ **Comprehensive G-code support: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91**
@@ -14,6 +14,10 @@
 - ✅ **16-command circular buffer with GRBL v1.1 protocol compliance**
 - ✅ **Absolute compare mode timer architecture with dynamic dominant axis tracking**
 - ✅ **Single instance pattern in appData - maintainable and testable**
+- ✅ **Hardware FPU enabled with optimized compiler flags**
+- ✅ **Trapezoidal velocity profiling architecture designed (GRBL-style)**
+- ✅ **256 microstepping support validated with ISR budget analysis**
+- ✅ **Single ISR motion architecture - clean, no V2 multi-ISR complexity**
 
 ## 🎯 **Current Implementation Status**
 
@@ -40,11 +44,14 @@
 - **Pulse generation control**: TMR2-based absolute timer scheduling
 - **Axis disabling**: `OCxR = OCxRS` for clean pulse stopping
 
-#### **Motion Controller** (In Progress)
+#### **Motion Controller** (Ready for Implementation)
 - **Master execution engine**: Bresenham interpolation state machine 
 - **Non-blocking execution**: State-based segment processing
 - **Absolute timer integration**: OCx scheduling with TMR2 values
 - **Segment management**: Smooth transitions between motion segments
+- **Trapezoidal velocity profiling**: GRBL-style acceleration/deceleration
+- **Single ISR architecture**: Dominant axis handles everything (no multi-ISR complexity)
+- **Performance validated**: 42% ISR headroom at worst-case 512kHz (256 microstepping)
 
 ### 🏗️ **Architecture Highlights**
 
@@ -250,8 +257,90 @@ Choose the method that best suits your motion control requirements:
 
 ## Future Enhancements
 
-### Velocity Profiling
-**Status**: Under consideration for future implementation
+### Velocity Profiling (November 3, 2025)
+**Status**: Architecture designed and validated, ready to implement
+
+**Motion Control Design:**
+- **Single ISR Architecture**: Only dominant axis (OC1) interrupt enabled
+  - ISR executes: Bresenham step generation, velocity profile updates, segment completion
+  - State machine: Loads segments, manages queue, initializes parameters
+  - **No multi-ISR complexity** (learned from V2 project mistakes)
+  
+- **GRBL-Style Trapezoidal Profiling**:
+  - Simpler than GRBL's two-tier buffer (start with single-tier)
+  - Match GRBL math: trapezoidal velocity with look-ahead planning (phase 2)
+  - Phased approach: Constant velocity → Trapezoidal → Look-ahead
+  
+- **Performance Analysis (256 Microstepping)**:
+  - Worst case: 51,200 steps/mm × 10mm/sec = 512,000 steps/sec
+  - Per-step timing: 1.95μs = 24 timer ticks (80ns resolution)
+  - ISR budget @ 512kHz: 390 CPU cycles (200MHz × 1.95μs)
+  - ISR usage: ~225 cycles (Bresenham + velocity update + scheduling)
+  - **Margin: 165 cycles (42% headroom - acceptable!)**
+
+- **Hardware FPU Enabled**:
+  - PIC32MZ2048EFH100 has hardware floating point unit
+  - 64-bit FP register file (mfp64 architecture)
+  - Compiler flags: `-mhard-float -ffast-math -fno-math-errno`
+  - **Use FPU for planning** (KINEMATICS): sqrtf, acceleration math, arc interpolation
+  - **ISR uses integer math only**: Pre-computed intervals, rate_delta add/subtract
+
+**MotionSegment Structure Extended** (in `incs/data_structures.h`):
+```c
+typedef struct {
+    // Existing: Bresenham, steps, pulse_width, dominant_axis
+    
+    // NEW: Trapezoidal profile (GRBL-style)
+    uint32_t initial_rate;       // Start interval (timer ticks)
+    uint32_t nominal_rate;       // Cruise interval (timer ticks)
+    uint32_t final_rate;         // End interval (timer ticks)
+    uint32_t accelerate_until;   // Step count to end accel
+    uint32_t decelerate_after;   // Step count to start decel
+    int32_t rate_delta;          // Interval change per step (signed)
+    
+    // Kept: Physics params for debugging
+    float start_velocity, max_velocity, end_velocity, acceleration;
+} MotionSegment;
+```
+
+**ISR Segment Conditioning Pattern** (runs IN the ISR):
+```c
+void __ISR(_OC1_VECTOR, IPL5SOFT) OC1Handler(void) {
+    IFS0CLR = _IFS0_OC1IF_MASK;  // Clear flag FIRST
+    
+    // Update velocity profile (integer math only)
+    if (steps_completed <= accelerate_until) {
+        current_step_interval -= rate_delta;  // Accelerate
+    } else if (steps_completed > decelerate_after) {
+        current_step_interval += rate_delta;  // Decelerate
+    }
+    // Cruise: no change to interval
+    
+    // Bresenham for subordinate axes
+    // ...
+    
+    // Schedule next dominant pulse
+    uint32_t now = TMR2;
+    OC1R = now + current_step_interval;  // ABSOLUTE timer value
+    OC1RS = OC1R + pulse_width;
+    
+    steps_completed++;
+}
+```
+
+**Implementation Phases:**
+1. **Phase 1**: Constant velocity motion (verify Bresenham works)
+2. **Phase 2**: Single-tier trapezoidal profiling (this architecture)
+3. **Phase 3**: Two-tier buffer with look-ahead planning (future)
+
+**Key Decisions:**
+- Start simpler than full GRBL implementation
+- Match GRBL math but use simpler buffer structure
+- Add look-ahead later when needed for smooth corners
+- Single ISR approach eliminates V2 synchronization headaches
+
+### Velocity Profiling (Legacy Notes)
+**Status**: ~~Under consideration for future implementation~~ **Superseded by November 3, 2025 design above**
 
 Velocity profiling will enable smooth acceleration and deceleration:
 - **Trapezoidal profiles**: Constant acceleration/deceleration with cruise phase

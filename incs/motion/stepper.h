@@ -22,5 +22,12 @@ void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset);  // Direct enum!
 void STEPPER_DisableAxis(E_AXIS axis);                    // Direct enum!
 StepperPosition* STEPPER_GetPosition(void);
 
+// ✅ NEW: Segment loading and control (called by motion controller)
+void STEPPER_LoadSegment(MotionSegment* segment);         // Load segment for ISR execution
+void STEPPER_SetDominantAxis(E_AXIS axis);                // Set which axis is dominant
+E_AXIS STEPPER_GetDominantAxis(void);                     // Query current dominant axis
+bool STEPPER_IsSegmentComplete(void);                     // Check if current segment done
+void STEPPER_ClearSegmentComplete(void);                  // Clear completion flag
+
 
 #endif /* STEPPER_H */
