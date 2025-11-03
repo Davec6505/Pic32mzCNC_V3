@@ -6,18 +6,22 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 ## 🚀 Current Implementation Status (November 2025)
 - ✅ **Professional event-driven G-code system** with clean architecture
 - ✅ **Event queue implementation** respecting APP_DATA abstraction layer
-- ✅ **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91
+- ✅ **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T
 - ✅ **Core architecture implemented** with absolute compare mode
 - ✅ **Single instance pattern in appData** for clean separation  
-- ✅ **Utils module complete** with professional string tokenization
-- ✅ **Multi-command line support** for complex G-code like "G90G1X10Y10F1000"
+- ✅ **Proper tokenization** - G/M commands keep all parameters (LinuxCNC/GRBL compatible)
+- ✅ **Multi-command line support** - "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
+- ✅ **Modal parameter support** - Standalone F, S, T commands (GRBL v1.1 compliant)
 - ✅ **16-command circular buffer** with flow control and overflow protection
+- ✅ **Harmony state machine pattern** - proper APP_Tasks architecture
+- ✅ **Non-blocking event processing** - one event per iteration
 - ✅ **Kinematics module complete** with physics calculations
 - ✅ **Stepper module complete** with hardware abstraction
 - ✅ **Persistent GRBL settings** with NVM flash storage (27 parameters)
 - ✅ **Delayed flash initialization** - read after peripherals ready (APP_LOAD_SETTINGS state)
 - ✅ **Unified data structures** - no circular dependencies, clean module separation
-- 🚧 **Flow control for UGS streaming** - ready to implement (infrastructure complete)
+- ✅ **LED blink rate stable** - no slowdown with complex commands
+- 🚧 **Flow control for UGS streaming** - infrastructure complete, ready to test
 - 🚧 **Motion controller in progress** - Bresenham state machine
 - ✅ **Project compiles successfully** with XC32 compiler
 
@@ -85,7 +89,9 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
   - `~` → Resume, silent
   - `^X` → Reset + banner only
 - **Empty lines ignored**: Whitespace-only input gets no response
-- **Echo disabled**: GRBL doesn't echo commands by default### Single Instance Pattern in appData ✅
+- **Echo disabled**: GRBL doesn't echo commands by default
+
+### Single Instance Pattern in appData ✅
 - **All major data structures** centralized in APP_DATA struct
 - **No static module data** - clean separation of concerns  
 - **Pass by reference** through function calls for explicit ownership
@@ -93,14 +99,21 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 
 ### Professional G-Code Event System ✅
 - **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
-- **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91 commands
+- **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T commands
+- **Proper tokenization**: G/M commands consume ALL parameters until next G/M
+  - Example: `G90G1X10Y10F1000` → Tokens: `"G90"`, `"G1X10Y10F1000"`
+  - Example: `G1X10F1000` → Token: `"G1X10F1000"` (stays together)
+- **Modal parameter support**: Standalone F, S, T commands (LinuxCNC/GRBL compatible)
+  - `F1500` → Changes feedrate without motion
+  - `S2000` → Changes spindle speed
+  - `T1` → Tool change
 - **Abstraction layer respect**: No APP_DATA exposure, maintains clean boundaries
-- **Multi-command tokenization**: "G90G1X10Y10F1000S200M3" → individual events
 - **Zero memory allocation**: Deterministic processing for real-time systems
 - **Utils module**: Professional string parsing with robust tokenization
 - **Flow control**: 16-command circular buffer with "OK" withholding
 - **Real-time characters**: Bypass tokenization for immediate '?!~^X' processing
 - **GRBL compliance**: Full v1.1 protocol support with proper status reporting
+- **Non-blocking design**: One event processed per APP_Tasks() iteration
 
 ## Code Style Guidelines
 

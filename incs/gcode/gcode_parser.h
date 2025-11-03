@@ -38,7 +38,10 @@ typedef enum {
     GCODE_EVENT_COOLANT_ON,
     GCODE_EVENT_COOLANT_OFF,
     GCODE_EVENT_SET_ABSOLUTE,
-    GCODE_EVENT_SET_RELATIVE
+    GCODE_EVENT_SET_RELATIVE,
+    GCODE_EVENT_SET_FEEDRATE,       // Standalone F command (modal)
+    GCODE_EVENT_SET_SPINDLE_SPEED,  // Standalone S command (modal)
+    GCODE_EVENT_SET_TOOL            // Standalone T command (modal)
 } GCODE_EventType;
 
 typedef struct {
@@ -63,6 +66,18 @@ typedef struct {
         struct {
             uint32_t rpm;           // Spindle speed
         } spindle;
+        
+        struct {
+            float feedrate;         // Modal feedrate setting
+        } setFeedrate;
+        
+        struct {
+            uint32_t rpm;           // Modal spindle speed setting
+        } setSpindleSpeed;
+        
+        struct {
+            uint32_t toolNumber;    // Tool number
+        } setTool;
     } data;
 } GCODE_Event;
 

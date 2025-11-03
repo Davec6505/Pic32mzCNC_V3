@@ -70,6 +70,7 @@ typedef struct {
 typedef enum {
     APP_CONFIG = 0,
     APP_LOAD_SETTINGS,
+    APP_GCODE_INIT,
     APP_IDLE,
     APP_WAIT_FOR_CONFIGURATION,
     APP_DEVICE_ATTACHED,

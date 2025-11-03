@@ -65,22 +65,26 @@ static uint32_t find_token_end(const char* str, uint32_t start, uint32_t max_len
     uint32_t end = start + 1;
     
     if (start_char == 'G' || start_char == 'M') {
-        // G/M command: read until next command letter or line end
+        // ✅ G/M command: consume ALL parameters until next G/M command or line end
+        // Example: "G1X10Y10F1000" → stays together as one token
+        // Example: "G90G1X10" → splits into "G90" and "G1X10"
         while (end < max_len) {
             char c = str[end];
-            // Stop at next command letter
-            if (c == 'G' || c == 'M' || c == 'F' || c == 'S' || c == 'T' || c == 'P') {
+            // ✅ Stop ONLY at next G/M command (start of new command)
+            if (c == 'G' || c == 'M') {
                 break;
             }
             // Stop at line terminators or comments
-            if (c == '\n' || c == '\r' || c == '\0' || c == '(' || c == '#' || c == ';') {
+            if (c == '\n' || c == '\r' || c == '\0' || c == '(' || c == '#' || c == ';' || c == ' ' || c == '\t') {
                 break;
             }
+            // ✅ Everything else (X, Y, Z, A, F, S, T, P, I, J, R, etc.) stays with this G/M command
             end++;
         }
     }
     else if (start_char == 'F' || start_char == 'S' || start_char == 'T' || start_char == 'P') {
-        // Parameter command: read numeric value
+        // Standalone parameter command: read numeric value only
+        // This handles cases like "G1X10" followed by "S1000M3" on next line
         while (end < max_len) {
             char c = str[end];
             if ((c >= '0' && c <= '9') || c == '.' || c == '-') {
@@ -91,22 +95,14 @@ static uint32_t find_token_end(const char* str, uint32_t start, uint32_t max_len
         }
     }
     else if (start_char == 'X' || start_char == 'Y' || start_char == 'Z' || start_char == 'A') {
-        // Coordinate group: read all coordinate axes together (X10Y20Z5)
+        // Standalone coordinate (shouldn't happen with proper G-code, but handle it)
+        // Read numeric value
         while (end < max_len) {
             char c = str[end];
-            if (c == 'X' || c == 'Y' || c == 'Z' || c == 'A') {
-                end++;  // Skip axis letter
-                // Read numeric value
-                while (end < max_len) {
-                    char val = str[end];
-                    if ((val >= '0' && val <= '9') || val == '.' || val == '-') {
-                        end++;
-                    } else {
-                        break;
-                    }
-                }
+            if ((c >= '0' && c <= '9') || c == '.' || c == '-') {
+                end++;
             } else {
-                break;  // End of coordinate group
+                break;
             }
         }
     }
