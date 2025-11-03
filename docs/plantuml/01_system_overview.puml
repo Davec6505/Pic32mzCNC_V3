@@ -4,8 +4,11 @@ title CNC Motion Control - Current Implementation Status (November 2025)
 
 participant "GCODE_Tasks\n(✅ Complete)" as GCODE
 participant "UTILS_Module\n(✅ Complete)" as UTILS  
+participant "APP_Tasks\n(✅ Complete)" as APP
 participant "KINEMATICS\n(✅ Complete)" as KINEMATICS
+participant "STEPPER\n(✅ Complete)" as STEPPER
 participant "MOTION_Tasks\n(🚧 In Progress)" as MOTION
+participant "LIMIT_CHECK\n(✅ Complete)" as LIMITS
 participant "TMR2\n(Free-Running)" as TMR2
 participant "OC1 ISR\n(X Axis)" as OC1
 participant "OC2 ISR\n(Y Axis)" as OC2

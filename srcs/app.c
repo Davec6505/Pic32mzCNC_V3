@@ -15,8 +15,11 @@
 // *****************************************************************************
 
 #include <string.h>
+#include <math.h>  // For fabsf in limit checks
 #include "app.h"
 #include "settings.h"
+#include "kinematics.h"  // For KINEMATICS_LinearMove and CoordinatePoint
+#include "motion_utils.h"  // For hard limit checking
 
 // *****************************************************************************
 // *****************************************************************************
@@ -84,7 +87,7 @@ void APP_Initialize ( void )
     appData.motionQueueTail = 0;
     appData.motionQueueCount = 0;
     
-    // Initialize G-code command queue
+    // ✅ Initialize G-code command queue
     memset((void*)&appData.gcodeCommandQueue, 0, sizeof(GCODE_CommandQueue));
     appData.gcodeCommandQueue.head = 0;
     appData.gcodeCommandQueue.tail = 0;
@@ -93,6 +96,21 @@ void APP_Initialize ( void )
     // ✅ Initialize nested motion queue info for flow control
     appData.gcodeCommandQueue.motionQueueCount = 0;
     appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
+    
+    // ✅ Initialize current position (work coordinates) to origin
+    appData.currentX = 0.0f;
+    appData.currentY = 0.0f;
+    appData.currentZ = 0.0f;
+    appData.currentA = 0.0f;
+    
+    // ✅ Initialize modal state (GRBL defaults)
+    appData.modalFeedrate = 0.0f;      // No default feedrate (must be set explicitly)
+    appData.modalSpindleRPM = 0;       // Spindle off
+    appData.modalToolNumber = 0;       // No tool selected
+    appData.absoluteMode = true;       // G90 absolute mode (GRBL default)
+    
+    // ✅ Initialize alarm state
+    appData.alarmCode = 0;             // No alarm
 
 
 }
@@ -164,50 +182,149 @@ void APP_Tasks ( void )
             MOTION_Tasks(appData.motionQueue, &appData.motionQueueHead, 
                         &appData.motionQueueTail, &appData.motionQueueCount);
 
-            // ✅ STEP 4: Process ONE G-code event per iteration (non-blocking!)
+            // ✅ STEP 4: HARD LIMIT CHECK (GRBL safety feature)
+            // Check limit switches with inversion mask from settings
+            GRBL_Settings* settings = SETTINGS_GetCurrent();
+            if(MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+                // ⚠️ HARD LIMIT TRIGGERED - Emergency stop!
+                appData.alarmCode = 1;  // Alarm code 1 = hard limit
+                appData.state = APP_ALARM;
+                break;  // Immediate transition to alarm state
+            }
+
+            // ✅ STEP 5: Process ONE G-code event per iteration (non-blocking!)
             GCODE_Event event;
             if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
                 switch (event.type) {
                     case GCODE_EVENT_LINEAR_MOVE:
-                        // Convert to motion segment using kinematics
-                        // MotionSegment segment;
-                        // KINEMATICS_LinearMove(currentPos, targetPos, event.data.linearMove.feedrate, &segment);
-                        // Add to motion queue through YOUR abstraction layer
-                        // TODO: Implement motion segment queueing
+                    {
+                        // Check if motion queue has space before processing
+                        if(appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
+                            // Build start and end coordinates
+                            CoordinatePoint start = {appData.currentX, appData.currentY, appData.currentZ, appData.currentA};
+                            CoordinatePoint end;
+                            
+                            if(appData.absoluteMode) {
+                                // G90 absolute mode - use coordinates directly
+                                end.x = event.data.linearMove.x;
+                                end.y = event.data.linearMove.y;
+                                end.z = event.data.linearMove.z;
+                                end.a = event.data.linearMove.a;
+                            } else {
+                                // G91 relative mode - add to current position
+                                end.x = appData.currentX + event.data.linearMove.x;
+                                end.y = appData.currentY + event.data.linearMove.y;
+                                end.z = appData.currentZ + event.data.linearMove.z;
+                                end.a = appData.currentA + event.data.linearMove.a;
+                            }
+                            
+                            // ✅ SOFT LIMIT CHECK (non-blocking GRBL implementation)
+                            // Check target position against max_travel settings
+                            GRBL_Settings* settings = SETTINGS_GetCurrent();
+                            bool limit_violation = false;
+                            
+                            // Machine coordinates are negative (GRBL convention: 0,0,0 is max travel position)
+                            // Work coordinates typically positive, but we check absolute values
+                            if(fabsf(end.x) > settings->max_travel_x) {
+                                limit_violation = true;
+                            }
+                            if(fabsf(end.y) > settings->max_travel_y) {
+                                limit_violation = true;
+                            }
+                            if(fabsf(end.z) > settings->max_travel_z) {
+                                limit_violation = true;
+                            }
+                            
+                            // If limit violated, trigger alarm (GRBL behavior)
+                            if(limit_violation) {
+                                appData.alarmCode = 2;  // Soft limit alarm
+                                appData.state = APP_ALARM;
+                                break;  // Exit event processing immediately
+                            }
+                            
+                            // Use feedrate from event, or modal feedrate if not specified
+                            float feedrate = event.data.linearMove.feedrate;
+                            if(feedrate == 0.0f) {
+                                feedrate = appData.modalFeedrate;
+                            } else {
+                                // Update modal feedrate
+                                appData.modalFeedrate = feedrate;
+                            }
+                            
+                            // Get next queue slot
+                            MotionSegment* segment = &appData.motionQueue[appData.motionQueueHead];
+                            
+                            // Convert to motion segment using kinematics (reuse existing function)
+                            KINEMATICS_LinearMove(start, end, feedrate, segment);
+                            
+                            // Add to motion queue
+                            appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+                            appData.motionQueueCount++;
+                            
+                            // Update current position (work coordinates)
+                            appData.currentX = end.x;
+                            appData.currentY = end.y;
+                            appData.currentZ = end.z;
+                            appData.currentA = end.a;
+                        }
                         break;
+                    }
                         
                     case GCODE_EVENT_SPINDLE_ON:
-                        // Handle spindle control
-                        // SPINDLE_SetSpeed(event.data.spindle.rpm);
+                        // Update modal spindle RPM
+                        appData.modalSpindleRPM = event.data.spindle.rpm;
+                        // TODO: Implement spindle control hardware interface
+                        break;
+                        
+                    case GCODE_EVENT_SPINDLE_OFF:
+                        appData.modalSpindleRPM = 0;
+                        // TODO: Implement spindle control hardware interface
                         break;
                         
                     case GCODE_EVENT_SET_ABSOLUTE:
-                        // Set coordinate mode to absolute
-                        // KINEMATICS_SetCoordinateMode(COORD_MODE_ABSOLUTE);
+                        // G90 - absolute positioning mode
+                        appData.absoluteMode = true;
                         break;
                         
                     case GCODE_EVENT_SET_RELATIVE:
-                        // Set coordinate mode to relative
-                        // KINEMATICS_SetCoordinateMode(COORD_MODE_RELATIVE);
+                        // G91 - relative positioning mode
+                        appData.absoluteMode = false;
                         break;
                         
                     case GCODE_EVENT_SET_FEEDRATE:
-                        // ✅ Standalone F command - update modal feedrate
-                        // KINEMATICS_SetModalFeedrate(event.data.setFeedrate.feedrate);
+                        // Standalone F command - update modal feedrate (GRBL v1.1 compliant)
+                        appData.modalFeedrate = event.data.setFeedrate.feedrate;
                         break;
                         
                     case GCODE_EVENT_SET_SPINDLE_SPEED:
-                        // ✅ Standalone S command - update modal spindle speed
-                        // SPINDLE_SetModalSpeed(event.data.setSpindleSpeed.rpm);
+                        // Standalone S command - update modal spindle speed (GRBL v1.1 compliant)
+                        appData.modalSpindleRPM = event.data.setSpindleSpeed.rpm;
                         break;
                         
                     case GCODE_EVENT_SET_TOOL:
-                        // ✅ Tool change command
-                        // TOOL_Change(event.data.setTool.toolNumber);
+                        // Tool change command (T command)
+                        appData.modalToolNumber = event.data.setTool.toolNumber;
+                        // TODO: Implement tool change logic
+                        break;
+                        
+                    case GCODE_EVENT_DWELL:
+                        // G4 dwell command
+                        // TODO: Implement non-blocking dwell using CORETIMER
+                        break;
+                        
+                    case GCODE_EVENT_ARC_MOVE:
+                        // G2/G3 arc commands
+                        // TODO: Implement arc interpolation via KINEMATICS_ArcMove
+                        break;
+                        
+                    case GCODE_EVENT_COOLANT_ON:
+                    case GCODE_EVENT_COOLANT_OFF:
+                        // M7/M8/M9 coolant commands
+                        // TODO: Implement coolant control
                         break;
                         
                     default:
-                        // Handle other events or ignore
+                        // Unknown or unhandled event
                         break;
                 }
             }
@@ -219,6 +336,54 @@ void APP_Tasks ( void )
                 LED2_Toggle();
                 idle_indicator = 0;
             }
+            break;
+        }
+
+        case APP_ALARM:
+        {
+            // ⚠️ EMERGENCY STOP STATE - Hard limit or alarm triggered
+            // System halted - requires soft reset (^X) to clear
+            // TODO: Implement $X unlock command for alarm clear without position loss
+            
+            // Execute emergency stop ONCE when entering this state
+            static bool alarm_handled = false;
+            if (!alarm_handled) {
+                // 1. Disable all stepper axes immediately (cut power + stop pulses)
+                STEPPER_DisableAll();
+                
+                // 2. Clear motion queue (discard all pending moves)
+                appData.motionQueueCount = 0;
+                appData.motionQueueHead = 0;
+                appData.motionQueueTail = 0;
+                
+                // 3. Clear G-code command queue
+                appData.gcodeCommandQueue.count = 0;
+                appData.gcodeCommandQueue.head = 0;
+                appData.gcodeCommandQueue.tail = 0;
+                
+                // 4. Send GRBL alarm message to host
+                switch(appData.alarmCode) {
+                    case 1:
+                        UART2_Write((uint8_t*)"ALARM:1 Hard limit triggered\r\n", 31);
+                        break;
+                    case 2:
+                        UART2_Write((uint8_t*)"ALARM:2 Soft limit exceeded\r\n", 30);
+                        break;
+                    case 3:
+                        UART2_Write((uint8_t*)"ALARM:3 Abort during cycle\r\n", 29);
+                        break;
+                    default:
+                        UART2_Write((uint8_t*)"ALARM:9 Unknown alarm\r\n", 24);
+                        break;
+                }
+                
+                alarm_handled = true;
+            }
+            
+            // Stay in alarm state until cleared
+            // TODO: Implement unlock ($X) or soft reset (^X) commands
+            // For now, must reset device to clear alarm
+            
             break;
         }
 

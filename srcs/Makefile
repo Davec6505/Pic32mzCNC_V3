@@ -249,12 +249,20 @@ FPU_FLAGS := -mhard-float
 # Fast math optimizations (safe for CNC calculations)
 FPU_FLAGS += -ffast-math -fno-math-errno
 
-DIRECT_OBJ := $(CC) $(OPT_FLAGS) -c $(MCU) -ffunction-sections -fdata-sections -fno-common $(FPU_FLAGS) $(INCS) $(FLAGS) -mdfp="$(DFP)"
+# ✅ MIPS Architecture Optimizations (PIC32MZ is MIPS32r2 with DSP ASE)
+# These flags enable dual-issue superscalar execution and hardware acceleration
+MIPS_FLAGS := -mips32r2           # MIPS32 Release 2 instruction set
+MIPS_FLAGS += -mdspr2             # DSP ASE Rev 2 (hardware multiply-accumulate)
+# Note: -finline-functions requires MPLAB XC32 PRO license - removed
+MIPS_FLAGS += -funroll-loops      # Unroll loops (helps with arc interpolation)
+MIPS_FLAGS += -fomit-frame-pointer # Free up register for better code gen
+
+DIRECT_OBJ := $(CC) $(OPT_FLAGS) -c $(MCU) -ffunction-sections -fdata-sections -fno-common $(FPU_FLAGS) $(MIPS_FLAGS) $(INCS) $(FLAGS) -mdfp="$(DFP)"
 			
 
 LINKER_SCRIPT := $(DFP)/xc32/$(DEVICE)/p$(DEVICE).ld
-# ✅ Add FPU flags to linker (must match compiler flags)
-DIRECT_LINK := $(CC) $(MCU) -nostartfiles $(FPU_FLAGS) $(CONFIG_DEFINES) -mdfp="$(DFP)" -Wl,--defsym=__MPLAB_BUILD=1,--script="$(LINKER_SCRIPT)",--defsym=_min_heap_size=$(HEAP_SIZE),--defsym=_min_stack_size=$(STACK_SIZE),--gc-sections,--no-code-in-dinit,--no-dinit-in-serial-mem,-Map="$(OUT_DIR)/$(BUILD_CONFIG).map",--memorysummary,$(OUT_DIR)/memoryfile.xml 
+# ✅ Add FPU + MIPS flags to linker (must match compiler flags)
+DIRECT_LINK := $(CC) $(MCU) -nostartfiles $(FPU_FLAGS) $(MIPS_FLAGS) $(CONFIG_DEFINES) -mdfp="$(DFP)" -Wl,--defsym=__MPLAB_BUILD=1,--script="$(LINKER_SCRIPT)",--defsym=_min_heap_size=$(HEAP_SIZE),--defsym=_min_stack_size=$(STACK_SIZE),--gc-sections,--no-code-in-dinit,--no-dinit-in-serial-mem,-Map="$(OUT_DIR)/$(BUILD_CONFIG).map",--memorysummary,$(OUT_DIR)/memoryfile.xml 
 
 
 

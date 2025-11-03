@@ -4,10 +4,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "../data_structures.h"  // ✅ E_AXIS defined here (parent directory)
-#include "plib_ocmp5.h"   //X Axis pulse
-#include "plib_ocmp2.h"   //Y Axis pulse
-#include "plib_ocmp3.h"   //Z Axis pulse
-#include "plib_ocmp4.h"   //A Axis pulse
+#include "../config/default/peripheral/ocmp/plib_ocmp5.h"   //X Axis pulse
+#include "../config/default/peripheral/ocmp/plib_ocmp2.h"   //Y Axis pulse
+#include "../config/default/peripheral/ocmp/plib_ocmp3.h"   //Z Axis pulse
+#include "../config/default/peripheral/ocmp/plib_ocmp4.h"   //A Axis pulse
 
 
 typedef struct {
@@ -18,16 +18,13 @@ typedef struct {
 
 void STEPPER_Initialize(void);
 void STEPPER_SetStepInterval(uint32_t interval);
-void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset);  // Direct enum!
-void STEPPER_DisableAxis(E_AXIS axis);                    // Direct enum!
-StepperPosition* STEPPER_GetPosition(void);
+void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset);  // Schedule pulse at absolute TMR2 time
+void STEPPER_DisableAxis(E_AXIS axis);                    // Stop pulse generation
+void STEPPER_DisableAll(void);                            // Emergency stop - disable all axes
+StepperPosition* STEPPER_GetPosition(void);               // Get current position counters
 
-// ✅ NEW: Segment loading and control (called by motion controller)
-void STEPPER_LoadSegment(MotionSegment* segment);         // Load segment for ISR execution
-void STEPPER_SetDominantAxis(E_AXIS axis);                // Set which axis is dominant
-E_AXIS STEPPER_GetDominantAxis(void);                     // Query current dominant axis
-bool STEPPER_IsSegmentComplete(void);                     // Check if current segment done
-void STEPPER_ClearSegmentComplete(void);                  // Clear completion flag
+// ✅ NEW: Direction control (called by motion controller before scheduling pulses)
+void STEPPER_SetDirection(E_AXIS axis, bool forward);     // Set direction for axis
 
 
 #endif /* STEPPER_H */

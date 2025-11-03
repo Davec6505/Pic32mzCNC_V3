@@ -86,6 +86,7 @@ typedef enum {
     APP_LOAD_SETTINGS,
     APP_GCODE_INIT,
     APP_IDLE,
+    APP_ALARM,                      // Emergency stop / hard limit triggered
     APP_WAIT_FOR_CONFIGURATION,
     APP_DEVICE_ATTACHED,
     APP_WAIT_FOR_DEVICE_ATTACH,
@@ -108,6 +109,21 @@ typedef struct {
     uint32_t motionQueueHead;
     uint32_t motionQueueTail;
     uint32_t motionQueueCount;
+    
+    // Current position tracking (work coordinates)
+    float currentX;
+    float currentY;
+    float currentZ;
+    float currentA;
+    
+    // Modal state (GRBL-style)
+    float modalFeedrate;      // Last F value (mm/min)
+    uint32_t modalSpindleRPM; // Last S value
+    uint32_t modalToolNumber; // Last T value
+    bool absoluteMode;        // G90/G91 state
+    
+    // Alarm state (GRBL safety)
+    uint8_t alarmCode;        // 0=no alarm, 1=hard limit, 2=soft limit, 3=abort, etc.
 } APP_DATA;
 
 #endif // DATA_STRUCTURES_H
