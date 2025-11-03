@@ -15,7 +15,9 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - ✅ **Kinematics module complete** with physics calculations
 - ✅ **Stepper module complete** with hardware abstraction
 - ✅ **Persistent GRBL settings** with NVM flash storage (27 parameters)
-- ✅ **Delayed flash initialization** - read after peripherals ready
+- ✅ **Delayed flash initialization** - read after peripherals ready (APP_LOAD_SETTINGS state)
+- ✅ **Unified data structures** - no circular dependencies, clean module separation
+- 🚧 **Flow control for UGS streaming** - ready to implement (infrastructure complete)
 - 🚧 **Motion controller in progress** - Bresenham state machine
 - ✅ **Project compiles successfully** with XC32 compiler
 
@@ -411,9 +413,53 @@ Physical Address    Virtual (KSEG1)     Size        Purpose
 - `srcs/motion/motion.c` - Master motion controller 🚧
 - `srcs/motion/kinematics.c` - Physics calculations ✅
 - `srcs/settings/settings.c` - Persistent GRBL settings with NVM flash ✅
+- `incs/data_structures.h` - Unified data structures (no circular dependencies) ✅
 - `incs/common.h` - Shared constants and enums
 - `docs/plantuml/` - Architecture diagrams (includes tokenization flow)
 - `README.md` - Complete architecture documentation
+
+## Unified Data Structures (Completed ✅)
+
+### Architecture Pattern
+All major data structures consolidated in `incs/data_structures.h` to eliminate circular dependencies and provide clean module separation.
+
+**Structure Hierarchy:**
+```c
+// incs/data_structures.h
+- E_AXIS enum (AXIS_X, AXIS_Y, AXIS_Z, AXIS_A, NUM_AXIS)
+- MotionSegment (Bresenham, physics, timing)
+- GCODE_Command
+- GCODE_CommandQueue
+  ├── commands[16]
+  ├── head, tail, count
+  └── motionQueueCount, maxMotionSegments (nested for flow control)
+- APP_STATES enum
+- APP_DATA
+  ├── state
+  ├── gcodeCommandQueue (with nested motion info)
+  └── motionQueue[16], head, tail, count
+```
+
+### Flow Control Infrastructure (Ready to Implement)
+The nested motion queue info in `GCODE_CommandQueue` enables flow control without circular dependencies:
+
+```c
+// app.c syncs motion queue status before GCODE processing
+case APP_IDLE:
+    // ✅ Sync motion queue count for flow control
+    appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
+    
+    // Now GCODE_Tasks can check motion buffer occupancy
+    GCODE_Tasks(&appData.gcodeCommandQueue);
+    break;
+```
+
+### Benefits of Unified Structures
+- ✅ **No circular dependencies** - all structures in one header
+- ✅ **Clean module separation** - data vs logic separation
+- ✅ **Single source of truth** - structure definitions in one place
+- ✅ **Easy to test** - mock entire APP_DATA structure
+- ✅ **Flow control ready** - nested motion queue info accessible to G-code parser
 
 ## Settings Implementation (Completed ✅)
 

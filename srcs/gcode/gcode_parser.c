@@ -27,8 +27,10 @@
 #include "kinematics.h"
 #include "utils.h"
 #include "settings.h"
+#include "data_structures.h"  // ✅ Access to GCODE_CommandQueue with nested motion info
 
-// Note: APP_DATA structure access available through parameter - no include needed
+// ✅ Flow control threshold - leave 2 slots free for safety
+#define MOTION_BUFFER_THRESHOLD 2
 
 /* USART Buffers */
 static uint8_t txBuffer[128];
@@ -286,8 +288,14 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             // ✅ Complete G-code line with actual content - process it
             cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
 
-            // ✅ GRBL v1.1 Protocol: Send "OK" after successfully parsing G-code line
-            UART2_Write((uint8_t*)"OK\r\n", 4);
+            // ✅ GRBL v1.1 Flow Control: Check motion buffer before sending "OK"
+            // Access nested motion queue info (no circular dependency!)
+            if(cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)){
+                // ✅ Motion buffer has space - send "OK" to allow next command
+                UART2_Write((uint8_t*)"ok\r\n", 4);
+            }
+            // ✅ Else: Withhold "OK" - UGS will wait before sending next line
+            // "OK" will be sent later when motion buffer has space (handled in motion controller)
 
             // reset rxBuffer for next line
             nBytesRead = 0; 

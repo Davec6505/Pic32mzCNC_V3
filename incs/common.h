@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "data_structures.h"  // ✅ For E_AXIS and NUM_AXIS
 
 /* grbl firmware commands */
 #define FIRMWARE_VERSION "1.1"
@@ -23,19 +24,10 @@
 // Define number of axes
 #define NUM_OF_AXIS 4  // X, Y, Z, A
 
-// Motion planning configuration
-#define MAX_MOTION_SEGMENTS 16  // Look-ahead planning buffer size
+// ✅ E_AXIS now defined in data_structures.h
+// ✅ MAX_MOTION_SEGMENTS now defined in data_structures.h
 
-
-typedef enum {
-    AXIS_X = 0,
-    AXIS_Y,
-    AXIS_Z,
-    AXIS_A,
-    AXIS_COUNT = NUM_OF_AXIS
-} E_AXIS;
-
-// Simple validation - no function overhead needed
-#define IS_VALID_AXIS(axis) ((axis) < AXIS_COUNT)
+// Simple validation - no function overhead needed  
+#define IS_VALID_AXIS(axis) ((axis) < NUM_AXIS)
 
 #endif /* COMMON_H */

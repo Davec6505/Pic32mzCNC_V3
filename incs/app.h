@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include "data_structures.h"  // ✅ Unified data structures (includes APP_DATA)
 #include "gcode_parser.h"
 #include "motion.h"
 #include "kinematics.h"
@@ -39,70 +40,7 @@ extern "C" {
 // *****************************************************************************
 // *****************************************************************************
 
-
-
-// *****************************************************************************
-/* Application states
-
-  Summary:
-    Application states enumeration
-
-  Description:
-    This enumeration defines the valid application states.  These states
-    determine the behavior of the application at various times.
-*/
-
-typedef enum
-{
-    /* Application's state machine's initial state. */
-    APP_CONFIG=0,
-    APP_LOAD_SETTINGS,
-    APP_IDLE,
-
-    /* Application waits for device configuration*/
-    APP_WAIT_FOR_CONFIGURATION,
-
-    /* The application does a device attach */
-    APP_DEVICE_ATTACHED,
-
-    /* Wait for a device to be attached */
-    APP_WAIT_FOR_DEVICE_ATTACH,
-
-    /* Device was detached */
-    APP_DEVICE_DETACHED,
-
-    /* Error state*/
-    APP_ERROR
-
-} APP_STATES;
-
-// *****************************************************************************
-/* Application Data
-
-  Summary:
-    Holds application data
-
-  Description:
-    This structure holds the application's data.
-
-  Remarks:
-    Application strings and buffers are be defined outside this structure.
- */
-typedef struct
-{
-    /* The application's current state */
-    APP_STATES state;
-
-    // Single instances following single instance pattern in appData
-    GCODE_CommandQueue gcodeCommandQueue;           // G-code command processing
-    MotionSegment motionQueue[MAX_MOTION_SEGMENTS]; // Motion planning segments  
-    
-    // Motion queue management
-    uint32_t motionQueueHead;     // Next segment to write
-    uint32_t motionQueueTail;     // Next segment to execute
-    uint32_t motionQueueCount;    // Number of segments in queue
-
-} APP_DATA;
+// ✅ APP_STATES and APP_DATA now defined in data_structures.h
 
 // *****************************************************************************
 // *****************************************************************************

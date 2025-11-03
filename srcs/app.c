@@ -84,12 +84,15 @@ void APP_Initialize ( void )
     appData.motionQueueTail = 0;
     appData.motionQueueCount = 0;
     
-    // Initialize motion queue management
-    
+    // Initialize G-code command queue
     memset((void*)&appData.gcodeCommandQueue, 0, sizeof(GCODE_CommandQueue));
     appData.gcodeCommandQueue.head = 0;
     appData.gcodeCommandQueue.tail = 0;
     appData.gcodeCommandQueue.count = 0;
+    
+    // ✅ Initialize nested motion queue info for flow control
+    appData.gcodeCommandQueue.motionQueueCount = 0;
+    appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
 
 
 }
@@ -142,6 +145,8 @@ void APP_Tasks ( void )
         
         case APP_IDLE:
         {
+            // ✅ Sync motion queue count into G-code queue for flow control
+            appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
 
             // Only state machines that need continuous execution
             MOTION_Tasks(appData.motionQueue, &appData.motionQueueHead, 

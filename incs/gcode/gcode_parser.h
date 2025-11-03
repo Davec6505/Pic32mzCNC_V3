@@ -5,6 +5,7 @@
 #include "definitions.h"
 #include "plib_uart2.h"
 #include "plib_uart_common.h"
+#include "../data_structures.h"  // ✅ Use unified data structures (parent directory)
 
 /* string literals for GRBL firmware commands */
 #ifndef WindowsOS
@@ -13,23 +14,7 @@
 #define NEWLINE "\n"
 #endif
 
-/* definitions for GCODE parsing */
-#define GCODE_BUFFER_SIZE 50
-#define GCODE_MAX_COMMANDS 16
-
-/* GCODE command structure */
-typedef struct {
-    char command[GCODE_BUFFER_SIZE];
-    uint32_t line_number;
-} GCODE_Command;
-
-/* GCODE command queue */
-typedef struct {
-    GCODE_Command commands[GCODE_MAX_COMMANDS];
-    uint32_t head;
-    uint32_t tail;
-    uint32_t count;
-} GCODE_CommandQueue;
+// ✅ GCODE_Command, GCODE_CommandQueue now defined in data_structures.h
 
 /* GCODE State Machine */
 typedef enum {
