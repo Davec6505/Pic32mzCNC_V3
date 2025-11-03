@@ -26,6 +26,8 @@
 #include "motion.h"
 #include "kinematics.h"
 #include "utils.h"
+#include "settings.h"
+
 // Note: APP_DATA structure access available through parameter - no include needed
 
 /* USART Buffers */
@@ -238,14 +240,14 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             }
             
             // ✅ CRITICAL: Check for line terminator OR control character
-            bool has_line_terminator = false;
+            static bool has_line_terminator = false;
             for(uint32_t i = 0; i < nBytesRead; i++) {
-                if(rxBuffer[i] == '\n') {
+                if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r') {
                     has_line_terminator = true;
                     break;
                 }
             }
-        
+
            // Process the received data        
            // We need to check the 1st char for control characters like ?,~,^X,!,etc.
            bool control_char_found = false;
@@ -258,13 +260,20 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
                 }
             }
 
+            //must not continue until line terminator is found
+            if(!has_line_terminator){
+                break;
+            }
+
         // ✅ Check for actual G-code ONCE before deciding what to do
         bool has_gcode = false;
         for(uint32_t i = 0; i < nBytesRead; i++) {
-            if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' && 
+            if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' &&
                 rxBuffer[i] != ' ' && rxBuffer[i] != '\t' && rxBuffer[i] != 0) {
-                has_gcode = true;
-                break;
+                    // Found valid G-code character*/
+                    has_gcode = true;               
+                    break;
+              //  }
             }
         }
 
@@ -284,6 +293,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             nBytesRead = 0; 
             memset(rxBuffer, 0, sizeof(rxBuffer));
             gcodeData.state = GCODE_STATE_IDLE;
+            has_line_terminator = false;
             break;
             
         } else if(has_line_terminator && !has_gcode){
@@ -292,6 +302,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             nBytesRead = 0; 
             memset(rxBuffer, 0, sizeof(rxBuffer));
             gcodeData.state = GCODE_STATE_IDLE;
+            has_line_terminator = false;
             break;
             
         } else {
@@ -339,6 +350,98 @@ case GCODE_STATE_CONTROL_CHAR:
         case 0x18: // Soft reset (Ctrl+X)
             UART2_Write((uint8_t*)GRBL_FIRMWARE_VERSION, sizeof(GRBL_FIRMWARE_VERSION));
             break;
+            
+        // ✅ NEW: Settings commands handler
+        case '$':  // Settings commands
+        {
+            // ✅ Settings commands need complete line - read until we have terminator
+            bool has_terminator = false;
+            
+            // Check if we already have terminator in buffer
+            for(uint32_t i = 0; i < nBytesRead; i++){
+                if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r'){
+                    has_terminator = true;
+                    break;
+                }
+            }
+            
+            // If no terminator yet, read more bytes from UART2
+            while(!has_terminator){
+                uint32_t bytes_available = UART2_ReadCountGet();
+                
+                if(bytes_available == 0){
+                    // No more data available right now, exit and wait for next GCODE_Tasks() call
+                    return;  // Stay in CONTROL_CHAR state, buffer preserved
+                }
+                
+                // Read more bytes into rxBuffer
+                uint32_t space_available = sizeof(rxBuffer) - nBytesRead - 1;
+                uint32_t bytes_to_read = (bytes_available < space_available) ? bytes_available : space_available;
+                
+                if(bytes_to_read > 0){
+                    uint32_t new_bytes = UART2_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
+                    nBytesRead += new_bytes;
+                    
+                    // Check again for terminator
+                    for(uint32_t i = 0; i < nBytesRead; i++){
+                        if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r'){
+                            has_terminator = true;
+                            break;
+                        }
+                    }
+                } else {
+                    break;  // Buffer full, process what we have
+                }
+            }
+            
+            // Now we have complete command, parse it
+            if(strncmp((char*)rxBuffer, "$$", 2) == 0){
+                SETTINGS_PrintAll(SETTINGS_GetCurrent());
+                
+            } else if(strncmp((char*)rxBuffer, "$I", 2) == 0){
+                SETTINGS_PrintBuildInfo();
+                
+            } else if(nBytesRead >= 6 && strncmp((char*)rxBuffer, "$RST=$", 6) == 0){
+                SETTINGS_RestoreDefaults(SETTINGS_GetCurrent());
+                SETTINGS_SaveToFlash(SETTINGS_GetCurrent());
+                UART2_Write((uint8_t*)"ok\r\n", 4);
+                
+            } else {
+                // Parse $<n>=<val> or $<n>
+                uint32_t param = 0;
+                float value = 0.0f;
+                char* equals = strchr((char*)rxBuffer, '=');
+                
+                if(equals){
+                    sscanf((char*)&rxBuffer[1], "%u=%f", (unsigned int*)&param, &value);
+                    
+                    if(SETTINGS_SetValue(SETTINGS_GetCurrent(), param, value)){
+                        SETTINGS_SaveToFlash(SETTINGS_GetCurrent());
+                        UART2_Write((uint8_t*)"ok\r\n", 4);
+                    } else {
+                        UART2_Write((uint8_t*)"error:3\r\n", 9);
+                    }
+                    
+                } else {
+                    sscanf((char*)&rxBuffer[1], "%u", (unsigned int*)&param);
+                    
+                    char buffer[64];
+                    float val = SETTINGS_GetValue(SETTINGS_GetCurrent(), param);
+                    
+                    // Check if parameter is valid (SETTINGS_GetValue returns 0.0f for invalid)
+                    // Special case: $31 (min spindle) can legitimately be 0
+                    if(val != 0.0f || param == 31 || param == 4 || param == 5 || param == 2 || param == 3){
+                        snprintf(buffer, sizeof(buffer), "$%u=%.3f\r\n", (unsigned int)param, val);
+                        UART2_Write((uint8_t*)buffer, strlen(buffer));
+                        UART2_Write((uint8_t*)"ok\r\n", 4);
+                    } else {
+                        UART2_Write((uint8_t*)"error:3\r\n", 9);
+                    }
+                }
+            }
+            break;
+        }
+            
         default:
             // Unknown control char - silently ignore (GRBL behavior)
             break;

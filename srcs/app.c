@@ -16,6 +16,7 @@
 
 #include <string.h>
 #include "app.h"
+#include "settings.h"
 
 // *****************************************************************************
 // *****************************************************************************
@@ -121,9 +122,24 @@ void APP_Tasks ( void )
             KINEMATICS_Initialize(); // Initialize work coordinates
             
 
+            appData.state = APP_LOAD_SETTINGS;
+            break;
+        }
+        
+        case APP_LOAD_SETTINGS:
+        {
+            // ✅ Delay flash read until after all peripherals initialized
+            // Try to load from flash - if invalid signature/CRC, use defaults (already loaded)
+            if (SETTINGS_LoadFromFlash(SETTINGS_GetCurrent())) {
+                // Flash settings loaded successfully
+            } else {
+                // Flash empty or invalid - defaults already loaded in SETTINGS_Initialize()
+            }
+            
             appData.state = APP_IDLE;
             break;
         }
+        
         case APP_IDLE:
         {
 
