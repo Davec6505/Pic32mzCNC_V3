@@ -21,8 +21,12 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - ✅ **Delayed flash initialization** - read after peripherals ready (APP_LOAD_SETTINGS state)
 - ✅ **Unified data structures** - no circular dependencies, clean module separation
 - ✅ **LED blink rate stable** - no slowdown with complex commands
+- ✅ **Hardware FPU enabled** - Single-precision floating point for motion planning
+- ✅ **Trapezoidal velocity profiling** - MotionSegment extended with profile parameters
+- ✅ **256 microstepping validated** - ISR budget analysis shows 42% headroom at 512kHz
+- ✅ **Single ISR architecture designed** - GRBL pattern, no multi-ISR complexity
 - 🚧 **Flow control for UGS streaming** - infrastructure complete, ready to test
-- 🚧 **Motion controller in progress** - Bresenham state machine
+- 🚧 **Motion controller in progress** - Ready to implement ISR + state machine
 - ✅ **Project compiles successfully** with XC32 compiler
 
 ## Core Architecture Principles
@@ -377,6 +381,10 @@ When implementing velocity profiling in the future:
 - **Compiler:** XC32
 - **Build System:** Make
 - **Bootloader:** MikroE USB HID Bootloader (39KB, starts at 0x9D1F4000)
+- **Hardware FPU:** Single-precision floating point unit enabled
+  - Compiler flags: `-mhard-float -msingle-float -mfp64`
+  - Optimizations: `-ffast-math -fno-math-errno`
+  - Use FPU for planning (KINEMATICS), integer math for ISR
 - **Timer Configuration:**
   - TMR2/TMR3 in 32-bit mode (T32 = 1)
   - Prescaler: 1:4 (TCKPS = 2)
@@ -384,6 +392,10 @@ When implementing velocity profiling in the future:
   - **Timer Resolution: 80ns per tick**
   - Free-running, no period match interrupts
 - **Output Compare Modules:** OC1 (X), OC2 (Y), OC3 (Z), OC4 (A)
+- **Microstepping Support:** Designed for up to 256 microstepping
+  - Worst case: 512kHz step rate (256 microsteps × high speed)
+  - ISR budget: ~390 CPU cycles @ 512kHz (225 cycles used)
+  - Per-step timing: ~24 timer ticks minimum
 
 ### Memory Layout (PIC32MZ2048EFH100 - 2MB Flash)
 ```

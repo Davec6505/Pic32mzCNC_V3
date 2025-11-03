@@ -30,11 +30,25 @@ typedef struct {
     uint32_t step_interval;      // Current step interval (for velocity profiling)
     uint32_t pulse_width;        // Pulse width in timer ticks
     
-    // Physics parameters (calculated by kinematics)
-    float start_velocity;        // Starting velocity for this segment
-    float max_velocity;          // Maximum velocity for this segment
-    float end_velocity;          // Ending velocity for this segment
-    float acceleration;          // Acceleration/deceleration rate
+    // ✅ Trapezoidal velocity profile parameters (GRBL-style)
+    // These are pre-computed by KINEMATICS in main loop (floating point OK)
+    // ISR uses these for integer-only segment conditioning
+    uint32_t initial_rate;       // Starting step interval (slowest, timer ticks)
+    uint32_t nominal_rate;       // Cruise step interval (fastest, timer ticks)
+    uint32_t final_rate;         // Ending step interval (slowest, timer ticks)
+    
+    uint32_t accelerate_until;   // Step count to end acceleration phase
+    uint32_t decelerate_after;   // Step count to start deceleration phase
+    
+    int32_t rate_delta;          // Interval change per step (signed, timer ticks)
+                                 // Negative = accelerating (interval decreasing)
+                                 // Positive = decelerating (interval increasing)
+    
+    // Physics parameters (calculated by kinematics for reference/debugging)
+    float start_velocity;        // Starting velocity for this segment (mm/sec)
+    float max_velocity;          // Maximum velocity for this segment (mm/sec)
+    float end_velocity;          // Ending velocity for this segment (mm/sec)
+    float acceleration;          // Acceleration/deceleration rate (mm/sec²)
     
     // Axis management
     E_AXIS dominant_axis;        // Which axis drives the timing
