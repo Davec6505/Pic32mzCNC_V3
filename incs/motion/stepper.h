@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "../data_structures.h"  // ✅ E_AXIS defined here (parent directory)
 #include "plib_ocmp5.h"   //X Axis pulse
 #include "plib_ocmp2.h"   //Y Axis pulse
 #include "plib_ocmp3.h"   //Z Axis pulse
@@ -17,8 +18,8 @@ typedef struct {
 
 void STEPPER_Initialize(void);
 void STEPPER_SetStepInterval(uint32_t interval);
-void STEPPER_ScheduleStep(uint8_t axis, uint32_t offset);
-void STEPPER_DisableAxis(uint8_t axis);  // OCxR = OCxRS
+void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset);  // Direct enum!
+void STEPPER_DisableAxis(E_AXIS axis);                    // Direct enum!
 StepperPosition* STEPPER_GetPosition(void);
 
 

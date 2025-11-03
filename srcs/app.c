@@ -84,12 +84,15 @@ void APP_Initialize ( void )
     appData.motionQueueTail = 0;
     appData.motionQueueCount = 0;
     
-    // Initialize motion queue management
-    
+    // Initialize G-code command queue
     memset((void*)&appData.gcodeCommandQueue, 0, sizeof(GCODE_CommandQueue));
     appData.gcodeCommandQueue.head = 0;
     appData.gcodeCommandQueue.tail = 0;
     appData.gcodeCommandQueue.count = 0;
+    
+    // ✅ Initialize nested motion queue info for flow control
+    appData.gcodeCommandQueue.motionQueueCount = 0;
+    appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
 
 
 }
@@ -108,20 +111,18 @@ void APP_Tasks ( void )
    /* Check the application's current state. */
    static uint32_t idle_indicator = 0;
 
-
+    // ✅ Following Harmony pattern: Protocol handlers run INSIDE states
+    // This ensures they only execute when subsystems are ready
 
     switch ( appData.state )
     {
         case APP_CONFIG:
         {
-            GCODE_USART_Initialize(5);
-
             // Initialize subsystems ONCE during configuration
             STEPPER_Initialize();                           // Hardware timer setup
             MOTION_Initialize();                           // Motion planning initialization  
-            KINEMATICS_Initialize(); // Initialize work coordinates
+            KINEMATICS_Initialize();                        // Initialize work coordinates
             
-
             appData.state = APP_LOAD_SETTINGS;
             break;
         }
@@ -136,17 +137,81 @@ void APP_Tasks ( void )
                 // Flash empty or invalid - defaults already loaded in SETTINGS_Initialize()
             }
             
+            appData.state = APP_GCODE_INIT;
+            break;
+        }
+        
+        case APP_GCODE_INIT:
+        {
+            // ✅ Initialize UART and G-code parser after subsystems ready
+            GCODE_USART_Initialize(5);
+            
             appData.state = APP_IDLE;
             break;
         }
         
         case APP_IDLE:
         {
+            // ✅ STEP 1: Poll serial protocol handler (Harmony pattern)
+            // Only runs when UART is ready (after APP_GCODE_INIT)
+            GCODE_Tasks(&appData.gcodeCommandQueue);
+            
+            // ✅ STEP 2: Sync motion queue status for flow control
+            appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
+            appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
 
-            // Only state machines that need continuous execution
+            // ✅ STEP 3: Motion controller processes queued segments
             MOTION_Tasks(appData.motionQueue, &appData.motionQueueHead, 
                         &appData.motionQueueTail, &appData.motionQueueCount);
 
+            // ✅ STEP 4: Process ONE G-code event per iteration (non-blocking!)
+            GCODE_Event event;
+            if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
+                switch (event.type) {
+                    case GCODE_EVENT_LINEAR_MOVE:
+                        // Convert to motion segment using kinematics
+                        // MotionSegment segment;
+                        // KINEMATICS_LinearMove(currentPos, targetPos, event.data.linearMove.feedrate, &segment);
+                        // Add to motion queue through YOUR abstraction layer
+                        // TODO: Implement motion segment queueing
+                        break;
+                        
+                    case GCODE_EVENT_SPINDLE_ON:
+                        // Handle spindle control
+                        // SPINDLE_SetSpeed(event.data.spindle.rpm);
+                        break;
+                        
+                    case GCODE_EVENT_SET_ABSOLUTE:
+                        // Set coordinate mode to absolute
+                        // KINEMATICS_SetCoordinateMode(COORD_MODE_ABSOLUTE);
+                        break;
+                        
+                    case GCODE_EVENT_SET_RELATIVE:
+                        // Set coordinate mode to relative
+                        // KINEMATICS_SetCoordinateMode(COORD_MODE_RELATIVE);
+                        break;
+                        
+                    case GCODE_EVENT_SET_FEEDRATE:
+                        // ✅ Standalone F command - update modal feedrate
+                        // KINEMATICS_SetModalFeedrate(event.data.setFeedrate.feedrate);
+                        break;
+                        
+                    case GCODE_EVENT_SET_SPINDLE_SPEED:
+                        // ✅ Standalone S command - update modal spindle speed
+                        // SPINDLE_SetModalSpeed(event.data.setSpindleSpeed.rpm);
+                        break;
+                        
+                    case GCODE_EVENT_SET_TOOL:
+                        // ✅ Tool change command
+                        // TOOL_Change(event.data.setTool.toolNumber);
+                        break;
+                        
+                    default:
+                        // Handle other events or ignore
+                        break;
+                }
+            }
+            // ✅ Only ONE event processed - returns quickly for LED toggle
 
             /* idle status LED */
              if(++idle_indicator >= 500000)
@@ -167,34 +232,6 @@ void APP_Tasks ( void )
             break;
         }
     }
-        // Always call the GCODE task routine to process incoming GCODE commands
-        GCODE_Tasks(&appData.gcodeCommandQueue);
-        
-        // Process G-code events through clean interface (respects APP_DATA abstraction)
-        GCODE_Event event;
-        while (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
-            switch (event.type) {
-                case GCODE_EVENT_LINEAR_MOVE:
-                    // Convert to motion segment using kinematics
-                    // MotionSegment segment;
-                    // KINEMATICS_LinearMove(currentPos, targetPos, event.data.linearMove.feedrate, &segment);
-                    // Add to motion queue through YOUR abstraction layer
-                    // TODO: Implement motion segment queueing
-                    break;
-                    
-                case GCODE_EVENT_SPINDLE_ON:
-                    // Handle spindle control
-                    // SPINDLE_SetSpeed(event.data.spindle.rpm);
-                    break;
-                    
-                case GCODE_EVENT_SET_ABSOLUTE:
-                    // Set coordinate mode
-                    break;
-                    
-                default:
-                    // Handle other events or ignore
-                    break;
-            }
-        }
+
 
 } //End of APP_Tasks

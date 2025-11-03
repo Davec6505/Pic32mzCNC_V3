@@ -27,8 +27,10 @@
 #include "kinematics.h"
 #include "utils.h"
 #include "settings.h"
+#include "data_structures.h"  // ✅ Access to GCODE_CommandQueue with nested motion info
 
-// Note: APP_DATA structure access available through parameter - no include needed
+// ✅ Flow control threshold - leave 2 slots free for safety
+#define MOTION_BUFFER_THRESHOLD 2
 
 /* USART Buffers */
 static uint8_t txBuffer[128];
@@ -42,6 +44,8 @@ GCODE_Data gcodeData = {
     .state = GCODE_STATE_IDLE,
 };
 
+// ✅ Add static variable for pending OK
+static bool okPending = false;
 
 /* local scope prototypes */
 void usartReadEventHandler(UART_EVENT event, uintptr_t context );
@@ -140,7 +144,8 @@ GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t len
     memcpy(line_buffer, buffer, safe_length);
     line_buffer[safe_length] = '\0';
     
-    // Tokenize the line using utils
+    // ✅ Tokenize properly: "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
+    // Each G/M command gets ALL its parameters
     TokenArray tokens;
     uint32_t token_count = UTILS_TokenizeGcodeLine(line_buffer, &tokens);
     
@@ -226,7 +231,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
     {
     case GCODE_STATE_IDLE:
         /* check if command has been received */
-        nBytesAvailable = UART2_ReadCountGet();
+       nBytesAvailable = UART2_ReadCountGet();
 
         // sucessive calls buffering to allow all chars to stream in.
         if(nBytesAvailable > 0){
@@ -283,13 +288,18 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             // Fall through to GCODE_STATE_CONTROL_CHAR
         
         } else if(has_line_terminator && has_gcode){
-            // ✅ Complete G-code line with actual content - process it
+            // Process G-code line
             cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
-
-            // ✅ GRBL v1.1 Protocol: Send "OK" after successfully parsing G-code line
-            UART2_Write((uint8_t*)"OK\r\n", 4);
-
-            // reset rxBuffer for next line
+        
+            // ✅ FLOW CONTROL: Check motion buffer and SEND OK immediately if space
+            if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
+                UART2_Write((uint8_t*)"OK\r\n", 4);  // ✅ Send immediately
+            } else {
+                // ✅ Buffer nearly full - withhold "OK"
+                okPending = true;
+            }
+            
+            // Clear buffer and reset for next line
             nBytesRead = 0; 
             memset(rxBuffer, 0, sizeof(rxBuffer));
             gcodeData.state = GCODE_STATE_IDLE;
@@ -312,6 +322,14 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
         }
 
     } else {
+            // ✅ CRITICAL: Check if we have a pending OK from previous call
+    // Send it now if motion buffer has space
+    if (okPending && 
+        cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
+        UART2_Write((uint8_t*)"OK\r\n", 4);
+        okPending = false;
+    }
+    
         // If no bytes break out of switch
         gcodeData.state = GCODE_STATE_IDLE;
         break;
@@ -402,9 +420,17 @@ case GCODE_STATE_CONTROL_CHAR:
                 SETTINGS_PrintBuildInfo();
                 
             } else if(nBytesRead >= 6 && strncmp((char*)rxBuffer, "$RST=$", 6) == 0){
+                // ✅ Restore defaults to RAM only
                 SETTINGS_RestoreDefaults(SETTINGS_GetCurrent());
-                SETTINGS_SaveToFlash(SETTINGS_GetCurrent());
                 UART2_Write((uint8_t*)"ok\r\n", 4);
+                
+            } else if(nBytesRead >= 4 && strncmp((char*)rxBuffer, "$WR", 3) == 0){
+                // ✅ NEW: Explicit write command to save settings to NVM
+                if(SETTINGS_SaveToFlash(SETTINGS_GetCurrent())){
+                    UART2_Write((uint8_t*)"ok\r\n", 4);
+                } else {
+                    UART2_Write((uint8_t*)"error:9\r\n", 9);  // Error 9 = Settings write failed
+                }
                 
             } else {
                 // Parse $<n>=<val> or $<n>
@@ -413,23 +439,24 @@ case GCODE_STATE_CONTROL_CHAR:
                 char* equals = strchr((char*)rxBuffer, '=');
                 
                 if(equals){
+                    // ✅ Set parameter in RAM only - NO auto-save
                     sscanf((char*)&rxBuffer[1], "%u=%f", (unsigned int*)&param, &value);
                     
                     if(SETTINGS_SetValue(SETTINGS_GetCurrent(), param, value)){
-                        SETTINGS_SaveToFlash(SETTINGS_GetCurrent());
+                        // ✅ Value updated in RAM only - user must send $WR to persist
                         UART2_Write((uint8_t*)"ok\r\n", 4);
                     } else {
-                        UART2_Write((uint8_t*)"error:3\r\n", 9);
+                        UART2_Write((uint8_t*)"error:3\r\n", 9);  // Error 3 = Invalid parameter
                     }
                     
                 } else {
+                    // Get parameter value (read from RAM)
                     sscanf((char*)&rxBuffer[1], "%u", (unsigned int*)&param);
                     
                     char buffer[64];
                     float val = SETTINGS_GetValue(SETTINGS_GetCurrent(), param);
                     
-                    // Check if parameter is valid (SETTINGS_GetValue returns 0.0f for invalid)
-                    // Special case: $31 (min spindle) can legitimately be 0
+                    // Check if parameter is valid
                     if(val != 0.0f || param == 31 || param == 4 || param == 5 || param == 2 || param == 3){
                         snprintf(buffer, sizeof(buffer), "$%u=%.3f\r\n", (unsigned int)param, val);
                         UART2_Write((uint8_t*)buffer, strlen(buffer));
@@ -609,6 +636,25 @@ bool parse_command_to_event(const char* command, GCODE_Event* event)
     else if (strstr(command, "M9") || strstr(command, "M09")) {
         // Coolant off
         event->type = GCODE_EVENT_COOLANT_OFF;
+        return true;
+    }
+    // ✅ Standalone modal parameter commands (LinuxCNC/GRBL compatible)
+    else if (command[0] == 'F') {
+        // Standalone feedrate change: "F1500"
+        event->type = GCODE_EVENT_SET_FEEDRATE;
+        event->data.setFeedrate.feedrate = atof(command + 1);
+        return true;
+    }
+    else if (command[0] == 'S') {
+        // Standalone spindle speed change: "S2000"
+        event->type = GCODE_EVENT_SET_SPINDLE_SPEED;
+        event->data.setSpindleSpeed.rpm = (uint32_t)atoi(command + 1);
+        return true;
+    }
+    else if (command[0] == 'T') {
+        // Tool change: "T1"
+        event->type = GCODE_EVENT_SET_TOOL;
+        event->data.setTool.toolNumber = (uint32_t)atoi(command + 1);
         return true;
     }
     
