@@ -14,6 +14,8 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - ✅ **16-command circular buffer** with flow control and overflow protection
 - ✅ **Kinematics module complete** with physics calculations
 - ✅ **Stepper module complete** with hardware abstraction
+- ✅ **Persistent GRBL settings** with NVM flash storage (27 parameters)
+- ✅ **Delayed flash initialization** - read after peripherals ready
 - 🚧 **Motion controller in progress** - Bresenham state machine
 - ✅ **Project compiles successfully** with XC32 compiler
 
@@ -359,6 +361,7 @@ When implementing velocity profiling in the future:
 - **Peripheral Bus Clock (PBCLK3):** 50MHz
 - **Compiler:** XC32
 - **Build System:** Make
+- **Bootloader:** MikroE USB HID Bootloader (39KB, starts at 0x9D1F4000)
 - **Timer Configuration:**
   - TMR2/TMR3 in 32-bit mode (T32 = 1)
   - Prescaler: 1:4 (TCKPS = 2)
@@ -366,6 +369,38 @@ When implementing velocity profiling in the future:
   - **Timer Resolution: 80ns per tick**
   - Free-running, no period match interrupts
 - **Output Compare Modules:** OC1 (X), OC2 (Y), OC3 (Z), OC4 (A)
+
+### Memory Layout (PIC32MZ2048EFH100 - 2MB Flash)
+```
+Physical Address    Virtual (KSEG1)     Size        Purpose
+----------------    ---------------     ----        -------
+0x1D000000          0x9D000000          1.87MB      Application Code
+0x1D1F0000          0xBD1F0000          16KB        GRBL Settings Storage (NVM)
+0x1D1F4000          0x9D1F4000          48KB        MikroE USB HID Bootloader
+0x1FC00000          0xBFC00000          12KB        Boot Flash (Config Words)
+```
+
+**Critical Memory Rules:**
+- ✅ **Settings NVM:** `0xBD1F0000` (KSEG1 virtual for both reads and writes)
+- ✅ **Page-aligned:** 16KB boundaries (0x4000)
+- ✅ **Row-aligned:** 2048-byte boundaries (0x800)
+- ✅ **Safe margin:** 64KB (0x10000) before bootloader at 0xBD1F4000
+- ❌ **Never write to:** 0x9D1F4000 / 0xBD1F4000 (bootloader region)
+- ❌ **Never write to:** 0xBFC00000 (boot flash config)
+
+**Address Space (MIPS Architecture):**
+- **Physical (0x1D...):** Internal flash controller addressing
+- **Virtual KSEG1 (0xBD...):** Uncached - REQUIRED for NVM operations (reads and writes)
+- **Virtual KSEG0 (0x9D...):** Cached - used for code execution
+
+**NVM Operations (Harmony Pattern):**
+- Use **KSEG1 (0xBD...)** addresses for all NVM operations
+- Harmony NVM drivers handle address conversion internally
+- Flash page size: 16KB (must erase entire page before writing)
+- Flash row size: 2048 bytes (512 words) - unit of RowWrite operations
+- **Cache-aligned buffers REQUIRED:** Use `CACHE_ALIGN` attribute
+- **Callback pattern:** Register handler, wait on `xferDone` flag
+- **RowWrite preferred:** One operation vs 41 WordWrite operations for settings
 
 ## File Organization
 - `srcs/main.c` - Entry point, main loop calls APP_Tasks()
@@ -375,9 +410,56 @@ When implementing velocity profiling in the future:
 - `srcs/motion/stepper.c` - Hardware abstraction layer ✅  
 - `srcs/motion/motion.c` - Master motion controller 🚧
 - `srcs/motion/kinematics.c` - Physics calculations ✅
+- `srcs/settings/settings.c` - Persistent GRBL settings with NVM flash ✅
 - `incs/common.h` - Shared constants and enums
 - `docs/plantuml/` - Architecture diagrams (includes tokenization flow)
 - `README.md` - Complete architecture documentation
+
+## Settings Implementation (Completed ✅)
+
+### Critical Timing Requirement
+- **NEVER read flash during SETTINGS_Initialize()** - will hang on boot
+- **Must delay NVM_Read() until after all peripherals initialized**
+- **Solution:** APP_LOAD_SETTINGS state executes after APP_CONFIG
+
+### Implementation Pattern
+```c
+// SETTINGS_Initialize() - called from main.c after SYS_Initialize()
+void SETTINGS_Initialize(void) {
+    NVM_CallbackRegister(eventHandler, (uintptr_t)NULL);  // Register once
+    SETTINGS_RestoreDefaults(&current_settings);          // Load defaults only
+    // DO NOT read flash here - peripherals not ready!
+}
+
+// APP_LOAD_SETTINGS state - executes after APP_CONFIG in APP_Tasks()
+case APP_LOAD_SETTINGS:
+    if (SETTINGS_LoadFromFlash(SETTINGS_GetCurrent())) {
+        // Flash settings loaded successfully
+    }
+    appData.state = APP_IDLE;
+    break;
+```
+
+### NVM Write Pattern (Harmony)
+```c
+// Cache-aligned buffer (CRITICAL for PIC32MZ)
+static uint32_t writeData[BUFFER_SIZE] CACHE_ALIGN;
+
+// PageErase + RowWrite with callback
+NVM_PageErase(address);
+while(xferDone == false);
+xferDone = false;
+
+NVM_RowWrite((uint32_t *)writePtr, address);
+while(xferDone == false);
+xferDone = false;
+```
+
+### Why RowWrite vs WordWrite
+- Settings = 164 bytes (fits in ONE row of 2048 bytes)
+- Must erase entire 16KB page anyway
+- RowWrite = 1 operation vs WordWrite = 41 operations
+- More efficient, more reliable, matches Harmony pattern
 
 ## Development Workflow
 1. Build: `make` or `make all` (clean + build)

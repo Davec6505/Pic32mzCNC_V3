@@ -1,5 +1,7 @@
 #include "stepper.h"
 #include "../common.h"
+#include "settings.h"  // ✅ Add settings module
+#include "motion_utils.h"  // ✅ GPIO abstraction layer
 #include "definitions.h"
 
 // Callback ISR handlers for abstraction.
@@ -20,7 +22,30 @@ static StepperPosition stepper_pos = {
 static uint32_t current_step_interval = 1000;  // 10ms default
 static uint32_t pulse_width = 2;               // 20µs pulse width
 
+// ✅ Cache settings values for performance (avoid repeated flash reads)
+static uint8_t step_pulse_invert_mask = 0;
+static uint8_t direction_invert_mask = 0;
+static uint8_t enable_invert = 0;
+
 void STEPPER_Initialize(void) {
+    // ✅ Load settings from flash (already initialized in main.c)
+    GRBL_Settings* settings = SETTINGS_GetCurrent();
+    
+    // ✅ Cache frequently used settings for ISR performance
+    step_pulse_invert_mask = settings->step_pulse_invert;
+    direction_invert_mask = settings->step_direction_invert;
+    enable_invert = settings->step_enable_invert;
+    
+    // ✅ Update pulse width from settings (microseconds → timer ticks)
+    // Timer runs at 12.5MHz (80ns resolution), so 1µs = 12.5 ticks
+    pulse_width = settings->step_pulse_time * 12.5f;  // Convert µs to ticks
+    
+    // ✅ Update steps_per_mm from settings
+    stepper_pos.steps_per_mm_x = settings->steps_per_mm_x;
+    stepper_pos.steps_per_mm_y = settings->steps_per_mm_y;
+    stepper_pos.steps_per_mm_z = settings->steps_per_mm_z;
+    stepper_pos.steps_per_deg_a = settings->steps_per_mm_a;  // Using A axis for degrees
+    
     // initialize OC Callbacks
     OCMP5_CallbackRegister(OCP5_ISR, (uintptr_t)NULL);
     OCMP2_CallbackRegister(OCP2_ISR, (uintptr_t)NULL);
@@ -30,6 +55,9 @@ void STEPPER_Initialize(void) {
     // Timer2 centralized timer for all OC modules
     TMR2 = 0;
     TMR2_Start();
+
+    // ✅ Enable all axes using motion_utils abstraction
+    MOTION_UTILS_EnableAllAxes(true, enable_invert);
 
     // Disable all axes initially - set OCxR = OCxRS to prevent spurious pulses
     for(int i = 0; i < NUM_OF_AXIS; i++) {

@@ -56,6 +56,7 @@ typedef enum
 {
     /* Application's state machine's initial state. */
     APP_CONFIG=0,
+    APP_LOAD_SETTINGS,
     APP_IDLE,
 
     /* Application waits for device configuration*/
