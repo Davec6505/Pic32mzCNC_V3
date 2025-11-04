@@ -3,11 +3,15 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "../data_structures.h"  // ✅ E_AXIS + APP_DATA defined here (parent directory)
-#include "../config/default/peripheral/ocmp/plib_ocmp5.h"   //X Axis pulse
-#include "../config/default/peripheral/ocmp/plib_ocmp2.h"   //Y Axis pulse
-#include "../config/default/peripheral/ocmp/plib_ocmp3.h"   //Z Axis pulse
-#include "../config/default/peripheral/ocmp/plib_ocmp4.h"   //A Axis pulse
+#include "common.h"
+#include "data_structures.h"  // ✅ APP_DATA defined here
+#include "plib_ocmp5.h"   //X Axis pulse
+#include "plib_ocmp2.h"   //Y Axis pulse
+#include "plib_ocmp3.h"   //Z Axis pulse
+#include "plib_ocmp4.h"   //A Axis pulse
+
+
+
 
 
 typedef struct {
@@ -18,13 +22,11 @@ typedef struct {
 
 void STEPPER_Initialize(APP_DATA* appData);                // ✅ Initialize with APP_DATA reference
 void STEPPER_SetStepInterval(uint32_t interval);
-void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset);  // Schedule pulse at absolute TMR2 time
-void STEPPER_DisableAxis(E_AXIS axis);                    // Stop pulse generation
-void STEPPER_DisableAll(void);                            // Emergency stop - disable all axes
-StepperPosition* STEPPER_GetPosition(void);               // Get current position counters
-
-// ✅ NEW: Direction control (called by motion controller before scheduling pulses)
+void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset);  // Direct enum!
+void STEPPER_DisableAxis(E_AXIS axis);                    // Direct enum!
+void STEPPER_DisableAll(void);                            // Disable all axes (emergency stop)
 void STEPPER_SetDirection(E_AXIS axis, bool forward);     // Set direction for axis
-
+void STEPPER_CheckTimerRollover(APP_DATA* appData);       // Monitor TMR2 for rollover
+StepperPosition* STEPPER_GetPosition(void);
 
 #endif /* STEPPER_H */

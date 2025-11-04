@@ -72,35 +72,35 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     CoordinatePoint machine_start = KINEMATICS_WorkToMachine(start);
     CoordinatePoint machine_end = KINEMATICS_WorkToMachine(end);
     
-    // Calculate distance in mm using FPU
-    float dx_mm = fabsf(machine_end.x - machine_start.x);
-    float dy_mm = fabsf(machine_end.y - machine_start.y);
-    float dz_mm = fabsf(machine_end.z - machine_start.z);
-    float da_mm = fabsf(machine_end.a - machine_start.a);
+    // Calculate distance in mm using FPU (PRESERVE SIGN for direction!)
+    float dx_mm = machine_end.x - machine_start.x;  // ✅ Signed - positive=forward, negative=reverse
+    float dy_mm = machine_end.y - machine_start.y;
+    float dz_mm = machine_end.z - machine_start.z;
+    float da_mm = machine_end.a - machine_start.a;
     
-    // Convert mm to steps using existing steps_per_mm from settings
+    // Convert mm to steps using existing steps_per_mm from settings (PRESERVE SIGN!)
     segment_buffer->delta_x = (int32_t)(dx_mm * stepper->steps_per_mm_x);
     segment_buffer->delta_y = (int32_t)(dy_mm * stepper->steps_per_mm_y);
     segment_buffer->delta_z = (int32_t)(dz_mm * stepper->steps_per_mm_z);
     segment_buffer->delta_a = (int32_t)(da_mm * stepper->steps_per_deg_a);
     
-    // Determine dominant axis (highest step count) - dynamic dominant axis tracking
-    int32_t max_delta = segment_buffer->delta_x;
+    // Determine dominant axis (highest ABSOLUTE step count) - dynamic dominant axis tracking
+    int32_t max_delta = abs(segment_buffer->delta_x);  // ✅ Use abs() for comparison
     segment_buffer->dominant_axis = AXIS_X;
     E_AXIS limiting_axis = AXIS_X;
     
-    if(segment_buffer->delta_y > max_delta) {
-        max_delta = segment_buffer->delta_y;
+    if(abs(segment_buffer->delta_y) > max_delta) {
+        max_delta = abs(segment_buffer->delta_y);
         segment_buffer->dominant_axis = AXIS_Y;
         limiting_axis = AXIS_Y;
     }
-    if(segment_buffer->delta_z > max_delta) {
-        max_delta = segment_buffer->delta_z;
+    if(abs(segment_buffer->delta_z) > max_delta) {
+        max_delta = abs(segment_buffer->delta_z);
         segment_buffer->dominant_axis = AXIS_Z;
         limiting_axis = AXIS_Z;
     }
-    if(segment_buffer->delta_a > max_delta) {
-        max_delta = segment_buffer->delta_a;
+    if(abs(segment_buffer->delta_a) > max_delta) {
+        max_delta = abs(segment_buffer->delta_a);
         segment_buffer->dominant_axis = AXIS_A;
         limiting_axis = AXIS_A;
     }

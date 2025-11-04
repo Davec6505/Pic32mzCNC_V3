@@ -1,14 +1,14 @@
 /*******************************************************************************
-  Output Compare OCMP3 Peripheral Library (PLIB)
+  Output Compare (OCMP) Peripheral Library Interface Header File
 
   Company:
     Microchip Technology Inc.
 
   File Name:
-    plib_ocmp3.c
+    plib_ocmp8.h
 
   Summary:
-    OCMP3 Source File
+    OCMP PLIB Header File
 
   Description:
     None
@@ -37,85 +37,96 @@
 * ANY WAY RELATED TO THIS SOFTWARE WILL NOT EXCEED THE AMOUNT OF FEES, IF ANY,
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
-#include "plib_ocmp3.h"
-#include "interrupts.h"
+
+#ifndef PLIB_OCMP8_H
+#define PLIB_OCMP8_H
+
+#include <stddef.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include "device.h"
+#include "plib_ocmp_common.h"
+
+// DOM-IGNORE-BEGIN
+#ifdef __cplusplus  // Provide C++ Compatibility
+    extern "C" {
+#endif
+// DOM-IGNORE-END
+
 
 // *****************************************************************************
-
-// *****************************************************************************
-// Section: OCMP3 Implementation
+// Section: Interface
 // *****************************************************************************
 // *****************************************************************************
 
+/*************************** OCMP8 API ****************************************/
 // *****************************************************************************
+/* Function:
+   void OCMP8_Initialize (void)
+
+  Summary:
+    Initialization function OCMP8 peripheral
+
+  Description:
+    This function initializes the OCMP8 peripheral with user input
+	from the configurator.
+
+  Parameters:
+    void
+
+  Returns:
+    void
+*/
+void OCMP8_Initialize (void);
+
+// *****************************************************************************
+/* Function:
+   void OCMP8_Enable (void)
+
+  Summary:
+    Enable function OCMP8 peripheral
+
+  Description:
+    This function enables the OCMP8 peripheral
+
+  Parameters:
+    void
+
+  Returns:
+    void
+*/
+void OCMP8_Enable (void);
+
+// *****************************************************************************
+/* Function:
+   void OCMP8_Disable (void)
+
+  Summary:
+    Disable function OCMP8 peripheral
+
+  Description:
+    This function disables the OCMP8 peripheral.
+
+  Parameters:
+    void
+
+  Returns:
+    void
+*/
+void OCMP8_Disable (void);
 
 
-static volatile OCMP_OBJECT ocmp3Obj;
 
-void OCMP3_Initialize (void)
-{
-    /*Setup OC3CON        */
-    /*OCM         = 5        */
-    /*OCTSEL       = 0        */
-    /*OC32         = 1        */
-    /*SIDL         = false    */
+uint16_t OCMP8_CompareValueGet (void);
 
-    OC3CON = 0x25;
-
-    OC3R = 0;
-    OC3RS = 0;
-
-    IEC0SET = _IEC0_OC3IE_MASK;
-}
-
-void OCMP3_Enable (void)
-{
-    OC3CONSET = _OC3CON_ON_MASK;
-}
-
-void OCMP3_Disable (void)
-{
-    OC3CONCLR = _OC3CON_ON_MASK;
-}
+uint16_t OCMP8_CompareSecondaryValueGet (void);
+void OCMP8_CompareSecondaryValueSet (uint16_t value);
 
 
-void OCMP3_CompareValueSet (uint32_t value)
-{
-    OC3R = value;
-}
-
-uint32_t OCMP3_CompareValueGet (void)
-{
-    return OC3R;
-}
-
-void OCMP3_CompareSecondaryValueSet (uint32_t value)
-{
-    OC3RS = value;
-}
-
-uint32_t OCMP3_CompareSecondaryValueGet (void)
-{
-    return OC3RS;
-}
-
-
-void OCMP3_CallbackRegister(OCMP_CALLBACK callback, uintptr_t context)
-{
-    ocmp3Obj.callback = callback;
-
-    ocmp3Obj.context = context;
-}
-
-void __attribute__((used)) OUTPUT_COMPARE_3_InterruptHandler (void)
-{
-    /* Additional local variable to prevent MISRA C violations (Rule 13.x) */
-    uintptr_t context = ocmp3Obj.context;
-    IFS0CLR = _IFS0_OC3IF_MASK;    //Clear IRQ flag
-
-    if( (ocmp3Obj.callback != NULL))
-    {
-        ocmp3Obj.callback(context);
+// DOM-IGNORE-BEGIN
+#ifdef __cplusplus  // Provide C++ Compatibility
     }
-}
+#endif
 
+// DOM-IGNORE-END
+#endif // PLIB_OCMP8_H

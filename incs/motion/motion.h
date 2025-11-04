@@ -3,14 +3,13 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "common.h"
-#include "data_structures.h"  // ✅ Use unified data structures (parent directory)
+#include "data_structures.h"
 
-// ✅ MotionSegment now defined in data_structures.h
-
+// Existing declarations...
 void MOTION_Initialize(void);
-void MOTION_Tasks(MotionSegment motionQueue[], uint32_t* head, uint32_t* tail, uint32_t* count);
+void MOTION_Tasks(APP_DATA* appData);
 
-
+// ✅ Arc interpolation function
+void MOTION_Arc(APP_DATA* appData);
 
 #endif /* MOTION_H */

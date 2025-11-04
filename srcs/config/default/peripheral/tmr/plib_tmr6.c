@@ -1,20 +1,23 @@
 /*******************************************************************************
-  Output Compare OCMP3 Peripheral Library (PLIB)
+  TMR Peripheral Library Interface Source File
 
-  Company:
+  Company
     Microchip Technology Inc.
 
-  File Name:
-    plib_ocmp3.c
+  File Name
+    plib_tmr6.c
 
-  Summary:
-    OCMP3 Source File
+  Summary
+    TMR6 peripheral library source file.
 
-  Description:
-    None
+  Description
+    This file implements the interface to the TMR peripheral library.  This
+    library provides access to and control of the associated peripheral
+    instance.
 
 *******************************************************************************/
 
+// DOM-IGNORE-BEGIN
 /*******************************************************************************
 * Copyright (C) 2019 Microchip Technology Inc. and its subsidiaries.
 *
@@ -37,85 +40,84 @@
 * ANY WAY RELATED TO THIS SOFTWARE WILL NOT EXCEED THE AMOUNT OF FEES, IF ANY,
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
-#include "plib_ocmp3.h"
+// DOM-IGNORE-END
+
+
+// *****************************************************************************
+// *****************************************************************************
+// Section: Included Files
+// *****************************************************************************
+// *****************************************************************************
+
+#include "device.h"
+#include "plib_tmr6.h"
 #include "interrupts.h"
 
-// *****************************************************************************
-
-// *****************************************************************************
-// Section: OCMP3 Implementation
-// *****************************************************************************
-// *****************************************************************************
-
-// *****************************************************************************
 
 
-static volatile OCMP_OBJECT ocmp3Obj;
 
-void OCMP3_Initialize (void)
+void TMR6_Initialize(void)
 {
-    /*Setup OC3CON        */
-    /*OCM         = 5        */
-    /*OCTSEL       = 0        */
-    /*OC32         = 1        */
-    /*SIDL         = false    */
+    /* Disable Timer */
+    T6CONCLR = _T6CON_ON_MASK;
 
-    OC3CON = 0x25;
+    /*
+    SIDL = 0
+    TCKPS =6
+    T32   = 0
+    TCS = 0
+    */
+    T6CONSET = 0x60;
 
-    OC3R = 0;
-    OC3RS = 0;
+    /* Clear counter */
+    TMR6 = 0x0;
 
-    IEC0SET = _IEC0_OC3IE_MASK;
-}
+    /*Set period */
+    PR6 = 233U;
 
-void OCMP3_Enable (void)
-{
-    OC3CONSET = _OC3CON_ON_MASK;
-}
 
-void OCMP3_Disable (void)
-{
-    OC3CONCLR = _OC3CON_ON_MASK;
 }
 
 
-void OCMP3_CompareValueSet (uint32_t value)
+void TMR6_Start(void)
 {
-    OC3R = value;
-}
-
-uint32_t OCMP3_CompareValueGet (void)
-{
-    return OC3R;
-}
-
-void OCMP3_CompareSecondaryValueSet (uint32_t value)
-{
-    OC3RS = value;
-}
-
-uint32_t OCMP3_CompareSecondaryValueGet (void)
-{
-    return OC3RS;
+    T6CONSET = _T6CON_ON_MASK;
 }
 
 
-void OCMP3_CallbackRegister(OCMP_CALLBACK callback, uintptr_t context)
+void TMR6_Stop (void)
 {
-    ocmp3Obj.callback = callback;
-
-    ocmp3Obj.context = context;
+    T6CONCLR = _T6CON_ON_MASK;
 }
 
-void __attribute__((used)) OUTPUT_COMPARE_3_InterruptHandler (void)
+void TMR6_PeriodSet(uint16_t period)
 {
-    /* Additional local variable to prevent MISRA C violations (Rule 13.x) */
-    uintptr_t context = ocmp3Obj.context;
-    IFS0CLR = _IFS0_OC3IF_MASK;    //Clear IRQ flag
-
-    if( (ocmp3Obj.callback != NULL))
-    {
-        ocmp3Obj.callback(context);
-    }
+    PR6  = period;
 }
 
+uint16_t TMR6_PeriodGet(void)
+{
+    return (uint16_t)PR6;
+}
+
+uint16_t TMR6_CounterGet(void)
+{
+    return (uint16_t)(TMR6);
+}
+
+
+uint32_t TMR6_FrequencyGet(void)
+{
+    return (781250);
+}
+
+
+
+bool TMR6_PeriodHasExpired(void)
+{
+    bool status;
+        status = (IFS0bits.T6IF != 0U);
+        IFS0CLR = _IFS0_T6IF_MASK;
+
+    return status;
+}

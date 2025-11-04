@@ -119,18 +119,23 @@ bool SETTINGS_LoadFromFlash(GRBL_Settings* settings)
     // ✅ PURE HARMONY PATTERN: Read into cache-aligned buffer
     NVM_Read(writeData, sizeof(writeData), SETTINGS_READ_ADDRESS);
     
-    // Copy from cache-aligned buffer to settings structure
-    memcpy(settings, writeData, sizeof(GRBL_Settings));
+    // ✅ CRITICAL: Validate BEFORE copying to settings (don't corrupt defaults!)
+    GRBL_Settings temp_settings;
+    memcpy(&temp_settings, writeData, sizeof(GRBL_Settings));
     
-    // Validate signature and checksum
-    if (settings->signature != SETTINGS_SIGNATURE) {
-        return false;  // Flash empty or invalid
+    // Validate signature first
+    if (temp_settings.signature != SETTINGS_SIGNATURE) {
+        return false;  // Flash empty or invalid - keep current settings (defaults)
     }
     
-    uint32_t calculated_crc = SETTINGS_CalculateCRC32(settings);
-    if (calculated_crc != settings->checksum) {
-        return false;
+    // Validate checksum
+    uint32_t calculated_crc = SETTINGS_CalculateCRC32(&temp_settings);
+    if (calculated_crc != temp_settings.checksum) {
+        return false;  // Checksum mismatch - keep current settings (defaults)
     }
+    
+    // ✅ Only copy if validation passed
+    memcpy(settings, &temp_settings, sizeof(GRBL_Settings));
     
     return true;
 }

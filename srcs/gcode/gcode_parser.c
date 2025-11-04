@@ -19,6 +19,7 @@
 #include <stdlib.h>                     // Defines EXIT_FAILURE
 #include <string.h>
 #include <stdio.h>
+#include <math.h>                       // ✅ For NAN and isnan()
 
 #include "gcode_parser.h"             
 #include "common.h"
@@ -500,7 +501,8 @@ case GCODE_STATE_CONTROL_CHAR:
  */
 CoordinatePoint parse_coordinate_values(const char* command)
 {
-    CoordinatePoint coords = {0.0f, 0.0f, 0.0f, 0.0f};  // Initialize to zero
+    // ✅ Use NAN to indicate "not specified" - allows detection in event handler
+    CoordinatePoint coords = {NAN, NAN, NAN, NAN};  // Initialize to NAN
     
     char* x_ptr = strstr(command, "X");
     char* y_ptr = strstr(command, "Y"); 

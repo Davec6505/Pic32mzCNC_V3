@@ -54,6 +54,7 @@
 #include "interrupts.h"
 
 
+static volatile TMR_TIMER_OBJECT tmr2Obj;
 
 
 void TMR2_Initialize(void)
@@ -73,8 +74,10 @@ void TMR2_Initialize(void)
     TMR2 = 0x0;
 
     /*Set period */
-    PR2 = 124U;
+    PR2 = 312499999U;
 
+    /* Enable TMR Interrupt of odd numbered timer in 32-bit mode */
+    IEC0SET = _IEC0_T3IE_MASK;
 
 }
 
@@ -112,12 +115,35 @@ uint32_t TMR2_FrequencyGet(void)
 }
 
 
-
-bool TMR2_PeriodHasExpired(void)
+void __attribute__((used)) TIMER_3_InterruptHandler (void)
 {
-    bool status;
-        status = (IFS0bits.T3IF != 0U);
-        IFS0CLR = _IFS0_T3IF_MASK;
+    uint32_t status  = 0U;
+    status = IFS0bits.T3IF;
+    IFS0CLR = _IFS0_T3IF_MASK;
 
-    return status;
+    if((tmr2Obj.callback_fn != NULL))
+    {
+        uintptr_t context = tmr2Obj.context;
+        tmr2Obj.callback_fn(status, context);
+    }
+}
+
+
+void TMR2_InterruptEnable(void)
+{
+    IEC0SET = _IEC0_T3IE_MASK;
+}
+
+
+void TMR2_InterruptDisable(void)
+{
+    IEC0CLR = _IEC0_T3IE_MASK;
+}
+
+
+void TMR2_CallbackRegister( TMR_CALLBACK callback_fn, uintptr_t context )
+{
+    /* Save callback_fn and context in local memory */
+    tmr2Obj.callback_fn = callback_fn;
+    tmr2Obj.context = context;
 }

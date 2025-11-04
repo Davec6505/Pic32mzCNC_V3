@@ -1,14 +1,14 @@
 /*******************************************************************************
-  Output Compare OCMP3 Peripheral Library (PLIB)
+  Output Compare OCMP8 Peripheral Library (PLIB)
 
   Company:
     Microchip Technology Inc.
 
   File Name:
-    plib_ocmp3.c
+    plib_ocmp8.c
 
   Summary:
-    OCMP3 Source File
+    OCMP8 Source File
 
   Description:
     None
@@ -37,85 +37,65 @@
 * ANY WAY RELATED TO THIS SOFTWARE WILL NOT EXCEED THE AMOUNT OF FEES, IF ANY,
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
-#include "plib_ocmp3.h"
+#include "plib_ocmp8.h"
 #include "interrupts.h"
 
 // *****************************************************************************
 
 // *****************************************************************************
-// Section: OCMP3 Implementation
+// Section: OCMP8 Implementation
 // *****************************************************************************
 // *****************************************************************************
 
 // *****************************************************************************
 
 
-static volatile OCMP_OBJECT ocmp3Obj;
-
-void OCMP3_Initialize (void)
+void OCMP8_Initialize (void)
 {
-    /*Setup OC3CON        */
-    /*OCM         = 5        */
+    /*Setup OC8CON        */
+    /*OCM         = 6        */
     /*OCTSEL       = 0        */
-    /*OC32         = 1        */
+    /*OC32         = 0        */
     /*SIDL         = false    */
 
-    OC3CON = 0x25;
+    OC8CON = 0x6;
 
-    OC3R = 0;
-    OC3RS = 0;
+    /* unlock system for configuration */
+    SYSKEY = 0x00000000;
+    SYSKEY = 0xAA996655;
+    SYSKEY = 0x556699AA;
+    CFGCON |= 0x00010000U;
+    /* Lock system since done with configuration */
+    SYSKEY = 0x33333333;
+    OC8R = 2000;
+    OC8RS = 2000;
 
-    IEC0SET = _IEC0_OC3IE_MASK;
 }
 
-void OCMP3_Enable (void)
+void OCMP8_Enable (void)
 {
-    OC3CONSET = _OC3CON_ON_MASK;
+    OC8CONSET = _OC8CON_ON_MASK;
 }
 
-void OCMP3_Disable (void)
+void OCMP8_Disable (void)
 {
-    OC3CONCLR = _OC3CON_ON_MASK;
-}
-
-
-void OCMP3_CompareValueSet (uint32_t value)
-{
-    OC3R = value;
-}
-
-uint32_t OCMP3_CompareValueGet (void)
-{
-    return OC3R;
-}
-
-void OCMP3_CompareSecondaryValueSet (uint32_t value)
-{
-    OC3RS = value;
-}
-
-uint32_t OCMP3_CompareSecondaryValueGet (void)
-{
-    return OC3RS;
+    OC8CONCLR = _OC8CON_ON_MASK;
 }
 
 
-void OCMP3_CallbackRegister(OCMP_CALLBACK callback, uintptr_t context)
-{
-    ocmp3Obj.callback = callback;
 
-    ocmp3Obj.context = context;
+uint16_t OCMP8_CompareValueGet (void)
+{
+    return (uint16_t)OC8R;
 }
 
-void __attribute__((used)) OUTPUT_COMPARE_3_InterruptHandler (void)
+void OCMP8_CompareSecondaryValueSet (uint16_t value)
 {
-    /* Additional local variable to prevent MISRA C violations (Rule 13.x) */
-    uintptr_t context = ocmp3Obj.context;
-    IFS0CLR = _IFS0_OC3IF_MASK;    //Clear IRQ flag
+    OC8RS = value;
+}
 
-    if( (ocmp3Obj.callback != NULL))
-    {
-        ocmp3Obj.callback(context);
-    }
+uint16_t OCMP8_CompareSecondaryValueGet (void)
+{
+    return (uint16_t)OC8RS;
 }
 

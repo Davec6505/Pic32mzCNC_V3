@@ -1,4 +1,3 @@
-
 /*
  * The application does the following:
  * 1. Sets up UART2 to communicate with the host.
@@ -20,6 +19,9 @@
 #include "settings.h"
 #include "kinematics.h"  // For KINEMATICS_LinearMove and CoordinatePoint
 #include "motion_utils.h"  // For hard limit checking
+#include "config/default/peripheral/ocmp/plib_ocmp5.h"  // ✅ DEBUG: For OC5 test
+#include "config/default/peripheral/tmr/plib_tmr2.h"    // ✅ DEBUG: For TMR2 counter
+#include "motion.h"  // Make sure this is included
 
 // *****************************************************************************
 // *****************************************************************************
@@ -148,7 +150,6 @@ void APP_Initialize ( void )
 void APP_Tasks ( void )
 {
    /* Check the application's current state. */
-   static uint32_t idle_indicator = 0;
 
     // ✅ Following Harmony pattern: Protocol handlers run INSIDE states
     // This ensures they only execute when subsystems are ready
@@ -159,7 +160,7 @@ void APP_Tasks ( void )
         {
             // Initialize subsystems ONCE during configuration
             STEPPER_Initialize(&appData);                   // ✅ Pass APP_DATA reference for ISR phase signaling
-            MOTION_Initialize();                           // Motion planning initialization  
+            MOTION_Initialize();                            // Motion planning initialization  
             KINEMATICS_Initialize();                        // Initialize work coordinates
             
             appData.state = APP_LOAD_SETTINGS;
@@ -176,6 +177,15 @@ void APP_Tasks ( void )
                 // Flash empty or invalid - defaults already loaded in SETTINGS_Initialize()
             }
             
+            // ✅ CRITICAL: Update stepper cached values after settings loaded
+            // STEPPER_Initialize() ran before settings were loaded, so steps_per_mm might be stale
+            GRBL_Settings* settings = SETTINGS_GetCurrent();
+            StepperPosition* stepper_pos = STEPPER_GetPosition();
+            stepper_pos->steps_per_mm_x = settings->steps_per_mm_x;
+            stepper_pos->steps_per_mm_y = settings->steps_per_mm_y;
+            stepper_pos->steps_per_mm_z = settings->steps_per_mm_z;
+            stepper_pos->steps_per_deg_a = settings->steps_per_mm_a;
+            
             appData.state = APP_GCODE_INIT;
             break;
         }
@@ -191,164 +201,28 @@ void APP_Tasks ( void )
         
         case APP_IDLE:
         {
-            // ✅ PRIORITY PHASE SYSTEM: Process motion phases BEFORE G-code
-            // ISR sets motionPhase flag when dominant axis fires
-            // Main loop processes phases in priority order (0 = highest)
-            // G-code only runs when motionPhase == IDLE (prevents blocking)
+            // ===== DEBUG TEST DISABLED - ENABLE SERIAL ONLY =====
+            // (Debug test code removed to restore serial communication)
             
-            // ✅ STEP 0: Load next segment from queue (BEFORE phase processing)
-            // This provides look-ahead and prevents jitter between segments
-            // MOTION_Tasks manages the pipeline: load next while executing current
-            MOTION_Tasks(appData.motionQueue, &appData.motionQueueHead, 
-                        &appData.motionQueueTail, &appData.motionQueueCount);
+            // ===== MOTION PHASE PROCESSING (HIGHEST PRIORITY) =====
+            // ✅ Following Harmony pattern: Protocol handlers run INSIDE states
+            // This ensures they only execute when subsystems are ready
+
+            // ✅ TMR2 ROLLOVER MONITORING (CRITICAL - PREVENTS 343.6s OVERFLOW)
+            STEPPER_CheckTimerRollover(&appData);
+
+            // ✅ MOTION CONTROLLER (HIGHEST PRIORITY - LOAD NEXT SEGMENT) =====
+            MOTION_Tasks(&appData);
+
+            // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
+            // ✅ Moved to motion.c for clean separation
+            MOTION_Arc(&appData);
             
-            switch(appData.motionPhase) {
-                case MOTION_PHASE_VELOCITY:
-                {
-                    // Phase 0: Velocity conditioning (highest priority)
-                    // Update step interval based on acceleration/cruise/decel state
-                    if(appData.currentSegment != NULL) {
-                        MotionSegment* seg = appData.currentSegment;
-                        
-                        if(seg->steps_completed < seg->accelerate_until) {
-                            // Acceleration phase - interval decreases (speed increases)
-                            appData.currentStepInterval += seg->rate_delta;  // rate_delta is negative
-                            if(appData.currentStepInterval < seg->nominal_rate) {
-                                appData.currentStepInterval = seg->nominal_rate;  // Clamp to max speed
-                            }
-                        } else if(seg->steps_completed > seg->decelerate_after) {
-                            // Deceleration phase - interval increases (speed decreases)
-                            appData.currentStepInterval += seg->rate_delta;  // rate_delta is positive
-                            if(appData.currentStepInterval > seg->final_rate) {
-                                appData.currentStepInterval = seg->final_rate;  // Clamp to min speed
-                            }
-                        } else {
-                            // Cruise phase - maintain nominal rate
-                            appData.currentStepInterval = seg->nominal_rate;
-                        }
-                    }
-                    
-                    appData.motionPhase = MOTION_PHASE_BRESENHAM;
-                    // Fall through to next phase
-                }
-                    
-                case MOTION_PHASE_BRESENHAM:
-                {
-                    // Phase 1: Bresenham error accumulation
-                    // Determine which subordinate axes need steps
-                    if(appData.currentSegment != NULL) {
-                        MotionSegment* seg = appData.currentSegment;
-                        
-                        // Accumulate errors for subordinate axes (not dominant)
-                        if(seg->dominant_axis != AXIS_Y && seg->delta_y != 0) {
-                            appData.bresenham_error_y += seg->delta_y;
-                        }
-                        if(seg->dominant_axis != AXIS_Z && seg->delta_z != 0) {
-                            appData.bresenham_error_z += seg->delta_z;
-                        }
-                        if(seg->dominant_axis != AXIS_A && seg->delta_a != 0) {
-                            appData.bresenham_error_a += seg->delta_a;
-                        }
-                    }
-                    
-                    appData.motionPhase = MOTION_PHASE_SCHEDULE;
-                    // Fall through to next phase
-                }
-                    
-                case MOTION_PHASE_SCHEDULE:
-                {
-                    // Phase 2: OCx register scheduling
-                    // Write OCxR/OCxRS with absolute TMR2 values
-                    if(appData.currentSegment != NULL) {
-                        MotionSegment* seg = appData.currentSegment;
-                        
-                        // Get dominant axis delta for comparison
-                        int32_t dominant_delta = 0;
-                        switch(seg->dominant_axis) {
-                            case AXIS_X: dominant_delta = seg->delta_x; break;
-                            case AXIS_Y: dominant_delta = seg->delta_y; break;
-                            case AXIS_Z: dominant_delta = seg->delta_z; break;
-                            case AXIS_A: dominant_delta = seg->delta_a; break;
-                            default: break;
-                        }
-                        
-                        // Schedule dominant axis (always steps)
-                        STEPPER_ScheduleStep(seg->dominant_axis, appData.currentStepInterval);
-                        
-                        // Schedule subordinate axes if Bresenham says they need a step
-                        if(seg->dominant_axis != AXIS_Y && seg->delta_y != 0) {
-                            if(appData.bresenham_error_y >= dominant_delta) {
-                                STEPPER_ScheduleStep(AXIS_Y, appData.currentStepInterval);
-                                appData.bresenham_error_y -= dominant_delta;
-                            } else {
-                                STEPPER_DisableAxis(AXIS_Y);  // No step this cycle
-                            }
-                        }
-                        
-                        if(seg->dominant_axis != AXIS_Z && seg->delta_z != 0) {
-                            if(appData.bresenham_error_z >= dominant_delta) {
-                                STEPPER_ScheduleStep(AXIS_Z, appData.currentStepInterval);
-                                appData.bresenham_error_z -= dominant_delta;
-                            } else {
-                                STEPPER_DisableAxis(AXIS_Z);
-                            }
-                        }
-                        
-                        if(seg->dominant_axis != AXIS_A && seg->delta_a != 0) {
-                            if(appData.bresenham_error_a >= dominant_delta) {
-                                STEPPER_ScheduleStep(AXIS_A, appData.currentStepInterval);
-                                appData.bresenham_error_a -= dominant_delta;
-                            } else {
-                                STEPPER_DisableAxis(AXIS_A);
-                            }
-                        }
-                        
-                        // Increment step counter
-                        seg->steps_completed++;
-                    }
-                    
-                    appData.motionPhase = MOTION_PHASE_COMPLETE;
-                    // Fall through to next phase
-                }
-                    
-                case MOTION_PHASE_COMPLETE:
-                {
-                    // Phase 3: Segment completion check
-                    // Check if current segment done
-                    if(appData.currentSegment != NULL) {
-                        MotionSegment* seg = appData.currentSegment;
-                        
-                        if(seg->steps_completed >= seg->steps_remaining) {
-                            // Segment complete - signal MOTION_Tasks to load next
-                            // Reset Bresenham errors for next segment
-                            appData.bresenham_error_y = 0;
-                            appData.bresenham_error_z = 0;
-                            appData.bresenham_error_a = 0;
-                            appData.currentSegment = NULL;  // MOTION_Tasks will set next
-                        }
-                    }
-                    
-                    // Return to IDLE (will be re-triggered by ISR on next dominant axis step)
-                    appData.motionPhase = MOTION_PHASE_IDLE;
-                    break;  // Exit phase processing
-                }
-                    
-                case MOTION_PHASE_IDLE:
-                    // No motion processing needed - fall through to other tasks
-                    break;
-            }
-            
-            // ✅ Rate-limited polling for both real-time chars AND G-code (every ~10ms)
-            // Real-time commands (?!~^X) get 100Hz response rate - plenty fast for humans
-            // Full G-code processing also runs at 10ms intervals when safe
+            // ===== RATE-LIMITED UART POLLING (EVERY ~10ms) =====
             appData.uartPollCounter++;
-            if(appData.uartPollCounter >= 1250) {  // ~10ms @ 125kHz loop rate
-                appData.uartPollCounter = 0;
-                
-                // ✅ STEP 1: Poll serial protocol handler (Harmony pattern)
-                // Handles both real-time chars and G-code lines
-                // Only runs when UART is ready (after APP_GCODE_INIT)
+            if(appData.uartPollCounter >= 1250) {  // ~10ms @ 100kHz scan rate
                 GCODE_Tasks(&appData.gcodeCommandQueue);
+                appData.uartPollCounter = 0;
             }
             
             // ✅ STEP 2: Sync motion queue status for flow control
@@ -378,17 +252,17 @@ void APP_Tasks ( void )
                             CoordinatePoint end;
                             
                             if(appData.absoluteMode) {
-                                // G90 absolute mode - use coordinates directly
-                                end.x = event.data.linearMove.x;
-                                end.y = event.data.linearMove.y;
-                                end.z = event.data.linearMove.z;
-                                end.a = event.data.linearMove.a;
+                                // G90 absolute mode - use coordinates directly (or current if NAN)
+                                end.x = isnan(event.data.linearMove.x) ? appData.currentX : event.data.linearMove.x;
+                                end.y = isnan(event.data.linearMove.y) ? appData.currentY : event.data.linearMove.y;
+                                end.z = isnan(event.data.linearMove.z) ? appData.currentZ : event.data.linearMove.z;
+                                end.a = isnan(event.data.linearMove.a) ? appData.currentA : event.data.linearMove.a;
                             } else {
-                                // G91 relative mode - add to current position
-                                end.x = appData.currentX + event.data.linearMove.x;
-                                end.y = appData.currentY + event.data.linearMove.y;
-                                end.z = appData.currentZ + event.data.linearMove.z;
-                                end.a = appData.currentA + event.data.linearMove.a;
+                                // G91 relative mode - add to current position (or keep current if NAN)
+                                end.x = isnan(event.data.linearMove.x) ? appData.currentX : (appData.currentX + event.data.linearMove.x);
+                                end.y = isnan(event.data.linearMove.y) ? appData.currentY : (appData.currentY + event.data.linearMove.y);
+                                end.z = isnan(event.data.linearMove.z) ? appData.currentZ : (appData.currentZ + event.data.linearMove.z);
+                                end.a = isnan(event.data.linearMove.a) ? appData.currentA : (appData.currentA + event.data.linearMove.a);
                             }
                             
                             // ✅ SOFT LIMIT CHECK (non-blocking GRBL implementation)
@@ -396,16 +270,20 @@ void APP_Tasks ( void )
                             GRBL_Settings* settings = SETTINGS_GetCurrent();
                             bool limit_violation = false;
                             
-                            // Machine coordinates are negative (GRBL convention: 0,0,0 is max travel position)
-                            // Work coordinates typically positive, but we check absolute values
-                            if(fabsf(end.x) > settings->max_travel_x) {
-                                limit_violation = true;
-                            }
-                            if(fabsf(end.y) > settings->max_travel_y) {
-                                limit_violation = true;
-                            }
-                            if(fabsf(end.z) > settings->max_travel_z) {
-                                limit_violation = true;
+                            // ✅ CRITICAL: Only check limits if settings are valid (not NAN)
+                            // If settings corrupted, allow motion (fail-safe operation)
+                            if(!isnan(settings->max_travel_x) && !isnan(settings->max_travel_y) && !isnan(settings->max_travel_z)) {
+                                // Machine coordinates are negative (GRBL convention: 0,0,0 is max travel position)
+                                // Work coordinates typically positive, but we check absolute values
+                                if(fabsf(end.x) > settings->max_travel_x) {
+                                    limit_violation = true;
+                                }
+                                if(fabsf(end.y) > settings->max_travel_y) {
+                                    limit_violation = true;
+                                }
+                                if(fabsf(end.z) > settings->max_travel_z) {
+                                    limit_violation = true;
+                                }
                             }
                             
                             // If limit violated, trigger alarm (GRBL behavior)
@@ -544,171 +422,71 @@ void APP_Tasks ( void )
                             if(total_angle <= 0.0f) total_angle += 2.0f * M_PI;
                         }
                         
-                        // Calculate arc length and segment count
-                        float arc_length = r_start * total_angle;  // mm
-                        GRBL_Settings* settings = SETTINGS_GetCurrent();
-                        uint32_t segment_count = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
-                        if(segment_count == 0) segment_count = 1;
-                        
-                        // Initialize arc generation state
+                        // ✅ Initialize arc generation state (incremental streaming)
+                        // Arc generation happens in MOTION_Arc() called from main loop
                         appData.arcGenState = ARC_GEN_ACTIVE;
                         appData.arcTheta = start_angle;
-                        appData.arcThetaEnd = event.data.arcMove.clockwise ? 
-                                             (start_angle - total_angle) : 
-                                             (start_angle + total_angle);
-                        appData.arcThetaIncrement = total_angle / segment_count;
-                        if(event.data.arcMove.clockwise) {
-                            appData.arcThetaIncrement = -appData.arcThetaIncrement;  // Negative for CW
-                        }
-                        appData.arcCenter = center;
+                        appData.arcThetaEnd = end_angle;
+                        appData.arcCenter.x = center.x;
+                        appData.arcCenter.y = center.y;
                         appData.arcCurrent = start;
                         appData.arcEndPoint = end;
                         appData.arcRadius = r_start;
                         appData.arcClockwise = event.data.arcMove.clockwise;
-                        appData.arcPlane = appData.modalPlane;  // Use current modal plane (G17/G18/G19)
-                        appData.arcFeedrate = event.data.arcMove.feedrate > 0.0f ? 
-                                             event.data.arcMove.feedrate : appData.modalFeedrate;
+                        appData.arcPlane = appData.modalPlane;
+                        appData.arcFeedrate = event.data.arcMove.feedrate;
                         
-                        // Arc will be generated incrementally in main loop (see below)
-                        // Don't update currentX/Y/Z yet - will update as segments complete
+                        // Calculate arc segment increment
+                        GRBL_Settings* settings = SETTINGS_GetCurrent();
+                        float arc_length = r_start * total_angle;
+                        uint32_t num_segments = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
+                        if(num_segments < 1) num_segments = 1;
+                        appData.arcThetaIncrement = total_angle / (float)num_segments;
+                        if(!event.data.arcMove.clockwise) {
+                            // CCW = positive angle increment
+                            appData.arcThetaIncrement = fabsf(appData.arcThetaIncrement);
+                        } else {
+                            // CW = negative angle increment
+                            appData.arcThetaIncrement = -fabsf(appData.arcThetaIncrement);
+                        }
+                        
                         break;
                     }
-                        
+                    
                     case GCODE_EVENT_COOLANT_ON:
+                        // M7/M8 coolant on
+                        // TODO: Implement coolant control hardware interface
+                        break;
+                    
                     case GCODE_EVENT_COOLANT_OFF:
-                        // M7/M8/M9 coolant commands
-                        // TODO: Implement coolant control
+                        // M9 coolant off
+                        // TODO: Implement coolant control hardware interface
                         break;
-                        
+                    
+                    case GCODE_EVENT_NONE:
                     default:
-                        // Unknown or unhandled event
+                        // No action for unknown events
                         break;
                 }
             }
-            // ✅ Only ONE event processed - returns quickly for LED toggle
             
-            // ✅ INCREMENTAL ARC GENERATION (Non-Blocking)
-            // Generate ONE arc segment per iteration if arc active and motion queue has space
-            if(appData.arcGenState == ARC_GEN_ACTIVE && appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
-                // Calculate next point on arc
-                appData.arcTheta += appData.arcThetaIncrement;
-                
-                // Check if this is the last segment
-                bool is_last_segment = false;
-                if(appData.arcClockwise) {
-                    is_last_segment = (appData.arcTheta <= appData.arcThetaEnd);
-                } else {
-                    is_last_segment = (appData.arcTheta >= appData.arcThetaEnd);
-                }
-                
-                CoordinatePoint next;
-                if(is_last_segment) {
-                    // Use exact end point for final segment (avoid accumulated error)
-                    next = appData.arcEndPoint;
-                    appData.arcGenState = ARC_GEN_IDLE;  // Arc complete
-                } else {
-                    // Calculate intermediate point using sin/cos (FPU accelerated)
-                    next.x = appData.arcCenter.x + appData.arcRadius * cosf(appData.arcTheta);
-                    next.y = appData.arcCenter.y + appData.arcRadius * sinf(appData.arcTheta);
-                    
-                    // Linear interpolation for Z and A axes
-                    float progress = fabsf(appData.arcTheta - atan2f(appData.arcCurrent.y - appData.arcCenter.y,
-                                                                      appData.arcCurrent.x - appData.arcCenter.x));
-                    float total_angle = fabsf(appData.arcThetaEnd - atan2f(appData.arcCurrent.y - appData.arcCenter.y,
-                                                                            appData.arcCurrent.x - appData.arcCenter.x));
-                    float ratio = (total_angle > 0.0f) ? (progress / total_angle) : 0.0f;
-                    
-                    next.z = appData.arcCurrent.z + (appData.arcEndPoint.z - appData.arcCurrent.z) * ratio;
-                    next.a = appData.arcCurrent.a + (appData.arcEndPoint.a - appData.arcCurrent.a) * ratio;
-                }
-                
-                // Convert arc segment to linear motion segment
-                MotionSegment* segment = &appData.motionQueue[appData.motionQueueHead];
-                KINEMATICS_LinearMove(appData.arcCurrent, next, appData.arcFeedrate, segment);
-                
-                // Add to motion queue
-                appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-                appData.motionQueueCount++;
-                
-                // Update current position for next iteration
-                appData.arcCurrent = next;
-                
-                // Update work coordinates when arc completes
-                if(appData.arcGenState == ARC_GEN_IDLE) {
-                    appData.currentX = appData.arcEndPoint.x;
-                    appData.currentY = appData.arcEndPoint.y;
-                    appData.currentZ = appData.arcEndPoint.z;
-                    appData.currentA = appData.arcEndPoint.a;
-                }
-            }
-
-            /* idle status LED */
-             if(++idle_indicator >= 500000)
-            {
-                LED2_Toggle();
-                idle_indicator = 0;
-            }
             break;
         }
-
+        
         case APP_ALARM:
         {
-            // ⚠️ EMERGENCY STOP STATE - Hard limit or alarm triggered
-            // System halted - requires soft reset (^X) to clear
-            // TODO: Implement $X unlock command for alarm clear without position loss
-            
-            // Execute emergency stop ONCE when entering this state
-            static bool alarm_handled = false;
-            if (!alarm_handled) {
-                // 1. Disable all stepper axes immediately (cut power + stop pulses)
-                STEPPER_DisableAll();
-                
-                // 2. Clear motion queue (discard all pending moves)
-                appData.motionQueueCount = 0;
-                appData.motionQueueHead = 0;
-                appData.motionQueueTail = 0;
-                
-                // 3. Clear G-code command queue
-                appData.gcodeCommandQueue.count = 0;
-                appData.gcodeCommandQueue.head = 0;
-                appData.gcodeCommandQueue.tail = 0;
-                
-                // 4. Send GRBL alarm message to host
-                switch(appData.alarmCode) {
-                    case 1:
-                        UART2_Write((uint8_t*)"ALARM:1 Hard limit triggered\r\n", 31);
-                        break;
-                    case 2:
-                        UART2_Write((uint8_t*)"ALARM:2 Soft limit exceeded\r\n", 30);
-                        break;
-                    case 3:
-                        UART2_Write((uint8_t*)"ALARM:3 Abort during cycle\r\n", 29);
-                        break;
-                    default:
-                        UART2_Write((uint8_t*)"ALARM:9 Unknown alarm\r\n", 24);
-                        break;
-                }
-                
-                alarm_handled = true;
-            }
-            
-            // Stay in alarm state until cleared
-            // TODO: Implement unlock ($X) or soft reset (^X) commands
-            // For now, must reset device to clear alarm
-            
+            // Emergency stop state - all motion halted
+            // User must acknowledge alarm and reset
+            STEPPER_DisableAll();
             break;
         }
-
+        
+        case APP_WAIT_FOR_CONFIGURATION:
+        case APP_DEVICE_ATTACHED:
+        case APP_WAIT_FOR_DEVICE_ATTACH:
+        case APP_DEVICE_DETACHED:
         case APP_ERROR:
-        {
-            /* The application comes here when the demo has failed. */
-            break;
-        }
         default:
-        {
             break;
-        }
     }
-
-
-} //End of APP_Tasks
+}

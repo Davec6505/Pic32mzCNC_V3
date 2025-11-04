@@ -62,8 +62,8 @@ void OCMP1_Initialize (void)
 
     OC1CON = 0x25;
 
-    OC1R = 200;
-    OC1RS = 400;
+    OC1R = 0;
+    OC1RS = 0;
 
     IEC0SET = _IEC0_OC1IE_MASK;
 }

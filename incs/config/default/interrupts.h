@@ -56,7 +56,7 @@
 // Section: Handler Routines
 // *****************************************************************************
 // *****************************************************************************
-void OUTPUT_COMPARE_2_InterruptHandler( void );
+void OUTPUT_COMPARE_1_InterruptHandler( void );
 void OUTPUT_COMPARE_3_InterruptHandler( void );
 void OUTPUT_COMPARE_4_InterruptHandler( void );
 void OUTPUT_COMPARE_5_InterruptHandler( void );
