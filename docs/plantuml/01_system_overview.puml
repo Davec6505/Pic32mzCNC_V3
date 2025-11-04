@@ -19,7 +19,7 @@ participant "Bresenham\nState Machine" as Bresenham
 == Current Implementation Flow ==
 GCODE -> GCODE : Receive "G90G1X100Y25F1000S200M3" (multi-command line)
 GCODE -> UTILS : Call UTILS_TokenizeGcodeLine()
-UTILS -> UTILS : Split into tokens: ["G90", "G1", "X100", "Y25", "F1000", "S200", "M3"]
+UTILS -> UTILS : Split into tokens: ["G90", "G1X100Y25F1000", "S200", "M3"]
 UTILS -> GCODE : Return tokenized commands
 GCODE -> GCODE : Store commands in gcodeCommandQueue (✅)
 note right of GCODE
@@ -42,11 +42,31 @@ note right of APP
 end note
 
 alt event.type == GCODE_EVENT_LINEAR_MOVE
-    APP -> KINEMATICS : Convert coordinates using event data
-    KINEMATICS -> KINEMATICS : Calculate Bresenham parameters (✅)
-    KINEMATICS -> KINEMATICS : Determine dominant axis = X (highest Δ) (✅)
-    KINEMATICS -> APP : Return pre-calculated MotionSegment
-    APP -> APP : Add to appData.motionQueue through YOUR abstraction
+    APP -> APP : Check soft limits (fabsf against max_travel) (✅)
+    alt Soft limit exceeded
+        APP -> APP : Set alarmCode = 2, transition to APP_ALARM (✅)
+        APP -> STEPPER : STEPPER_DisableAll() - emergency stop (✅)
+    else Within limits
+        APP -> KINEMATICS : Convert coordinates using event data
+        KINEMATICS -> KINEMATICS : Calculate Bresenham parameters (✅)
+        KINEMATICS -> KINEMATICS : Calculate trapezoidal velocity profile (✅)
+        KINEMATICS -> KINEMATICS : Determine dominant axis = X (highest Δ) (✅)
+        KINEMATICS -> APP : Return pre-calculated MotionSegment
+        APP -> APP : Add to appData.motionQueue through YOUR abstraction
+    end
+end
+
+== Hard Limit Monitoring (Every APP_Tasks Iteration) ==
+APP -> LIMITS : MOTION_UTILS_CheckHardLimits(invert_mask) (✅)
+alt Hard limit triggered
+    LIMITS -> APP : Return true
+    APP -> APP : Set alarmCode = 1, transition to APP_ALARM (✅)
+    APP -> STEPPER : STEPPER_DisableAll() - emergency stop (✅)
+    APP -> APP : Clear motion queue and G-code queue (✅)
+    APP -> APP : Send "ALARM:1 Hard limit triggered" (✅)
+else No limits
+    LIMITS -> APP : Return false
+    APP -> APP : Continue normal operation
 end
 MOTION -> TMR2 : Initialize TMR2 continuous operation (✅)
 note right of TMR2

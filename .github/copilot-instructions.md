@@ -15,33 +15,116 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - ✅ **16-command circular buffer** with flow control and overflow protection
 - ✅ **Harmony state machine pattern** - proper APP_Tasks architecture
 - ✅ **Non-blocking event processing** - one event per iteration
-- ✅ **Kinematics module complete** with physics calculations
-- ✅ **Stepper module complete** with hardware abstraction
+- ✅ **Kinematics module complete** with physics calculations and velocity profiling
+- ✅ **Stepper module complete** with hardware abstraction and emergency stop
 - ✅ **Persistent GRBL settings** with NVM flash storage (27 parameters)
 - ✅ **Delayed flash initialization** - read after peripherals ready (APP_LOAD_SETTINGS state)
 - ✅ **Unified data structures** - no circular dependencies, clean module separation
 - ✅ **LED blink rate stable** - no slowdown with complex commands
 - ✅ **Hardware FPU enabled** - Single-precision floating point for motion planning
-- ✅ **Trapezoidal velocity profiling** - MotionSegment extended with profile parameters
+- ✅ **Trapezoidal velocity profiling IMPLEMENTED** - KINEMATICS_LinearMove with full physics
+- ✅ **Emergency stop system complete** - APP_ALARM state with hard/soft limit checking
+- ✅ **Position tracking and modal state** - Work coordinates with G90/G91 support
+- ✅ **Safety system complete** - STEPPER_DisableAll(), MOTION_UTILS_CheckHardLimits()
 - ✅ **256 microstepping validated** - ISR budget analysis shows 42% headroom at 512kHz
 - ✅ **Single ISR architecture designed** - GRBL pattern, no multi-ISR complexity
-- 🚧 **Flow control for UGS streaming** - infrastructure complete, ready to test
+- � **ARC INTERPOLATION NEXT** - Critical for G2/G3 circular motion (see implementation guide below)
 - 🚧 **Motion controller in progress** - Ready to implement ISR + state machine
 - ✅ **Project compiles successfully** with XC32 compiler
 
 ## Core Architecture Principles
 
 ### Timer Architecture
-- **TMR2 runs continuously** - NEVER stop or reset the timer during operation
-- **32-bit timer** (TMR2:TMR3 pair) for extended range without overflow
+- **TMR2 runs continuously** - Managed rollover strategy (see below)
+- **32-bit timer** (TMR2:TMR3 pair) for extended range
 - **Hardware Configuration:**
   - PBCLK3 = 50MHz (peripheral bus clock)
   - Prescaler = 1:4 (TCKPS = 2)
   - Timer Frequency = 12.5MHz (50MHz / 4)
   - Timer Resolution = **80ns per tick** (1 / 12.5MHz)
-  - Period Register (PR2) = 124 (unused for free-running mode)
+  - Period Register (PR2) = 0xFFFFFFFF (32-bit free-running)
+  - **Rollover time: 343.6 seconds (~5.7 minutes)** at 12.5MHz
 - **No timer interrupts used** - timer provides stable time base only
 - **Step timing** controlled entirely by OC module compare interrupts
+
+### Timer Rollover Management (CRITICAL)
+**Problem:** 32-bit TMR2 overflows after 343.6 seconds, causing OCx scheduling issues
+
+**Solution: Controlled Reset Before Rollover**
+- Monitor TMR2 value in main loop or low-priority task
+- When TMR2 > **0xF0000000** (~96% full, ~328 seconds):
+  1. **Stop accepting new motion segments** (set motion queue full flag)
+  2. **Wait for all pending motion to complete** (motionQueueCount == 0)
+  3. **Disable all OCx compare interrupts** (IEC0/1/2 clear OCx bits)
+  4. **Reset TMR2 = 0** (atomic write: TMR2 = 0)
+  5. **Clear all OCx compare values** (OCxR = 0, OCxRS = 0)
+  6. **Re-enable OCx interrupts**
+  7. **Resume motion processing**
+
+**Implementation Pattern:**
+```c
+// In MOTION_Tasks or APP_Tasks (main loop)
+#define TMR2_RESET_THRESHOLD  0xF0000000  // ~328 seconds, leaves 15.6s margin
+
+static bool tmr2_reset_pending = false;
+
+void MOTION_CheckTimerRollover(void) {
+    uint32_t tmr_now = TMR2;
+    
+    if (tmr_now > TMR2_RESET_THRESHOLD && !tmr2_reset_pending) {
+        tmr2_reset_pending = true;
+        // Stop accepting new motion (signal to APP_Tasks)
+    }
+    
+    if (tmr2_reset_pending && appData.motionQueueCount == 0) {
+        // Safe to reset - no pending motion
+        IEC0CLR = _IEC0_OC1IE_MASK | _IEC0_OC2IE_MASK;  // Disable OC interrupts
+        IEC0CLR = _IEC0_OC3IE_MASK | _IEC0_OC4IE_MASK;
+        
+        TMR2 = 0;  // Reset timer
+        
+        // Clear all compare registers
+        OC1R = 0; OC1RS = 0;
+        OC2R = 0; OC2RS = 0;
+        OC3R = 0; OC3RS = 0;
+        OC4R = 0; OC4RS = 0;
+        
+        IFS0CLR = _IFS0_OC1IF_MASK | _IFS0_OC2IF_MASK;  // Clear flags
+        IFS0CLR = _IFS0_OC3IF_MASK | _IFS0_OC4IF_MASK;
+        
+        IEC0SET = _IEC0_OC1IE_MASK | _IEC0_OC2IE_MASK;  // Re-enable
+        IEC0SET = _IEC0_OC3IE_MASK | _IEC0_OC4IE_MASK;
+        
+        tmr2_reset_pending = false;  // Resume motion
+    }
+}
+```
+
+**Why This Works:**
+- ✅ **Predictable reset point** - controlled by software, not hardware overflow
+- ✅ **No lost steps** - only resets when motion queue is empty
+- ✅ **Clean OCx state** - all compare registers cleared before resuming
+- ✅ **Large safety margin** - 15.6 seconds to drain motion queue
+- ✅ **Transparent to motion** - resumes normally after reset
+
+**Alternative: Period Match Reset (Simpler)**
+Set PR2 to a large value (e.g., 0xF0000000) and use timer period interrupt:
+```c
+// Timer initialization
+PR2 = 0xF0000000;  // Period match at ~328 seconds
+IPC2bits.T2IP = 1;  // Low priority
+IEC0SET = _IEC0_T2IE_MASK;  // Enable period interrupt
+
+// In TMR2 ISR
+void __ISR(_TIMER_2_VECTOR, IPL1SOFT) TMR2Handler(void) {
+    IFS0CLR = _IFS0_T2IF_MASK;
+    // TMR2 automatically resets to 0 on period match
+    // OCx values remain valid (relative to 0)
+    // Motion continues seamlessly
+}
+```
+
+**Recommendation:** Use **controlled reset approach** for better control over when reset occurs.
 
 ### Absolute Compare Mode
 - All OCx compare registers use **ABSOLUTE timer values**, not relative offsets
@@ -323,11 +406,11 @@ while (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
 ## Important Constraints
 
 ### Never Do
-- ❌ Stop or reset TMR2 during operation
 - ❌ Use relative compare values (always use absolute TMR2 counts)
 - ❌ Perform Bresenham calculations in ISR
 - ❌ Schedule compare values behind current TMR2 count
 - ❌ Use blocking delays in main loop (let APP_Tasks run freely)
+- ❌ Allow TMR2 to overflow uncontrolled (implement rollover management)
 
 ### Always Do
 - ✅ Schedule OCx registers with absolute timer values ahead of TMR2
@@ -335,6 +418,8 @@ while (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
 - ✅ Keep ISRs minimal and fast
 - ✅ Run Bresenham logic in state machine
 - ✅ Track dominant axis continuously ahead of TMR2
+- ✅ Monitor TMR2 for rollover and reset before overflow (see Timer Rollover Management)
+- ✅ Ensure motion queue is empty before TMR2 reset
 - ✅ Schedule subordinate axes only when required
 - ✅ **Set OCxR = OCxRS to disable pulse generation** (prevents spurious pulses)
 
@@ -532,6 +617,244 @@ xferDone = false;
 - RowWrite = 1 operation vs WordWrite = 41 operations
 - More efficient, more reliable, matches Harmony pattern
 
+## Arc Interpolation Implementation Guide (PRIORITY: HIGH)
+
+### Overview
+Arc interpolation (G2/G3 commands) is **CRITICAL** for circular motion. Without this, the CNC cannot run most real programs. This is the **next priority** implementation task.
+
+### Step 1: Understand Arc Math (5 minutes)
+**G-code Format:**
+- **G2**: Clockwise arc in current plane
+- **G3**: Counter-clockwise arc in current plane
+- **Parameters**:
+  - `X Y Z`: End point coordinates (absolute or relative based on G90/G91)
+  - `I J K`: Center offset from **start point** (always incremental)
+  - Example: `G2 X10 Y0 I5 J0` → Arc from current pos to (10,0), center at (current.x+5, current.y+0)
+
+**Arc Calculations:**
+1. **Center point**: `center.x = start.x + I`, `center.y = start.y + J`, `center.z = start.z + K`
+2. **Radius verification**: 
+   - `r_start = sqrt(I² + J²)` (radius from start to center)
+   - `r_end = sqrt((end.x - center.x)² + (end.y - center.y)²)` (radius from end to center)
+   - If `|r_start - r_end| > tolerance`, send error: "ALARM:33 Arc radius error"
+3. **Angles**:
+   - `start_angle = atan2(start.y - center.y, start.x - center.x)`
+   - `end_angle = atan2(end.y - center.y, end.x - center.x)`
+   - `total_angle = end_angle - start_angle` (adjust for clockwise/counter-clockwise)
+4. **Arc length**: `arc_length = radius × |total_angle|` (in radians)
+5. **Segment count**: `segments = ceil(arc_length / mm_per_arc_segment)` (GRBL setting $27)
+
+### Step 2: Add KINEMATICS_ArcMove() Function (30 minutes)
+**File:** `srcs/motion/kinematics.c` and `incs/motion/kinematics.h`
+
+**Function Signature:**
+```c
+// Add to kinematics.h
+uint32_t KINEMATICS_ArcMove(
+    CoordinatePoint start,           // Start position (mm)
+    CoordinatePoint end,             // End position (mm)
+    CoordinatePoint center,          // Arc center (absolute, mm)
+    bool clockwise,                  // G2=true, G3=false
+    uint8_t plane,                   // G17=XY, G18=XZ, G19=YZ
+    float feedrate,                  // Feedrate (mm/min)
+    MotionSegment* segment_buffer,   // Pre-allocated buffer
+    uint32_t max_segments            // Buffer size limit
+);
+```
+
+**Implementation Pattern:**
+```c
+uint32_t KINEMATICS_ArcMove(...) {
+    GRBL_Settings* settings = SETTINGS_GetCurrent();
+    
+    // 1. Verify radius (error check)
+    float r_start = sqrtf(I*I + J*J);
+    float r_end = sqrtf((end.x-center.x)*(end.x-center.x) + (end.y-center.y)*(end.y-center.y));
+    if(fabsf(r_start - r_end) > 0.005f) {
+        return 0;  // Radius error - abort arc
+    }
+    
+    // 2. Calculate angles and arc length
+    float start_angle = atan2f(start.y - center.y, start.x - center.x);
+    float end_angle = atan2f(end.y - center.y, end.x - center.x);
+    float total_angle = clockwise ? (start_angle - end_angle) : (end_angle - start_angle);
+    if(total_angle < 0) total_angle += 2.0f * M_PI;  // Normalize to [0, 2π]
+    
+    float arc_length = r_start * total_angle;  // mm
+    
+    // 3. Calculate segment count
+    uint32_t segment_count = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
+    if(segment_count > max_segments) segment_count = max_segments;
+    if(segment_count == 0) segment_count = 1;  // At least one segment
+    
+    // 4. Generate intermediate points using sin/cos (FPU accelerated)
+    float angle_per_segment = total_angle / segment_count;
+    CoordinatePoint current = start;
+    
+    for(uint32_t i = 1; i <= segment_count; i++) {
+        // Calculate angle for this segment
+        float theta = start_angle + (clockwise ? -1.0f : 1.0f) * angle_per_segment * i;
+        
+        // Calculate next point on arc (using FPU sin/cos)
+        CoordinatePoint next;
+        next.x = center.x + r_start * cosf(theta);
+        next.y = center.y + r_start * sinf(theta);
+        next.z = start.z + (end.z - start.z) * ((float)i / segment_count);  // Linear Z
+        next.a = start.a + (end.a - start.a) * ((float)i / segment_count);  // Linear A
+        
+        // Call KINEMATICS_LinearMove() for this arc segment (reuse existing function!)
+        KINEMATICS_LinearMove(current, next, feedrate, &segment_buffer[i-1]);
+        
+        current = next;  // Move to next segment
+    }
+    
+    return segment_count;  // Number of segments generated
+}
+```
+
+**Key Implementation Points:**
+- **Use hardware FPU** for sin/cos/atan2/sqrt (fast on PIC32MZ with `-mhard-float`)
+- **Reuse KINEMATICS_LinearMove()** - each arc segment is a tiny linear move
+- **Generate ALL segments atomically** before returning (no streaming during arc)
+- **Pre-allocate buffer** in caller (APP_DATA or stack)
+- **Error checking**: Verify radius matches at start and end
+
+### Step 3: Integrate Arc Event Processing in APP_Tasks (15 minutes)
+**File:** `srcs/app.c` in APP_IDLE state, event processing switch
+
+**Add Case Handler:**
+```c
+case GCODE_EVENT_ARC_MOVE:
+{
+    // Estimate segment count for buffer check
+    float i = event.data.arcMove.i;
+    float j = event.data.arcMove.j;
+    float radius = sqrtf(i*i + j*j);
+    float estimated_arc_length = 2.0f * M_PI * radius;  // Worst case: full circle
+    GRBL_Settings* settings = SETTINGS_GetCurrent();
+    uint32_t max_arc_segments = (uint32_t)ceilf(estimated_arc_length / settings->mm_per_arc_segment) + 1;
+    
+    // Check if motion queue has space for ALL arc segments
+    if(appData.motionQueueCount + max_arc_segments < MAX_MOTION_SEGMENTS) {
+        
+        // Build start, end, center points
+        CoordinatePoint start = {appData.currentX, appData.currentY, appData.currentZ, appData.currentA};
+        CoordinatePoint end;
+        
+        if(appData.absoluteMode) {
+            end.x = event.data.arcMove.x;
+            end.y = event.data.arcMove.y;
+            end.z = event.data.arcMove.z;
+            end.a = event.data.arcMove.a;
+        } else {
+            end.x = appData.currentX + event.data.arcMove.x;
+            end.y = appData.currentY + event.data.arcMove.y;
+            end.z = appData.currentZ + event.data.arcMove.z;
+            end.a = appData.currentA + event.data.arcMove.a;
+        }
+        
+        // Center is ALWAYS incremental (I J K offsets from start point)
+        CoordinatePoint center;
+        center.x = start.x + event.data.arcMove.i;
+        center.y = start.y + event.data.arcMove.j;
+        center.z = start.z + event.data.arcMove.k;
+        center.a = 0;  // A-axis doesn't participate in arc
+        
+        // Allocate temporary buffer for arc segments (on stack or in APP_DATA)
+        MotionSegment arc_segments[64];  // Max 64 segments per arc (tune based on max arc size)
+        
+        // Generate arc segments
+        uint32_t segment_count = KINEMATICS_ArcMove(
+            start, end, center, 
+            event.data.arcMove.clockwise,
+            event.data.arcMove.plane,  // G17/G18/G19
+            event.data.arcMove.feedrate,
+            arc_segments, 
+            64  // Max segments
+        );
+        
+        if(segment_count == 0) {
+            // Arc generation failed (radius error)
+            appData.alarmCode = 33;  // GRBL alarm code for arc error
+            appData.state = APP_ALARM;
+            break;
+        }
+        
+        // Add ALL arc segments to motion queue atomically
+        for(uint32_t i = 0; i < segment_count; i++) {
+            memcpy(&appData.motionQueue[appData.motionQueueHead], 
+                   &arc_segments[i], sizeof(MotionSegment));
+            appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+            appData.motionQueueCount++;
+        }
+        
+        // Update current position to arc end point
+        appData.currentX = end.x;
+        appData.currentY = end.y;
+        appData.currentZ = end.z;
+        appData.currentA = end.a;
+        
+    } else {
+        // Motion queue full - event stays in G-code queue (flow control)
+    }
+    break;
+}
+```
+
+### Step 4: Add Arc Segment Setting to GRBL Settings (5 minutes)
+**File:** `incs/settings/settings.h` and `srcs/settings/settings.c`
+
+**Add to GRBL_Settings struct:**
+```c
+typedef struct {
+    // ... existing settings ...
+    
+    float mm_per_arc_segment;    // $27 - Arc segment length (default 0.1mm)
+} GRBL_Settings;
+```
+
+**Initialize in SETTINGS_RestoreDefaults():**
+```c
+settings->mm_per_arc_segment = 0.1f;  // GRBL default: 0.1mm per segment
+```
+
+### Step 5: Testing Arc Interpolation (10 minutes)
+**Send Test G-code via UART:**
+```gcode
+G17           ; Select XY plane
+G90           ; Absolute positioning
+G0 X0 Y0      ; Rapid to origin
+G1 F500       ; Set feedrate to 500 mm/min
+G2 X10 Y0 I5 J0   ; Clockwise arc from (0,0) to (10,0), center at (5,0), radius=5mm
+```
+
+**Expected Behavior:**
+- Arc broken into ~157 segments (π×10mm / 0.1mm per segment = 31.4 segments for semicircle)
+- Smooth circular motion in XY plane
+- Final position: (10.0, 0.0)
+
+**Verify with Status Query:**
+```
+?   ; Send status query
+<Idle|MPos:10.000,0.000,0.000|WPos:10.000,0.000,0.000|FS:500,0>
+```
+
+### Common Pitfalls to Avoid
+1. **DON'T forget**: I J K are **offsets from start point**, not absolute coordinates
+2. **DON'T mix**: Center calculation must use start point, not current position
+3. **DON'T skip**: Radius verification prevents malformed arcs
+4. **DON'T stream**: Generate ALL segments before sending "OK" to host
+5. **DON'T use degrees**: All angles in radians for sin/cos/atan2
+6. **DO use FPU**: Hardware accelerated on PIC32MZ (-mhard-float flag already set)
+
+### Performance Considerations
+- **FPU operations**: sin/cos/sqrt are ~10-20 cycles with hardware FPU
+- **Arc generation overhead**: ~50μs per segment @ 200MHz CPU (acceptable during planning)
+- **Motion queue**: Pre-generate all segments, then execute as normal linear moves
+- **Memory**: Stack-allocate arc_segments[64] = 64 × sizeof(MotionSegment) = ~10KB max
+
+**Total Implementation Time: ~1 hour**
+
 ## Development Workflow
 1. Build: `make` or `make all` (clean + build)
 2. Flash: MikroE bootloader
@@ -544,12 +867,15 @@ xferDone = false;
 - Use state machines for complex logic, not interrupts
 - Respect the dominant/subordinate axis architecture
 - Consider dynamic axis swapping capability
+- **For arcs**: Use FPU, verify radius, generate all segments atomically
 
 ## Questions to Ask
 When uncertain about implementation details:
 - "Is this the dominant or subordinate axis?"
 - "Should this logic run in ISR or state machine?"
 - "Are we using absolute or relative timer values?"
+- "Does this arc need radius verification?"
+- "How many segments will this arc generate?"
 - "Does this require scheduling ahead of TMR2?"
 
 ## Questions to Ask

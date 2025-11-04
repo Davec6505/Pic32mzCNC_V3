@@ -7,7 +7,7 @@
 ### 🚀 **Recent Achievements** (November 3, 2025)
 - ✅ **Professional event-driven G-code processing system**
 - ✅ **Clean architecture with proper abstraction layer preservation**
-- ✅ **Comprehensive G-code support: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91**
+- ✅ **Comprehensive G-code support: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T**
 - ✅ **Event queue system with zero memory allocation and deterministic processing**
 - ✅ **Multi-command tokenization: "G90G1X10Y10F1000S200M3" → individual events**
 - ✅ **Complete separation of concerns: parsing vs. execution**
@@ -15,7 +15,9 @@
 - ✅ **Absolute compare mode timer architecture with dynamic dominant axis tracking**
 - ✅ **Single instance pattern in appData - maintainable and testable**
 - ✅ **Hardware FPU enabled with optimized compiler flags**
-- ✅ **Trapezoidal velocity profiling architecture designed (GRBL-style)**
+- ✅ **Trapezoidal velocity profiling implemented (GRBL-style with physics calculations)**
+- ✅ **Emergency stop system with APP_ALARM state and hard/soft limit checking**
+- ✅ **Position tracking in work coordinates with modal state management**
 - ✅ **256 microstepping support validated with ISR budget analysis**
 - ✅ **Single ISR motion architecture - clean, no V2 multi-ISR complexity**
 
@@ -35,6 +37,8 @@
 #### **Kinematics Module** 
 - **Physics calculations**: Coordinate transformations (G54/G55 work coordinates)
 - **Motion segment generation**: Pre-calculated Bresenham parameters
+- **Trapezoidal velocity profiling**: Full GRBL-style acceleration/deceleration calculations
+- **Timer interval conversions**: mm/min feedrate → 12.5MHz timer ticks
 - **Dominant axis determination**: Dynamic selection based on highest step count
 - **Protected coordinate management**: Private static work coordinate system
 
@@ -43,6 +47,16 @@
 - **Position tracking**: Real-time step counting in ISRs
 - **Pulse generation control**: TMR2-based absolute timer scheduling
 - **Axis disabling**: `OCxR = OCxRS` for clean pulse stopping
+- **Emergency stop**: STEPPER_DisableAll() - cuts power and stops all pulses
+- **Direction control**: Per-axis direction setting with inversion support
+
+#### **Safety & Limit System** (NEW)
+- **Hard limit checking**: GPIO limit switch monitoring with conditional compilation
+- **Soft limit checking**: max_travel boundary validation before motion execution
+- **Emergency stop**: Immediate halt with STEPPER_DisableAll() on limit trigger
+- **APP_ALARM state**: System lockout requiring reset or unlock command
+- **GRBL alarm codes**: ALARM:1 (hard limit), ALARM:2 (soft limit), ALARM:3 (abort)
+- **Graceful degradation**: Conditional compilation allows building before pins defined
 
 #### **Motion Controller** (Ready for Implementation)
 - **Master execution engine**: Bresenham interpolation state machine 
@@ -143,23 +157,129 @@ Pic32mzCNC_V3/
 
 ## 📋 **Next Implementation Phases**
 
-### **Phase 1: Motion Controller Completion** (In Progress)
+### **Phase 1: Arc Interpolation** (Priority: HIGH)
+Arc interpolation (G2/G3 commands) is **critical** for circular motion. Without this, you can't run most real CNC programs.
+
+**Implementation Guide (Tomorrow's Task):**
+
+#### **Step 1: Understand the Arc Math** (5 minutes)
+- **G2**: Clockwise arc
+- **G3**: Counter-clockwise arc  
+- **Parameters**: `X Y Z` = end point, `I J K` = center offset from start point
+- **Center calculation**: `center.x = start.x + I`, `center.y = start.y + J`
+- **Radius**: `r = sqrt(I² + J²)` (verify end point is also at radius r)
+
+#### **Step 2: Add KINEMATICS_ArcMove() Function** (30 minutes)
+**File:** `srcs/motion/kinematics.c`
+
+```c
+// Signature (add to kinematics.h)
+uint32_t KINEMATICS_ArcMove(CoordinatePoint start, CoordinatePoint end, 
+                            CoordinatePoint center, bool clockwise, 
+                            float feedrate, MotionSegment* segment_buffer,
+                            uint32_t max_segments);
+
+// Implementation pattern:
+// 1. Calculate arc parameters (radius, start/end angles, total angle)
+// 2. Determine segment count based on arc length and MM_PER_ARC_SEGMENT setting
+// 3. Loop through segments, using sin/cos to compute intermediate points
+// 4. Call KINEMATICS_LinearMove() for EACH arc segment
+// 5. Return number of segments generated
+```
+
+**Key Points:**
+- Use **hardware FPU** for sin/cos calculations (fast on PIC32MZ)
+- Break arc into small linear segments (typical: 0.1mm per segment)
+- **Generate ALL segments atomically** before sending "OK" to UGS
+- Each segment is a tiny linear move with same feedrate
+- Pre-allocate segment buffer in APP_DATA or stack
+
+#### **Step 3: Integrate Arc Event Processing** (15 minutes)
+**File:** `srcs/app.c` in APP_IDLE event processing
+
+```c
+case GCODE_EVENT_ARC_MOVE:
+{
+    // Check motion queue has space for ALL arc segments
+    uint32_t estimated_segments = calculate_arc_segment_count(&event);
+    if(appData.motionQueueCount + estimated_segments < MAX_MOTION_SEGMENTS) {
+        
+        // Build start, end, center points
+        CoordinatePoint start = {appData.currentX, appData.currentY, appData.currentZ, appData.currentA};
+        CoordinatePoint end = {event.data.arcMove.x, event.data.arcMove.y, event.data.arcMove.z, ...};
+        CoordinatePoint center = {start.x + event.data.arcMove.i, 
+                                 start.y + event.data.arcMove.j, 
+                                 start.z + event.data.arcMove.k, 0};
+        
+        // Generate arc segments (allocate buffer or use appData.arcSegmentBuffer)
+        MotionSegment arc_segments[MAX_ARC_SEGMENTS];
+        uint32_t segment_count = KINEMATICS_ArcMove(start, end, center, 
+                                                    event.data.arcMove.clockwise,
+                                                    event.data.arcMove.feedrate,
+                                                    arc_segments, MAX_ARC_SEGMENTS);
+        
+        // Add ALL segments to motion queue atomically
+        for(uint32_t i = 0; i < segment_count; i++) {
+            appData.motionQueue[appData.motionQueueHead] = arc_segments[i];
+            appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+            appData.motionQueueCount++;
+        }
+        
+        // Update current position to arc end point
+        appData.currentX = end.x;
+        appData.currentY = end.y;
+        appData.currentZ = end.z;
+    }
+    break;
+}
+```
+
+#### **Step 4: Testing Arc Interpolation** (10 minutes)
+Send test G-code via UART:
+```gcode
+G17          ; XY plane
+G90          ; Absolute mode
+G0 X0 Y0     ; Rapid to origin
+G1 F500      ; Set feedrate
+G2 X10 Y0 I5 J0  ; Clockwise circle, center at (5,0), radius=5mm
+```
+
+Expected behavior:
+- Arc broken into ~157 segments (π×10mm / 0.2mm per segment)
+- Smooth circular motion in XY plane
+- Position returns to (10, 0) at end
+
+#### **Step 5: Add Settings for Arc Resolution** (5 minutes)
+**File:** `incs/settings/settings.h` and `srcs/settings/settings.c`
+
+```c
+// Add to GRBL_Settings struct
+float mm_per_arc_segment;  // $27 - default 0.1mm
+
+// Initialize in SETTINGS_RestoreDefaults()
+settings->mm_per_arc_segment = 0.1f;  // GRBL default
+```
+
+**Total Implementation Time: ~1 hour**
+
+### **Phase 2: Motion Controller Completion** (After Arcs)
 - [ ] Complete Bresenham execution functions in `motion.c`
 - [ ] Implement segment transition logic for smooth motion
-- [ ] Add velocity profiling (acceleration/deceleration)
-- [ ] Test coordinated multi-axis motion
+- [ ] Test coordinated multi-axis motion with velocity profiling
+- [ ] Validate ISR timing at 512kHz (256 microstepping)
 
-### **Phase 2: G-code Command Processing**
-- [ ] Parse G01 linear interpolation commands in `gcode_parser.c`
-- [ ] Implement G02/G03 arc interpolation via kinematics
+### **Phase 3: Advanced G-code Commands**
+- [ ] Implement G04 dwell (non-blocking delay with CORETIMER)
 - [ ] Add G54-G59 work coordinate system commands
-- [ ] Handle feedrate (F) and spindle (S/M3/M5) control
+- [ ] Handle feedrate (F) and spindle (S/M3/M5) control (already parsed, needs hardware)
+- [ ] Tool change sequencing (T commands)
 
-### **Phase 3: Advanced Features**
-- [ ] Look-ahead motion planning for smooth trajectories
-- [ ] Emergency stop and safety systems
+### **Phase 4: Safety & Advanced Features**
+- [ ] $X unlock command for alarm clear without position loss
+- [ ] Soft reset (Ctrl+X) reinitialize system and clear alarm
 - [ ] Feed hold/resume with position retention
 - [ ] Real-time feed rate and spindle overrides
+- [ ] Look-ahead motion planning for smooth trajectories
 
 ---
 
@@ -225,9 +345,38 @@ Subordinate axes are only scheduled for compare match when Bresenham's algorithm
 ## Implementation Best Practices
 
 ### Timer Configuration
-- Use 32-bit timer (TMR2:TMR3 pair) to avoid overflow issues
-- Timer runs free continuously - **never stop or reset during operation**
+- Use 32-bit timer (TMR2:TMR3 pair) for extended range
 - **Actual configuration**: PBCLK3 50MHz / Prescaler 1:4 = 12.5MHz (80ns resolution)
+- **Rollover time**: 343.6 seconds (~5.7 minutes) at 12.5MHz
+- **Critical**: Implement controlled reset before rollover (see Timer Rollover Management below)
+
+### Timer Rollover Management (CRITICAL)
+The 32-bit TMR2 will overflow after ~5.7 minutes of continuous operation. To prevent OCx scheduling issues:
+
+**Controlled Reset Strategy:**
+1. Monitor TMR2 in main loop
+2. When TMR2 > 0xF0000000 (~328 seconds), stop accepting new motion
+3. Wait for motion queue to drain (motionQueueCount == 0)
+4. Disable all OCx interrupts
+5. Reset TMR2 = 0
+6. Clear all OCx compare registers
+7. Re-enable interrupts and resume motion
+
+**Implementation:**
+```c
+#define TMR2_RESET_THRESHOLD 0xF0000000  // Leaves 15.6s margin
+
+void MOTION_CheckTimerRollover(void) {
+    if (TMR2 > TMR2_RESET_THRESHOLD && !reset_pending) {
+        reset_pending = true;  // Stop accepting new motion
+    }
+    if (reset_pending && motionQueueCount == 0) {
+        // Disable interrupts, reset TMR2, clear OCx, re-enable
+    }
+}
+```
+
+See `.github/copilot-instructions.md` for complete implementation details.
 
 ### Compare Register Management
 - **Always use absolute timer values** for OCxR and OCxRS (not relative offsets)
