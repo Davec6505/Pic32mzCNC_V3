@@ -19,6 +19,9 @@ typedef struct {
     uint8_t step_enable_invert;    // $4 - invert step enable pin (bool as uint8)
     uint8_t limit_pins_invert;     // $5 - invert limit pins (bool as uint8)
     
+    // Arc configuration ($12)
+    float mm_per_arc_segment;      // $12 - Arc segment length in mm (default 0.1mm)
+    
     // Motion configuration ($100-$132)
     float steps_per_mm_x;          // $100 - X-axis steps per mm
     float steps_per_mm_y;          // $101 - Y-axis steps per mm
@@ -51,6 +54,8 @@ typedef struct {
     float homing_seek_rate;        // $25 - Homing search seek rate (mm/min)
     uint32_t homing_debounce;      // $26 - Homing switch debounce (ms)
     float homing_pull_off;         // $27 - Homing switch pull-off distance (mm)
+    
+
     
     // CRC32 checksum (for validation)
     uint32_t checksum;

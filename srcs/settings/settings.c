@@ -76,6 +76,9 @@ static const GRBL_Settings default_settings = {
     .homing_debounce = 25,
     .homing_pull_off = 2.0f,
     
+    // Arc configuration
+    .mm_per_arc_segment = 0.1f,    // GRBL default: 0.1mm per arc segment
+    
     .checksum = 0  // Will be calculated
 };
 
@@ -217,6 +220,9 @@ bool SETTINGS_SetValue(GRBL_Settings* settings, uint32_t parameter, float value)
         case 4: settings->step_enable_invert = (uint8_t)value; break;
         case 5: settings->limit_pins_invert = (uint8_t)value; break;
         
+        // Arc configuration
+        case 12: settings->mm_per_arc_segment = value; break;
+        
         // Steps per mm
         case 100: settings->steps_per_mm_x = value; break;
         case 101: settings->steps_per_mm_y = value; break;
@@ -271,6 +277,8 @@ float SETTINGS_GetValue(const GRBL_Settings* settings, uint32_t parameter)
         case 3: return (float)settings->step_direction_invert;
         case 4: return (float)settings->step_enable_invert;
         case 5: return (float)settings->limit_pins_invert;
+        
+        case 12: return settings->mm_per_arc_segment;
         
         case 100: return settings->steps_per_mm_x;
         case 101: return settings->steps_per_mm_y;
@@ -331,6 +339,9 @@ void SETTINGS_PrintAll(const GRBL_Settings* settings)
     UART2_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$5=%u\r\n", settings->limit_pins_invert);
+    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    
+    sprintf(buffer, "$12=%.3f\r\n", settings->mm_per_arc_segment);
     UART2_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$100=%.3f\r\n", settings->steps_per_mm_x);

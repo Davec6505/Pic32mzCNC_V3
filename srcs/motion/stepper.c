@@ -14,6 +14,9 @@ void OCP4_ISR(uintptr_t context);  // A Axis Step Complete
 // Static Data - Motion Control State
 // ============================================================================
 
+// Reference to application data for ISR phase signaling
+static APP_DATA* app_data_ref = NULL;
+
 // Position tracking (incremented/decremented by ISRs based on direction)
 static StepperPosition stepper_pos = {
     .x_steps = 0, .y_steps = 0, .z_steps = 0, .a_steps = 0,
@@ -35,7 +38,10 @@ static uint8_t step_pulse_invert_mask = 0;
 static uint8_t direction_invert_mask = 0;
 static uint8_t enable_invert = 0;
 
-void STEPPER_Initialize(void) {
+void STEPPER_Initialize(APP_DATA* appData) {
+    // Store reference for ISR access
+    app_data_ref = appData;
+    
     // ✅ Load settings from flash (already initialized in main.c)
     GRBL_Settings* settings = SETTINGS_GetCurrent();
     
@@ -166,46 +172,67 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 }
 
 // ============================================================================
-// ISR Callbacks - Position Counters ONLY
+// ISR Callbacks - Position Counters + Phase Signaling
 // ============================================================================
-// ARCHITECTURE: Minimal ISRs - just count steps based on direction
-// - ALL motion logic runs in MOTION_Tasks() state machine
-// - Direction set by motion controller before pulse scheduling
-// - ISRs execute in ~5-10 cycles (just increment/decrement + exit)
+// ARCHITECTURE: Minimal ISRs - count steps + signal main loop when dominant axis fires
+// - Position counter: increment/decrement based on direction
+// - Phase signaling: if this axis is dominant, wake main loop for next phase
+// - ALL motion logic runs in MOTION_Tasks() state machine (not here!)
+// - ISRs execute in ~10-15 cycles (count + conditional phase set + exit)
 // ============================================================================
 
 void OCP5_ISR(uintptr_t context) {
-    // X Axis - position counter only
+    // X Axis - position counter + phase signaling
     if (direction_bits & (1 << AXIS_X)) {
         stepper_pos.x_steps++;  // Forward/positive
     } else {
         stepper_pos.x_steps--;  // Reverse/negative
     }
+    
+    // ✅ CRITICAL: Signal main loop if X is dominant axis
+    if (app_data_ref != NULL && app_data_ref->dominantAxis == AXIS_X) {
+        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;  // Wake main loop
+    }
 }
 
 void OCP2_ISR(uintptr_t context) {
-    // Y Axis - position counter only
+    // Y Axis - position counter + phase signaling
     if (direction_bits & (1 << AXIS_Y)) {
         stepper_pos.y_steps++;
     } else {
         stepper_pos.y_steps--;
     }
+    
+    // ✅ CRITICAL: Signal main loop if Y is dominant axis
+    if (app_data_ref != NULL && app_data_ref->dominantAxis == AXIS_Y) {
+        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;  // Wake main loop
+    }
 }
 
 void OCP3_ISR(uintptr_t context) {
-    // Z Axis - position counter only
+    // Z Axis - position counter + phase signaling
     if (direction_bits & (1 << AXIS_Z)) {
         stepper_pos.z_steps++;
     } else {
         stepper_pos.z_steps--;
     }
+    
+    // ✅ CRITICAL: Signal main loop if Z is dominant axis
+    if (app_data_ref != NULL && app_data_ref->dominantAxis == AXIS_Z) {
+        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;  // Wake main loop
+    }
 }
 
 void OCP4_ISR(uintptr_t context) {
-    // A Axis - position counter only
+    // A Axis - position counter + phase signaling
     if (direction_bits & (1 << AXIS_A)) {
         stepper_pos.a_steps++;
     } else {
         stepper_pos.a_steps--;
+    }
+    
+    // ✅ CRITICAL: Signal main loop if A is dominant axis
+    if (app_data_ref != NULL && app_data_ref->dominantAxis == AXIS_A) {
+        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;  // Wake main loop
     }
 }

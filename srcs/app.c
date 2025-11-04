@@ -108,9 +108,30 @@ void APP_Initialize ( void )
     appData.modalSpindleRPM = 0;       // Spindle off
     appData.modalToolNumber = 0;       // No tool selected
     appData.absoluteMode = true;       // G90 absolute mode (GRBL default)
+    appData.modalPlane = 0;            // G17 XY plane (GRBL default)
     
     // ✅ Initialize alarm state
     appData.alarmCode = 0;             // No alarm
+    
+    // ✅ Initialize motion phase system (priority-based task scheduler)
+    appData.motionPhase = MOTION_PHASE_IDLE;   // Safe for G-code processing
+    appData.dominantAxis = AXIS_X;             // Default dominant axis
+    appData.currentStepInterval = 0;           // No active motion
+    appData.currentSegment = NULL;             // No active segment
+    appData.bresenham_error_y = 0;
+    appData.bresenham_error_z = 0;
+    appData.bresenham_error_a = 0;
+    appData.uartPollCounter = 0;               // Rate limiting counter
+    
+    // ✅ Initialize arc generation state (non-blocking incremental)
+    appData.arcGenState = ARC_GEN_IDLE;
+    appData.arcTheta = 0.0f;
+    appData.arcThetaEnd = 0.0f;
+    appData.arcThetaIncrement = 0.0f;
+    appData.arcRadius = 0.0f;
+    appData.arcClockwise = false;
+    appData.arcPlane = 0;  // XY plane
+    appData.arcFeedrate = 0.0f;
 
 
 }
@@ -137,7 +158,7 @@ void APP_Tasks ( void )
         case APP_CONFIG:
         {
             // Initialize subsystems ONCE during configuration
-            STEPPER_Initialize();                           // Hardware timer setup
+            STEPPER_Initialize(&appData);                   // ✅ Pass APP_DATA reference for ISR phase signaling
             MOTION_Initialize();                           // Motion planning initialization  
             KINEMATICS_Initialize();                        // Initialize work coordinates
             
@@ -170,19 +191,171 @@ void APP_Tasks ( void )
         
         case APP_IDLE:
         {
-            // ✅ STEP 1: Poll serial protocol handler (Harmony pattern)
-            // Only runs when UART is ready (after APP_GCODE_INIT)
-            GCODE_Tasks(&appData.gcodeCommandQueue);
+            // ✅ PRIORITY PHASE SYSTEM: Process motion phases BEFORE G-code
+            // ISR sets motionPhase flag when dominant axis fires
+            // Main loop processes phases in priority order (0 = highest)
+            // G-code only runs when motionPhase == IDLE (prevents blocking)
+            
+            // ✅ STEP 0: Load next segment from queue (BEFORE phase processing)
+            // This provides look-ahead and prevents jitter between segments
+            // MOTION_Tasks manages the pipeline: load next while executing current
+            MOTION_Tasks(appData.motionQueue, &appData.motionQueueHead, 
+                        &appData.motionQueueTail, &appData.motionQueueCount);
+            
+            switch(appData.motionPhase) {
+                case MOTION_PHASE_VELOCITY:
+                {
+                    // Phase 0: Velocity conditioning (highest priority)
+                    // Update step interval based on acceleration/cruise/decel state
+                    if(appData.currentSegment != NULL) {
+                        MotionSegment* seg = appData.currentSegment;
+                        
+                        if(seg->steps_completed < seg->accelerate_until) {
+                            // Acceleration phase - interval decreases (speed increases)
+                            appData.currentStepInterval += seg->rate_delta;  // rate_delta is negative
+                            if(appData.currentStepInterval < seg->nominal_rate) {
+                                appData.currentStepInterval = seg->nominal_rate;  // Clamp to max speed
+                            }
+                        } else if(seg->steps_completed > seg->decelerate_after) {
+                            // Deceleration phase - interval increases (speed decreases)
+                            appData.currentStepInterval += seg->rate_delta;  // rate_delta is positive
+                            if(appData.currentStepInterval > seg->final_rate) {
+                                appData.currentStepInterval = seg->final_rate;  // Clamp to min speed
+                            }
+                        } else {
+                            // Cruise phase - maintain nominal rate
+                            appData.currentStepInterval = seg->nominal_rate;
+                        }
+                    }
+                    
+                    appData.motionPhase = MOTION_PHASE_BRESENHAM;
+                    // Fall through to next phase
+                }
+                    
+                case MOTION_PHASE_BRESENHAM:
+                {
+                    // Phase 1: Bresenham error accumulation
+                    // Determine which subordinate axes need steps
+                    if(appData.currentSegment != NULL) {
+                        MotionSegment* seg = appData.currentSegment;
+                        
+                        // Accumulate errors for subordinate axes (not dominant)
+                        if(seg->dominant_axis != AXIS_Y && seg->delta_y != 0) {
+                            appData.bresenham_error_y += seg->delta_y;
+                        }
+                        if(seg->dominant_axis != AXIS_Z && seg->delta_z != 0) {
+                            appData.bresenham_error_z += seg->delta_z;
+                        }
+                        if(seg->dominant_axis != AXIS_A && seg->delta_a != 0) {
+                            appData.bresenham_error_a += seg->delta_a;
+                        }
+                    }
+                    
+                    appData.motionPhase = MOTION_PHASE_SCHEDULE;
+                    // Fall through to next phase
+                }
+                    
+                case MOTION_PHASE_SCHEDULE:
+                {
+                    // Phase 2: OCx register scheduling
+                    // Write OCxR/OCxRS with absolute TMR2 values
+                    if(appData.currentSegment != NULL) {
+                        MotionSegment* seg = appData.currentSegment;
+                        
+                        // Get dominant axis delta for comparison
+                        int32_t dominant_delta = 0;
+                        switch(seg->dominant_axis) {
+                            case AXIS_X: dominant_delta = seg->delta_x; break;
+                            case AXIS_Y: dominant_delta = seg->delta_y; break;
+                            case AXIS_Z: dominant_delta = seg->delta_z; break;
+                            case AXIS_A: dominant_delta = seg->delta_a; break;
+                            default: break;
+                        }
+                        
+                        // Schedule dominant axis (always steps)
+                        STEPPER_ScheduleStep(seg->dominant_axis, appData.currentStepInterval);
+                        
+                        // Schedule subordinate axes if Bresenham says they need a step
+                        if(seg->dominant_axis != AXIS_Y && seg->delta_y != 0) {
+                            if(appData.bresenham_error_y >= dominant_delta) {
+                                STEPPER_ScheduleStep(AXIS_Y, appData.currentStepInterval);
+                                appData.bresenham_error_y -= dominant_delta;
+                            } else {
+                                STEPPER_DisableAxis(AXIS_Y);  // No step this cycle
+                            }
+                        }
+                        
+                        if(seg->dominant_axis != AXIS_Z && seg->delta_z != 0) {
+                            if(appData.bresenham_error_z >= dominant_delta) {
+                                STEPPER_ScheduleStep(AXIS_Z, appData.currentStepInterval);
+                                appData.bresenham_error_z -= dominant_delta;
+                            } else {
+                                STEPPER_DisableAxis(AXIS_Z);
+                            }
+                        }
+                        
+                        if(seg->dominant_axis != AXIS_A && seg->delta_a != 0) {
+                            if(appData.bresenham_error_a >= dominant_delta) {
+                                STEPPER_ScheduleStep(AXIS_A, appData.currentStepInterval);
+                                appData.bresenham_error_a -= dominant_delta;
+                            } else {
+                                STEPPER_DisableAxis(AXIS_A);
+                            }
+                        }
+                        
+                        // Increment step counter
+                        seg->steps_completed++;
+                    }
+                    
+                    appData.motionPhase = MOTION_PHASE_COMPLETE;
+                    // Fall through to next phase
+                }
+                    
+                case MOTION_PHASE_COMPLETE:
+                {
+                    // Phase 3: Segment completion check
+                    // Check if current segment done
+                    if(appData.currentSegment != NULL) {
+                        MotionSegment* seg = appData.currentSegment;
+                        
+                        if(seg->steps_completed >= seg->steps_remaining) {
+                            // Segment complete - signal MOTION_Tasks to load next
+                            // Reset Bresenham errors for next segment
+                            appData.bresenham_error_y = 0;
+                            appData.bresenham_error_z = 0;
+                            appData.bresenham_error_a = 0;
+                            appData.currentSegment = NULL;  // MOTION_Tasks will set next
+                        }
+                    }
+                    
+                    // Return to IDLE (will be re-triggered by ISR on next dominant axis step)
+                    appData.motionPhase = MOTION_PHASE_IDLE;
+                    break;  // Exit phase processing
+                }
+                    
+                case MOTION_PHASE_IDLE:
+                    // No motion processing needed - fall through to other tasks
+                    break;
+            }
+            
+            // ✅ Rate-limited polling for both real-time chars AND G-code (every ~10ms)
+            // Real-time commands (?!~^X) get 100Hz response rate - plenty fast for humans
+            // Full G-code processing also runs at 10ms intervals when safe
+            appData.uartPollCounter++;
+            if(appData.uartPollCounter >= 1250) {  // ~10ms @ 125kHz loop rate
+                appData.uartPollCounter = 0;
+                
+                // ✅ STEP 1: Poll serial protocol handler (Harmony pattern)
+                // Handles both real-time chars and G-code lines
+                // Only runs when UART is ready (after APP_GCODE_INIT)
+                GCODE_Tasks(&appData.gcodeCommandQueue);
+            }
             
             // ✅ STEP 2: Sync motion queue status for flow control
             appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
             appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
 
-            // ✅ STEP 3: Motion controller processes queued segments
-            MOTION_Tasks(appData.motionQueue, &appData.motionQueueHead, 
-                        &appData.motionQueueTail, &appData.motionQueueCount);
-
-            // ✅ STEP 4: HARD LIMIT CHECK (GRBL safety feature)
+            // ✅ STEP 3: HARD LIMIT CHECK (GRBL safety feature)
             // Check limit switches with inversion mask from settings
             GRBL_Settings* settings = SETTINGS_GetCurrent();
             if(MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
@@ -192,7 +365,7 @@ void APP_Tasks ( void )
                 break;  // Immediate transition to alarm state
             }
 
-            // ✅ STEP 5: Process ONE G-code event per iteration (non-blocking!)
+            // ✅ STEP 4: Process ONE G-code event per iteration (non-blocking!)
             GCODE_Event event;
             if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
                 switch (event.type) {
@@ -313,9 +486,93 @@ void APP_Tasks ( void )
                         break;
                         
                     case GCODE_EVENT_ARC_MOVE:
-                        // G2/G3 arc commands
-                        // TODO: Implement arc interpolation via KINEMATICS_ArcMove
+                    {
+                        // G2/G3 arc commands - Initialize incremental arc generation
+                        // Calculate arc parameters, then stream segments over multiple iterations
+                        
+                        // Build start and end coordinates
+                        CoordinatePoint start = {appData.currentX, appData.currentY, appData.currentZ, appData.currentA};
+                        CoordinatePoint end;
+                        
+                        if(appData.absoluteMode) {
+                            // G90 absolute mode
+                            end.x = event.data.arcMove.x;
+                            end.y = event.data.arcMove.y;
+                            end.z = event.data.arcMove.z;
+                            end.a = event.data.arcMove.a;
+                        } else {
+                            // G91 relative mode
+                            end.x = appData.currentX + event.data.arcMove.x;
+                            end.y = appData.currentY + event.data.arcMove.y;
+                            end.z = appData.currentZ + event.data.arcMove.z;
+                            end.a = appData.currentA + event.data.arcMove.a;
+                        }
+                        
+                        // Center is ALWAYS incremental (centerX/centerY offsets from start)
+                        CoordinatePoint center;
+                        center.x = start.x + event.data.arcMove.centerX;
+                        center.y = start.y + event.data.arcMove.centerY;
+                        center.z = start.z;  // Z doesn't participate in arc center
+                        center.a = 0.0f;
+                        
+                        // Verify radius (GRBL arc validation)
+                        float r_start = sqrtf(event.data.arcMove.centerX * event.data.arcMove.centerX + 
+                                             event.data.arcMove.centerY * event.data.arcMove.centerY);
+                        float r_end = sqrtf((end.x - center.x) * (end.x - center.x) + 
+                                           (end.y - center.y) * (end.y - center.y));
+                        
+                        if(fabsf(r_start - r_end) > 0.005f) {
+                            // Radius error - abort arc
+                            appData.alarmCode = 33;  // GRBL alarm: arc radius error
+                            appData.state = APP_ALARM;
+                            break;
+                        }
+                        
+                        // Calculate angles
+                        float start_angle = atan2f(start.y - center.y, start.x - center.x);
+                        float end_angle = atan2f(end.y - center.y, end.x - center.x);
+                        
+                        // Calculate total angle (handle wrap-around)
+                        float total_angle;
+                        if(event.data.arcMove.clockwise) {
+                            // G2 clockwise
+                            total_angle = start_angle - end_angle;
+                            if(total_angle <= 0.0f) total_angle += 2.0f * M_PI;
+                        } else {
+                            // G3 counter-clockwise
+                            total_angle = end_angle - start_angle;
+                            if(total_angle <= 0.0f) total_angle += 2.0f * M_PI;
+                        }
+                        
+                        // Calculate arc length and segment count
+                        float arc_length = r_start * total_angle;  // mm
+                        GRBL_Settings* settings = SETTINGS_GetCurrent();
+                        uint32_t segment_count = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
+                        if(segment_count == 0) segment_count = 1;
+                        
+                        // Initialize arc generation state
+                        appData.arcGenState = ARC_GEN_ACTIVE;
+                        appData.arcTheta = start_angle;
+                        appData.arcThetaEnd = event.data.arcMove.clockwise ? 
+                                             (start_angle - total_angle) : 
+                                             (start_angle + total_angle);
+                        appData.arcThetaIncrement = total_angle / segment_count;
+                        if(event.data.arcMove.clockwise) {
+                            appData.arcThetaIncrement = -appData.arcThetaIncrement;  // Negative for CW
+                        }
+                        appData.arcCenter = center;
+                        appData.arcCurrent = start;
+                        appData.arcEndPoint = end;
+                        appData.arcRadius = r_start;
+                        appData.arcClockwise = event.data.arcMove.clockwise;
+                        appData.arcPlane = appData.modalPlane;  // Use current modal plane (G17/G18/G19)
+                        appData.arcFeedrate = event.data.arcMove.feedrate > 0.0f ? 
+                                             event.data.arcMove.feedrate : appData.modalFeedrate;
+                        
+                        // Arc will be generated incrementally in main loop (see below)
+                        // Don't update currentX/Y/Z yet - will update as segments complete
                         break;
+                    }
                         
                     case GCODE_EVENT_COOLANT_ON:
                     case GCODE_EVENT_COOLANT_OFF:
@@ -329,6 +586,61 @@ void APP_Tasks ( void )
                 }
             }
             // ✅ Only ONE event processed - returns quickly for LED toggle
+            
+            // ✅ INCREMENTAL ARC GENERATION (Non-Blocking)
+            // Generate ONE arc segment per iteration if arc active and motion queue has space
+            if(appData.arcGenState == ARC_GEN_ACTIVE && appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
+                // Calculate next point on arc
+                appData.arcTheta += appData.arcThetaIncrement;
+                
+                // Check if this is the last segment
+                bool is_last_segment = false;
+                if(appData.arcClockwise) {
+                    is_last_segment = (appData.arcTheta <= appData.arcThetaEnd);
+                } else {
+                    is_last_segment = (appData.arcTheta >= appData.arcThetaEnd);
+                }
+                
+                CoordinatePoint next;
+                if(is_last_segment) {
+                    // Use exact end point for final segment (avoid accumulated error)
+                    next = appData.arcEndPoint;
+                    appData.arcGenState = ARC_GEN_IDLE;  // Arc complete
+                } else {
+                    // Calculate intermediate point using sin/cos (FPU accelerated)
+                    next.x = appData.arcCenter.x + appData.arcRadius * cosf(appData.arcTheta);
+                    next.y = appData.arcCenter.y + appData.arcRadius * sinf(appData.arcTheta);
+                    
+                    // Linear interpolation for Z and A axes
+                    float progress = fabsf(appData.arcTheta - atan2f(appData.arcCurrent.y - appData.arcCenter.y,
+                                                                      appData.arcCurrent.x - appData.arcCenter.x));
+                    float total_angle = fabsf(appData.arcThetaEnd - atan2f(appData.arcCurrent.y - appData.arcCenter.y,
+                                                                            appData.arcCurrent.x - appData.arcCenter.x));
+                    float ratio = (total_angle > 0.0f) ? (progress / total_angle) : 0.0f;
+                    
+                    next.z = appData.arcCurrent.z + (appData.arcEndPoint.z - appData.arcCurrent.z) * ratio;
+                    next.a = appData.arcCurrent.a + (appData.arcEndPoint.a - appData.arcCurrent.a) * ratio;
+                }
+                
+                // Convert arc segment to linear motion segment
+                MotionSegment* segment = &appData.motionQueue[appData.motionQueueHead];
+                KINEMATICS_LinearMove(appData.arcCurrent, next, appData.arcFeedrate, segment);
+                
+                // Add to motion queue
+                appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+                appData.motionQueueCount++;
+                
+                // Update current position for next iteration
+                appData.arcCurrent = next;
+                
+                // Update work coordinates when arc completes
+                if(appData.arcGenState == ARC_GEN_IDLE) {
+                    appData.currentX = appData.arcEndPoint.x;
+                    appData.currentY = appData.arcEndPoint.y;
+                    appData.currentZ = appData.arcEndPoint.z;
+                    appData.currentA = appData.arcEndPoint.a;
+                }
+            }
 
             /* idle status LED */
              if(++idle_indicator >= 500000)

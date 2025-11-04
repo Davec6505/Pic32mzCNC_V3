@@ -28,11 +28,100 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - ✅ **Safety system complete** - STEPPER_DisableAll(), MOTION_UTILS_CheckHardLimits()
 - ✅ **256 microstepping validated** - ISR budget analysis shows 42% headroom at 512kHz
 - ✅ **Single ISR architecture designed** - GRBL pattern, no multi-ISR complexity
-- � **ARC INTERPOLATION NEXT** - Critical for G2/G3 circular motion (see implementation guide below)
-- 🚧 **Motion controller in progress** - Ready to implement ISR + state machine
+- ✅ **PRIORITY PHASE SYSTEM IMPLEMENTED** - Hybrid ISR/main loop architecture (best of both worlds!)
+- 🎯 **ARC INTERPOLATION NEXT** - Critical for G2/G3 circular motion (see implementation guide below)
+- 🚧 **Motion controller in progress** - Phase processing skeleton ready, needs implementation
 - ✅ **Project compiles successfully** with XC32 compiler
 
 ## Core Architecture Principles
+
+### Priority-Based Phase System (NEW - CRITICAL!)
+**The "Best of Both Worlds" Hybrid Architecture**
+
+**Problem Solved:**
+- G-code processing could block motion timing (arc generation takes time)
+- UART polled 512,000x/sec (wasteful CPU usage, only need 100x/sec)
+- Need ISR precision but main loop flexibility
+
+**Solution: Priority Phase System**
+- **ISR sets flag** when dominant axis fires → wakes main loop
+- **Main loop processes phases** in priority order (0 = highest)
+- **G-code only runs when IDLE** → prevents blocking
+- **Rate-limited UART** → polled every 10ms (not every μs)
+
+**Phase Priorities:**
+```c
+typedef enum {
+    MOTION_PHASE_IDLE = 255,      // Lowest - safe for G-code processing
+    MOTION_PHASE_VELOCITY = 0,    // Highest - velocity conditioning
+    MOTION_PHASE_BRESENHAM = 1,   // Bresenham error accumulation
+    MOTION_PHASE_SCHEDULE = 2,    // OCx register scheduling
+    MOTION_PHASE_COMPLETE = 3     // Segment completion
+} MotionPhase;
+```
+
+**ISR Behavior (stepper.c):**
+```c
+void OCP5_ISR(uintptr_t context) {
+    // X Axis - count steps
+    if (direction_bits & (1 << AXIS_X)) {
+        stepper_pos.x_steps++;
+    } else {
+        stepper_pos.x_steps--;
+    }
+    
+    // ✅ CRITICAL: Signal main loop if X is dominant axis
+    if (app_data_ref != NULL && app_data_ref->dominantAxis == AXIS_X) {
+        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;  // Wake main loop
+    }
+}
+```
+
+**Main Loop Processing (app.c):**
+```c
+case APP_IDLE:
+    switch(appData.motionPhase) {
+        case MOTION_PHASE_VELOCITY:
+            // Update currentStepInterval (accel/cruise/decel)
+            appData.motionPhase = MOTION_PHASE_BRESENHAM;
+            // Fall through to next phase (no break)
+            
+        case MOTION_PHASE_BRESENHAM:
+            // Accumulate error terms, determine subordinate steps
+            appData.motionPhase = MOTION_PHASE_SCHEDULE;
+            // Fall through to next phase
+            
+        case MOTION_PHASE_SCHEDULE:
+            // Write OCxR/OCxRS with absolute values
+            appData.motionPhase = MOTION_PHASE_COMPLETE;
+            // Fall through to next phase
+            
+        case MOTION_PHASE_COMPLETE:
+            // Check segment done, load next from queue
+            appData.motionPhase = MOTION_PHASE_IDLE;
+            break;  // Exit phase processing
+            
+        case MOTION_PHASE_IDLE:
+            // Safe for G-code processing
+            break;
+    }
+    
+    // ✅ Rate-limited UART (only when IDLE)
+    if(appData.motionPhase == MOTION_PHASE_IDLE) {
+        if(uartPollCounter >= 1250) {  // ~10ms
+            GCODE_Tasks(&appData.gcodeCommandQueue);
+            uartPollCounter = 0;
+        }
+    }
+```
+
+**Benefits:**
+- ✅ **ISR precision** - dominant axis timing rock-solid
+- ✅ **Main loop flexibility** - complex calculations without ISR bloat
+- ✅ **Guaranteed execution order** - phases process in sequence
+- ✅ **Non-blocking G-code** - motion always gets priority
+- ✅ **CPU efficiency** - UART polled 100x/sec vs 512,000x/sec
+- ✅ **Dynamic axis swapping** - ISR knows which axis is master
 
 ### Timer Architecture
 - **TMR2 runs continuously** - Managed rollover strategy (see below)

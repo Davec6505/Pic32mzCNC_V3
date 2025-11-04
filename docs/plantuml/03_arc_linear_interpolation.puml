@@ -1,0 +1,146 @@
+@startuml Arc and Linear Interpolation System
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam componentStyle rectangle
+skinparam defaultTextAlignment center
+
+title Arc and Linear Interpolation Flow\nPic32mzCNC_V3 - November 2025
+
+package "G-code Parser" {
+    [GCODE Event\nGenerator] as GCODE
+    note right of GCODE
+        Events:
+        - LINEAR_MOVE (G1)
+        - ARC_MOVE (G2/G3)
+        - Modal params (F/S/T)
+    end note
+}
+
+package "Application Layer (app.c)" {
+    rectangle "APP_Tasks State Machine" {
+        state "APP_IDLE" as IDLE {
+            state "Process G-code\nEvents" as PROC
+            state "Arc Generator\n(Incremental)" as ARC_GEN
+            state "Motion Phase\nExecution" as PHASE
+        }
+    }
+    
+    [Arc State Machine] as ARC_SM
+    note right of ARC_SM
+        ARC_GEN_IDLE
+        ARC_GEN_ACTIVE
+        
+        Generates ONE segment
+        per iteration when:
+        - arcGenState == ACTIVE
+        - motionQueue has space
+    end note
+}
+
+package "Kinematics Module (kinematics.c)" {
+    [KINEMATICS_LinearMove] as LINEAR
+    note right of LINEAR
+        Converts geometric move
+        to MotionSegment:
+        - Bresenham deltas
+        - Velocity profiling
+        - Acceleration planning
+        - Step counts
+    end note
+}
+
+package "Motion Queue (APP_DATA)" {
+    database "Motion Segment\nQueue [16]" as QUEUE {
+        [MotionSegment 0]
+        [MotionSegment 1]
+        [MotionSegment ...]
+        [MotionSegment 15]
+    }
+}
+
+package "Motion Controller (motion.c)" {
+    [Priority Phase\nSystem] as MOTION
+    note right of MOTION
+        Phases (priority order):
+        0. VELOCITY - accel/cruise/decel
+        1. BRESENHAM - error accumulation
+        2. SCHEDULE - OCx scheduling
+        3. COMPLETE - segment done
+    end note
+}
+
+' Linear Move Flow
+GCODE -down-> PROC : LINEAR_MOVE\nevent
+PROC -down-> LINEAR : CoordinatePoint\nstart, end,\nfeedrate
+LINEAR -down-> QUEUE : MotionSegment\n(ready to execute)
+
+' Arc Move Flow - Initial Setup
+GCODE -down-> PROC : ARC_MOVE\nevent (G2/G3)
+PROC -right-> ARC_SM : Initialize arc:\n- Calculate radius\n- Verify tolerance\n- Compute angles\n- Set segment count
+
+' Arc Generation Loop
+ARC_SM -down-> ARC_GEN : arcGenState =\nACTIVE
+ARC_GEN -down-> LINEAR : One segment:\ntheta += increment\nsin/cos point
+note on link
+    Incremental Generation:
+    • Non-blocking (50-100μs)
+    • One segment per iteration
+    • FPU sin/cos for arc point
+    • Linear Z/A interpolation
+end note
+
+' Motion Execution
+QUEUE -down-> MOTION : Pop segment\nfrom queue
+MOTION -down-> [Hardware Timers\nOC1/OC2/OC3/OC4] : Step pulses\n(absolute timing)
+
+' Arc Completion
+ARC_GEN -right-> ARC_SM : Last segment?\narcGenState = IDLE
+note on link
+    Exact end point:
+    Final segment uses
+    target coordinates
+    (no accumulated error)
+end note
+
+' Annotations
+note bottom of QUEUE
+    **Flow Control:**
+    Queue fills faster than it drains
+    → Smooth continuous motion
+    → Never runs empty during arc
+    
+    **Self-Regulating:**
+    Arc generator checks space
+    before adding segment
+end note
+
+note bottom of LINEAR
+    **Physics Calculations:**
+    - Distance (Pythagorean)
+    - Steps per mm (from settings)
+    - Max velocity (feedrate)
+    - Acceleration profile
+    - Bresenham error terms
+end note
+
+' Legend
+legend bottom right
+    **Arc Interpolation Algorithm:**
+    1. Validate radius: |r_start - r_end| < 0.005mm
+    2. Calculate angles: start_angle, end_angle
+    3. Compute arc_length = radius × total_angle
+    4. Segment count = arc_length / mm_per_arc_segment
+    5. Increment theta each iteration
+    6. Generate point: (cx + r×cos(θ), cy + r×sin(θ))
+    7. Call KINEMATICS_LinearMove() for segment
+    8. Repeat until theta reaches end_angle
+    
+    **Key Features:**
+    • GRBL v1.1 compatible arc math
+    • G2 (CW) and G3 (CCW) support
+    • Helical motion (linear Z/A)
+    • Plane selection (G17/G18/G19)
+    • FPU-accelerated (sin/cos)
+end legend
+
+@enduml
