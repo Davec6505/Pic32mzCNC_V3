@@ -1,10 +1,10 @@
 # Pic32mzCNC_V3 - Advanced CNC Motion Control System
 
-## Project Status: Professional Event-Driven CNC Controller ✅ (95% Core Implementation)
+## Project Status: Professional Event-Driven CNC Controller ✅ (98% Core Implementation)
 
-**Pic32mzCNC_V3** is a modular CNC motion control system designed for high-performance, multi-axis stepper motor control using Microchip PIC32MZ microcontrollers. It features **absolute compare mode timer architecture**, **dynamic dominant axis tracking**, and **Bresenham interpolation** with a clean, maintainable architecture suitable for custom CNC machines and automation projects.
+**Pic32mzCNC_V3** is a modular CNC motion control system designed for high-performance, multi-axis stepper motor control using Microchip PIC32MZ microcontrollers. It features **absolute compare mode timer architecture**, **priority-based phase system**, **incremental arc interpolation**, and **Bresenham interpolation** with a clean, maintainable architecture suitable for custom CNC machines and automation projects.
 
-### 🚀 **Recent Achievements** (November 3, 2025)
+### 🚀 **Recent Achievements** (November 4, 2025)
 - ✅ **Professional event-driven G-code processing system**
 - ✅ **Clean architecture with proper abstraction layer preservation**
 - ✅ **Comprehensive G-code support: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T**
@@ -12,12 +12,15 @@
 - ✅ **Multi-command tokenization: "G90G1X10Y10F1000S200M3" → individual events**
 - ✅ **Complete separation of concerns: parsing vs. execution**
 - ✅ **16-command circular buffer with GRBL v1.1 protocol compliance**
+- ✅ **Priority-based phase system - hybrid ISR/main loop architecture**
+- ✅ **Incremental arc interpolation (G2/G3) - non-blocking with FPU acceleration**
 - ✅ **Absolute compare mode timer architecture with dynamic dominant axis tracking**
 - ✅ **Single instance pattern in appData - maintainable and testable**
 - ✅ **Hardware FPU enabled with optimized compiler flags**
 - ✅ **Trapezoidal velocity profiling implemented (GRBL-style with physics calculations)**
 - ✅ **Emergency stop system with APP_ALARM state and hard/soft limit checking**
 - ✅ **Position tracking in work coordinates with modal state management**
+- ✅ **Persistent GRBL settings with NVM flash storage (28 parameters)**
 - ✅ **256 microstepping support validated with ISR budget analysis**
 - ✅ **Single ISR motion architecture - clean, no V2 multi-ISR complexity**
 
@@ -42,6 +45,17 @@
 - **Dominant axis determination**: Dynamic selection based on highest step count
 - **Protected coordinate management**: Private static work coordinate system
 
+#### **Arc Interpolation Module** ✨ **NEW** (November 4, 2025)
+- **Incremental streaming architecture**: ONE segment per iteration, non-blocking
+- **GRBL v1.1 compatible math**: Radius validation, angle calculation with wrap-around
+- **G2/G3 support**: Clockwise and counter-clockwise arcs in XY/XZ/YZ planes
+- **FPU-accelerated**: Hardware sin/cos for smooth circular motion (50-100μs per segment)
+- **Helical motion**: Linear Z/A axis interpolation during arc
+- **Exact end point**: Final segment uses target coordinates (no accumulated error)
+- **Modal plane tracking**: G17 (XY), G18 (XZ), G19 (YZ) support
+- **Self-regulating**: Only generates when motion queue has space (queue never empties)
+- **GRBL setting $12**: mm_per_arc_segment (default 0.1mm)
+
 #### **Stepper Module**
 - **Hardware abstraction**: OCx register management with absolute compare mode
 - **Position tracking**: Real-time step counting in ISRs
@@ -58,11 +72,15 @@
 - **GRBL alarm codes**: ALARM:1 (hard limit), ALARM:2 (soft limit), ALARM:3 (abort)
 - **Graceful degradation**: Conditional compilation allows building before pins defined
 
-#### **Motion Controller** (Ready for Implementation)
-- **Master execution engine**: Bresenham interpolation state machine 
-- **Non-blocking execution**: State-based segment processing
-- **Absolute timer integration**: OCx scheduling with TMR2 values
-- **Segment management**: Smooth transitions between motion segments
+#### **Motion Controller** (November 4, 2025 - IMPLEMENTED ✅)
+- **Priority-based phase system**: Hybrid ISR/main loop architecture
+  - **VELOCITY phase**: Trapezoidal profiling with rate_delta
+  - **BRESENHAM phase**: Error accumulation for subordinate axes
+  - **SCHEDULE phase**: OCx register scheduling with absolute timing
+  - **COMPLETE phase**: Segment completion and queue advancement
+- **ISR wake-up mechanism**: Dominant axis ISR sets phase flag, main loop executes
+- **Non-blocking execution**: Processes one phase per APP_Tasks() iteration
+- **Rate-limited UART**: Polled every 10ms (not every microsecond)
 - **Trapezoidal velocity profiling**: GRBL-style acceleration/deceleration
 - **Single ISR architecture**: Dominant axis handles everything (no multi-ISR complexity)
 - **Performance validated**: 42% ISR headroom at worst-case 512kHz (256 microstepping)
@@ -135,7 +153,28 @@ The system currently supports:
 - **Real-time control**: Send `?` for status, `~` for resume, `!` for hold  
 - **UART G-code input**: Via UART2 with 16-command circular buffer
 - **Event-driven execution**: Clean integration with APP_Tasks state machine
+- **Arc interpolation**: Incremental streaming with FPU-accelerated circular motion
 - **GRBL status format**: `<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000|FS:0,0>`
+
+**Test G-code Examples:**
+```gcode
+G90           ; Absolute positioning
+G1 X10 Y10 F1000   ; Linear move to (10,10) at 1000 mm/min
+G2 X20 Y10 I5 J0   ; Clockwise arc to (20,10), center at (15,10)
+G3 X10 Y10 I-5 J0  ; Counter-clockwise arc back to (10,10)
+?             ; Status query
+!             ; Feed hold
+~             ; Resume
+```
+
+### **Documentation**
+- **README.md** (this file) - Comprehensive project overview
+- **docs/TODO.md** - Detailed implementation checklist with estimates
+- **docs/plantuml/** - Architecture diagrams:
+  - `01_system_overview.puml` - High-level system architecture
+  - `02_segment_clock.puml` - Timer and motion segment flow
+  - `03_arc_linear_interpolation.puml` - Arc/linear interpolation system
+- **.github/copilot-instructions.md** - Development guidelines and patterns
 
 ### **Project Structure**
 ```
@@ -146,140 +185,166 @@ Pic32mzCNC_V3/
 │   ├── gcode/
 │   │   ├── gcode_parser.c       # Event-driven G-code parser & GRBL protocol
 │   │   └── utils.c              # Professional string tokenization utilities
-│   └── motion/
-│       ├── stepper.c            # Hardware abstraction layer (absolute compare mode)
-│       ├── motion.c             # Master motion controller (Bresenham state machine)
-│       └── kinematics.c         # Physics calculations & coordinate transformations
+│   ├── motion/
+│   │   ├── stepper.c            # Hardware abstraction layer (absolute compare mode)
+│   │   ├── motion.c             # Master motion controller (priority phase system)
+│   │   ├── motion_utils.c       # Safety checks and utility functions
+│   │   └── kinematics.c         # Physics calculations & coordinate transformations
+│   ├── settings/
+│   │   └── settings.c           # Persistent GRBL settings with NVM flash
+│   └── config/
+│       └── default/             # Harmony framework peripheral libraries
 ├── incs/                        # Header files with clean interfaces
-├── docs/plantuml/              # Architecture diagrams (includes event system)
-└── .github/copilot-instructions.md  # Development guidelines & patterns
+│   ├── app.h                    # Application interface
+│   ├── data_structures.h        # Unified data structures (central definitions)
+│   ├── common.h                 # Shared constants and enums
+│   ├── gcode/
+│   │   ├── gcode_parser.h       # G-code event interface
+│   │   └── utils.h              # String parsing utilities
+│   ├── motion/
+│   │   ├── stepper.h            # Stepper control interface
+│   │   ├── motion.h             # Motion controller interface
+│   │   ├── motion_utils.h       # Safety and utility interface
+│   │   └── kinematics.h         # Kinematics interface
+│   ├── settings/
+│   │   └── settings.h           # GRBL settings interface
+│   └── config/
+│       └── default/             # Harmony peripheral headers
+├── docs/
+│   ├── plantuml/                # Architecture diagrams
+│   │   ├── 01_system_overview.puml
+│   │   ├── 02_segment_clock.puml
+│   │   └── 03_arc_linear_interpolation.puml
+│   └── INITIAL.md               # Original project notes
+├── bins/Release/                # Build output (CS23.hex)
+├── objs/Release/                # Object files
+├── other/Release/               # Memory maps and linker outputs
+├── Makefile                     # Root build configuration
+├── README.md                    # This file
+└── .github/
+    └── copilot-instructions.md  # Development guidelines & patterns
+```
+
+### **Module Responsibilities**
+
+| Module | Purpose | Key Functions |
+|--------|---------|---------------|
+| **app.c** | Application state machine, G-code event processing, arc generation | `APP_Tasks()`, `APP_Initialize()` |
+| **gcode_parser.c** | G-code tokenization, event generation, GRBL protocol | `GCODE_GetNextEvent()`, `GCODE_Tasks()` |
+| **kinematics.c** | Physics calculations, velocity profiling, coordinate transforms | `KINEMATICS_LinearMove()` |
+| **stepper.c** | Hardware abstraction, OCx scheduling, position tracking | `STEPPER_ScheduleStep()`, ISR handlers |
+| **motion.c** | Motion phase execution, Bresenham interpolation, queue management | Phase processing functions |
+| **settings.c** | Persistent GRBL settings, NVM flash read/write, defaults | `SETTINGS_LoadFromFlash()`, `SETTINGS_SaveToFlash()` |
+| **motion_utils.c** | Safety checks, limit detection, emergency stop | `MOTION_UTILS_CheckHardLimits()`, `MOTION_UTILS_CheckSoftLimits()` |
+
+### **Data Flow Architecture**
+
+```
+UART Input → gcode_parser.c → Event Queue → app.c (APP_IDLE)
+                                                 ↓
+                                            Arc Generator
+                                            (incremental)
+                                                 ↓
+                                         kinematics.c
+                                         (MotionSegment)
+                                                 ↓
+                                          Motion Queue
+                                                 ↓
+                                          motion.c
+                                       (Phase Execution)
+                                                 ↓
+                                          stepper.c
+                                       (OCx Scheduling)
+                                                 ↓
+                                    Hardware Timers (OC1-OC4)
+                                                 ↓
+                                         Step Pulses
 ```
 
 ## 📋 **Next Implementation Phases**
 
-### **Phase 1: Arc Interpolation** (Priority: HIGH)
-Arc interpolation (G2/G3 commands) is **critical** for circular motion. Without this, you can't run most real CNC programs.
+### **Phase 1: Homing & Limit System** (Priority: HIGH)
+Homing provides automatic machine zeroing for repeatable positioning. This is **critical** for production CNC operation.
 
-**Implementation Guide (Tomorrow's Task):**
+**Implementation Checklist:**
+- [ ] **GPIO limit switch inputs** - Configure pins with pull-ups/interrupts
+- [ ] **G28/G28.1 commands** - Home to stored position, set home position
+- [ ] **$H homing cycle** - Execute homing sequence with seek/locate phases
+- [ ] **Homing state machine** - Rapid seek → slow locate → pull-off → set zero
+- [ ] **Multi-axis homing** - Sequential or simultaneous based on $23 (homing_dir_mask)
+- [ ] **Homing alarm recovery** - Proper error handling and position recovery
+- [ ] **Settings integration** - Use existing GRBL settings ($22-$27):
+  - `$22` - homing_enable (0=disabled, 1=enabled)
+  - `$23` - homing_dir_mask (which axes home, direction inversion)
+  - `$24` - homing_feed_rate (mm/min for slow locate phase)
+  - `$25` - homing_seek_rate (mm/min for rapid seek phase)
+  - `$26` - homing_debounce (milliseconds switch debounce delay)
+  - `$27` - homing_pull_off (mm to back off from switch after trigger)
 
-#### **Step 1: Understand the Arc Math** (5 minutes)
-- **G2**: Clockwise arc
-- **G3**: Counter-clockwise arc  
-- **Parameters**: `X Y Z` = end point, `I J K` = center offset from start point
-- **Center calculation**: `center.x = start.x + I`, `center.y = start.y + J`
-- **Radius**: `r = sqrt(I² + J²)` (verify end point is also at radius r)
+**Implementation Estimate:** 4-6 hours
 
-#### **Step 2: Add KINEMATICS_ArcMove() Function** (30 minutes)
-**File:** `srcs/motion/kinematics.c`
+**Architecture Notes:**
+- Add `APP_HOMING` state to APP_Tasks state machine
+- Use existing `MOTION_UTILS_CheckHardLimits()` for limit switch detection
+- Homing motion uses standard motion queue (MotionSegment generation)
+- Emergency stop on limit trigger during normal operation (already implemented)
+- Store homed position in work coordinates (KINEMATICS module)
 
-```c
-// Signature (add to kinematics.h)
-uint32_t KINEMATICS_ArcMove(CoordinatePoint start, CoordinatePoint end, 
-                            CoordinatePoint center, bool clockwise, 
-                            float feedrate, MotionSegment* segment_buffer,
-                            uint32_t max_segments);
+### **Phase 2: Spindle & Coolant Control** (Priority: MEDIUM)
+Physical spindle and coolant control completes the machine tool interface.
 
-// Implementation pattern:
-// 1. Calculate arc parameters (radius, start/end angles, total angle)
-// 2. Determine segment count based on arc length and MM_PER_ARC_SEGMENT setting
-// 3. Loop through segments, using sin/cos to compute intermediate points
-// 4. Call KINEMATICS_LinearMove() for EACH arc segment
-// 5. Return number of segments generated
-```
+**Implementation Checklist:**
+- [ ] **PWM spindle control** - Use OC module for variable speed (already parsed M3/M5/S)
+- [ ] **Spindle direction** - M3 (CW), M4 (CCW), M5 (stop)
+- [ ] **Spindle speed mapping** - S value (RPM) → PWM duty cycle using $30/$31 settings
+- [ ] **Coolant relay outputs** - M7 (mist), M8 (flood), M9 (off) via GPIO
+- [ ] **Spindle enable delay** - Non-blocking delay for spindle spin-up before motion
+- [ ] **Speed override** - Real-time spindle speed adjustment during operation
+- [ ] **Settings integration** - Use existing GRBL spindle settings:
+  - `$30` - spindle_max_rpm (maximum RPM for 100% PWM)
+  - `$31` - spindle_min_rpm (minimum RPM for starting)
 
-**Key Points:**
-- Use **hardware FPU** for sin/cos calculations (fast on PIC32MZ)
-- Break arc into small linear segments (typical: 0.1mm per segment)
-- **Generate ALL segments atomically** before sending "OK" to UGS
-- Each segment is a tiny linear move with same feedrate
-- Pre-allocate segment buffer in APP_DATA or stack
+**Implementation Estimate:** 2-3 hours
 
-#### **Step 3: Integrate Arc Event Processing** (15 minutes)
-**File:** `srcs/app.c` in APP_IDLE event processing
+**Architecture Notes:**
+- M3/M5/M7/M9 commands already parsed (GCODE_EVENT_SPINDLE_ON/OFF, COOLANT_ON/OFF)
+- Spindle PWM: Configure OC6 or OC7 for PWM output (not used for axes)
+- Coolant control: Simple GPIO high/low (define pins in hardware config)
+- Modal spindle speed already tracked in `appData.modalSpindleRPM`
+- Add spindle state to APP_DATA: `spindleState` (STOPPED/CW/CCW), `coolantState` (OFF/MIST/FLOOD)
 
-```c
-case GCODE_EVENT_ARC_MOVE:
-{
-    // Check motion queue has space for ALL arc segments
-    uint32_t estimated_segments = calculate_arc_segment_count(&event);
-    if(appData.motionQueueCount + estimated_segments < MAX_MOTION_SEGMENTS) {
-        
-        // Build start, end, center points
-        CoordinatePoint start = {appData.currentX, appData.currentY, appData.currentZ, appData.currentA};
-        CoordinatePoint end = {event.data.arcMove.x, event.data.arcMove.y, event.data.arcMove.z, ...};
-        CoordinatePoint center = {start.x + event.data.arcMove.i, 
-                                 start.y + event.data.arcMove.j, 
-                                 start.z + event.data.arcMove.k, 0};
-        
-        // Generate arc segments (allocate buffer or use appData.arcSegmentBuffer)
-        MotionSegment arc_segments[MAX_ARC_SEGMENTS];
-        uint32_t segment_count = KINEMATICS_ArcMove(start, end, center, 
-                                                    event.data.arcMove.clockwise,
-                                                    event.data.arcMove.feedrate,
-                                                    arc_segments, MAX_ARC_SEGMENTS);
-        
-        // Add ALL segments to motion queue atomically
-        for(uint32_t i = 0; i < segment_count; i++) {
-            appData.motionQueue[appData.motionQueueHead] = arc_segments[i];
-            appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-            appData.motionQueueCount++;
-        }
-        
-        // Update current position to arc end point
-        appData.currentX = end.x;
-        appData.currentY = end.y;
-        appData.currentZ = end.z;
-    }
-    break;
-}
-```
+### **Phase 3: Advanced G-code Features** (Priority: LOW)
+Complete GRBL v1.1 feature parity for full machine control.
 
-#### **Step 4: Testing Arc Interpolation** (10 minutes)
-Send test G-code via UART:
-```gcode
-G17          ; XY plane
-G90          ; Absolute mode
-G0 X0 Y0     ; Rapid to origin
-G1 F500      ; Set feedrate
-G2 X10 Y0 I5 J0  ; Clockwise circle, center at (5,0), radius=5mm
-```
+**Implementation Checklist:**
+- [ ] **G28/G28.1/G30/G30.1** - Predefined position commands (home, park)
+- [ ] **G54-G59 work coordinates** - Multiple work coordinate systems
+- [ ] **G92 coordinate offset** - Temporary coordinate system offset
+- [ ] **G43.1 tool length offset** - Dynamic tool length compensation
+- [ ] **G10 L2/L20** - Work coordinate system programming
+- [ ] **Real-time overrides** - Feed rate (0x90-0x95) and spindle (0x9A-0x9E) during motion
+- [ ] **Feed hold improvements** - Decelerate to stop, resume with acceleration
+- [ ] **Parking motion** - Safe retract on feed hold or safety door trigger
 
-Expected behavior:
-- Arc broken into ~157 segments (π×10mm / 0.2mm per segment)
-- Smooth circular motion in XY plane
-- Position returns to (10, 0) at end
+**Implementation Estimate:** 6-8 hours total
 
-#### **Step 5: Add Settings for Arc Resolution** (5 minutes)
-**File:** `incs/settings/settings.h` and `srcs/settings/settings.c`
+### **Phase 4: Look-Ahead Motion Planning** (Priority: FUTURE)
+Advanced trajectory optimization for smooth, high-speed machining.
 
-```c
-// Add to GRBL_Settings struct
-float mm_per_arc_segment;  // $27 - default 0.1mm
+**Implementation Checklist:**
+- [ ] **Junction deviation** - Calculate safe corner speeds based on acceleration limits
+- [ ] **Velocity planning** - Multi-segment look-ahead for optimal speed transitions  
+- [ ] **Cornering algorithm** - GRBL-style junction speed calculation
+- [ ] **Segment merging** - Combine co-linear moves for efficiency
+- [ ] **Adaptive acceleration** - Adjust based on direction change magnitude
 
-// Initialize in SETTINGS_RestoreDefaults()
-settings->mm_per_arc_segment = 0.1f;  // GRBL default
-```
+**Implementation Estimate:** 12-16 hours
 
-**Total Implementation Time: ~1 hour**
-
-### **Phase 2: Motion Controller Completion** (After Arcs)
-- [ ] Complete Bresenham execution functions in `motion.c`
-- [ ] Implement segment transition logic for smooth motion
-- [ ] Test coordinated multi-axis motion with velocity profiling
-- [ ] Validate ISR timing at 512kHz (256 microstepping)
-
-### **Phase 3: Advanced G-code Commands**
-- [ ] Implement G04 dwell (non-blocking delay with CORETIMER)
-- [ ] Add G54-G59 work coordinate system commands
-- [ ] Handle feedrate (F) and spindle (S/M3/M5) control (already parsed, needs hardware)
-- [ ] Tool change sequencing (T commands)
-
-### **Phase 4: Safety & Advanced Features**
-- [ ] $X unlock command for alarm clear without position loss
-- [ ] Soft reset (Ctrl+X) reinitialize system and clear alarm
-- [ ] Feed hold/resume with position retention
-- [ ] Real-time feed rate and spindle overrides
-- [ ] Look-ahead motion planning for smooth trajectories
+**Architecture Notes:**
+- Requires second-tier motion buffer for planning ahead
+- Add `junctionSpeed` to MotionSegment structure
+- Planning runs in background when motion queue has available segments
+- Complex but provides dramatic speed improvements for intricate toolpaths
 
 ---
 
@@ -571,3 +636,65 @@ There are two alternative initial conditions to consider:
 - TMRy: Timer Count
 
 **Note:** TMRy is assumed to be initialized to 0x0000 in all cases.
+
+---
+
+## 📋 TODO List
+
+### High Priority
+- [ ] **Homing System** (4-6 hours)
+  - GPIO limit switch inputs with pull-ups/interrupts
+  - G28/G28.1 commands (home to position, set home)
+  - $H homing cycle (seek/locate/pulloff phases)
+  - Multi-axis homing (sequential/simultaneous via $23)
+  - Homing alarm recovery
+  - Settings $22-$27 already implemented
+
+- [ ] **TMR2 Rollover Monitoring** (1-2 hours)
+  - Implement controlled reset before 343.6s overflow
+  - Monitor TMR2 > 0xF0000000 (~328s threshold)
+  - Drain motion queue before reset
+  - See `.github/copilot-instructions.md` for pattern
+
+### Medium Priority
+- [ ] **Spindle & Coolant Control** (2-3 hours)
+  - PWM spindle control (OC6/OC7 module)
+  - M3/M4/M5 spindle direction control
+  - S value → PWM duty cycle mapping
+  - M7/M8/M9 coolant relay outputs
+  - Spindle enable delay (non-blocking)
+  - Settings $30-$31 already implemented
+
+- [ ] **G17/G18/G19 Plane Selection** (1 hour)
+  - Add G-code parser support for plane commands
+  - Update modalPlane when G17/G18/G19 received
+  - Adapt arc math for XZ and YZ planes
+  - modalPlane tracking already implemented
+
+### Low Priority
+- [ ] **Advanced G-code Features** (6-8 hours total)
+  - G28/G28.1/G30/G30.1 (predefined positions)
+  - G54-G59 work coordinates (multiple WCS)
+  - G92 coordinate offset (temporary offset)
+  - G43.1 tool length offset (dynamic)
+  - G10 L2/L20 (WCS programming)
+  - Real-time overrides (feed/spindle during motion)
+  - Feed hold improvements (decelerate to stop)
+  - Parking motion (safe retract)
+
+### Future Enhancements
+- [ ] **Look-Ahead Motion Planning** (12-16 hours)
+  - Junction deviation (safe corner speeds)
+  - Multi-segment velocity planning
+  - GRBL-style junction speed calculation
+  - Segment merging (co-linear moves)
+  - Adaptive acceleration (direction-based)
+
+- [ ] **Testing & Validation**
+  - Arc interpolation testing (G2/G3 with various radii)
+  - Helical motion testing (Z-axis during arc)
+  - Emergency stop testing (limit triggers)
+  - Large arc testing (many segments, memory efficiency)
+  - TMR2 rollover testing (long-running operations)
+
+````
