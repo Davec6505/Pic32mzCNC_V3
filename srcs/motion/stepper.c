@@ -10,24 +10,38 @@ void OCP2_ISR(uintptr_t context);  // Y Axis Step Complete
 void OCP3_ISR(uintptr_t context);  // Z Axis Step Complete
 void OCP4_ISR(uintptr_t context);  // A Axis Step Complete
 
-// Global position tracking
+// ============================================================================
+// Static Data - Motion Control State
+// ============================================================================
+
+// Reference to application data for ISR phase signaling
+static APP_DATA* app_data_ref = NULL;
+
+// Position tracking (incremented/decremented by ISRs based on direction)
 static StepperPosition stepper_pos = {
     .x_steps = 0, .y_steps = 0, .z_steps = 0, .a_steps = 0,
-    .steps_per_mm_x = 200.0f,  // Configure for your machine
+    .steps_per_mm_x = 200.0f,
     .steps_per_mm_y = 200.0f,
     .steps_per_mm_z = 200.0f,
     .steps_per_deg_a = 1.0f
 };
 
-static uint32_t current_step_interval = 1000;  // 10ms default
-static uint32_t pulse_width = 2;               // 20µs pulse width
+// Direction bits (set by MOTION_Tasks before scheduling pulses)
+// Bit 0=X, 1=Y, 2=Z, 3=A (1=forward/positive, 0=reverse/negative)
+static volatile uint8_t direction_bits = 0x0F;  // Default all forward
+
+// Pulse configuration
+static uint32_t pulse_width = 25;  // Default 2μs @ 12.5MHz = 25 ticks
 
 // ✅ Cache settings values for performance (avoid repeated flash reads)
 static uint8_t step_pulse_invert_mask = 0;
 static uint8_t direction_invert_mask = 0;
 static uint8_t enable_invert = 0;
 
-void STEPPER_Initialize(void) {
+void STEPPER_Initialize(APP_DATA* appData) {
+    // Store reference for ISR access
+    app_data_ref = appData;
+    
     // ✅ Load settings from flash (already initialized in main.c)
     GRBL_Settings* settings = SETTINGS_GetCurrent();
     
@@ -119,44 +133,106 @@ void STEPPER_DisableAxis(E_AXIS axis) {
     }
 }
 
-StepperPosition* STEPPER_GetPosition(void) // Fixed syntax error
+void STEPPER_DisableAll(void) {
+    // Emergency stop - disable all axes immediately
+    // Set OCxR = OCxRS to prevent spurious pulses
+    OC5R = OC5RS;  // X axis
+    OC2R = OC2RS;  // Y axis
+    OC3R = OC3RS;  // Z axis
+    OC4R = OC4RS;  // A axis
+    
+    // Also disable stepper enable pins (cut power to drivers)
+    GRBL_Settings* settings = SETTINGS_GetCurrent();
+    MOTION_UTILS_EnableAllAxes(false, settings->step_enable_invert);
+}
+
+StepperPosition* STEPPER_GetPosition(void)
 {
     return &stepper_pos;
 }
 
-// ISR Callbacks - Following absolute compare mode architecture
-void OCP5_ISR(uintptr_t context) {
-    // X Axis Step Complete - Minimal ISR following architecture
-    uint32_t now = TMR2;
-    OC5R = now + current_step_interval;  // ABSOLUTE timer count for next pulse
-    OC5RS = OC5R + pulse_width;          // ABSOLUTE timer count for pulse end
+// ============================================================================
+// Direction Control (Called by Motion Controller)
+// ============================================================================
+
+void STEPPER_SetDirection(E_AXIS axis, bool forward) {
+    if (!IS_VALID_AXIS(axis)) {
+        return;  // Invalid axis
+    }
     
-    stepper_pos.x_steps++;
+    // Update direction bits for ISRs
+    if (forward) {
+        direction_bits |= (1 << axis);   // Set bit (forward/positive)
+    } else {
+        direction_bits &= ~(1 << axis);  // Clear bit (reverse/negative)
+    }
+    
+    // Set GPIO direction pin using motion_utils (handles inversion from settings)
+    MOTION_UTILS_SetDirection(axis, forward, direction_invert_mask);
+}
+
+// ============================================================================
+// ISR Callbacks - Position Counters + Phase Signaling
+// ============================================================================
+// ARCHITECTURE: Minimal ISRs - count steps + signal main loop when dominant axis fires
+// - Position counter: increment/decrement based on direction
+// - Phase signaling: if this axis is dominant, wake main loop for next phase
+// - ALL motion logic runs in MOTION_Tasks() state machine (not here!)
+// - ISRs execute in ~10-15 cycles (count + conditional phase set + exit)
+// ============================================================================
+
+void OCP5_ISR(uintptr_t context) {
+    // X Axis - position counter + phase signaling
+    if (direction_bits & (1 << AXIS_X)) {
+        stepper_pos.x_steps++;  // Forward/positive
+    } else {
+        stepper_pos.x_steps--;  // Reverse/negative
+    }
+    
+    // ✅ CRITICAL: Signal main loop if X is dominant axis
+    if (app_data_ref != NULL && app_data_ref->dominantAxis == AXIS_X) {
+        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;  // Wake main loop
+    }
 }
 
 void OCP2_ISR(uintptr_t context) {
-    // Y Axis Step Complete
-    uint32_t now = TMR2;
-    OC2R = now + current_step_interval;  // ABSOLUTE timer count
-    OC2RS = OC2R + pulse_width;          // ABSOLUTE timer count
+    // Y Axis - position counter + phase signaling
+    if (direction_bits & (1 << AXIS_Y)) {
+        stepper_pos.y_steps++;
+    } else {
+        stepper_pos.y_steps--;
+    }
     
-    stepper_pos.y_steps++;
+    // ✅ CRITICAL: Signal main loop if Y is dominant axis
+    if (app_data_ref != NULL && app_data_ref->dominantAxis == AXIS_Y) {
+        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;  // Wake main loop
+    }
 }
 
 void OCP3_ISR(uintptr_t context) {
-    // Z Axis Step Complete
-    uint32_t now = TMR2;
-    OC3R = now + current_step_interval;  // ABSOLUTE timer count
-    OC3RS = OC3R + pulse_width;          // ABSOLUTE timer count
+    // Z Axis - position counter + phase signaling
+    if (direction_bits & (1 << AXIS_Z)) {
+        stepper_pos.z_steps++;
+    } else {
+        stepper_pos.z_steps--;
+    }
     
-    stepper_pos.z_steps++;
+    // ✅ CRITICAL: Signal main loop if Z is dominant axis
+    if (app_data_ref != NULL && app_data_ref->dominantAxis == AXIS_Z) {
+        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;  // Wake main loop
+    }
 }
 
 void OCP4_ISR(uintptr_t context) {
-    // A Axis Step Complete
-    uint32_t now = TMR2;
-    OC4R = now + current_step_interval;  // ABSOLUTE timer count
-    OC4RS = OC4R + pulse_width;          // ABSOLUTE timer count
+    // A Axis - position counter + phase signaling
+    if (direction_bits & (1 << AXIS_A)) {
+        stepper_pos.a_steps++;
+    } else {
+        stepper_pos.a_steps--;
+    }
     
-    stepper_pos.a_steps++;
+    // ✅ CRITICAL: Signal main loop if A is dominant axis
+    if (app_data_ref != NULL && app_data_ref->dominantAxis == AXIS_A) {
+        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;  // Wake main loop
+    }
 }

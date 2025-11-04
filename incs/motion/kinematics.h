@@ -5,10 +5,7 @@
 #include <stdbool.h>
 #include "common.h"
 #include "motion.h"
-
-typedef struct {
-    float x, y, z, a;
-} CoordinatePoint;
+#include "data_structures.h"  // For CoordinatePoint definition
 
 typedef struct {
     CoordinatePoint offset;  // G54/G55/etc work coordinates

@@ -39,4 +39,11 @@ void MOTION_UTILS_DisableAllAxes(uint8_t invert_mask);
 // Read step pin state for diagnostics
 bool MOTION_UTILS_ReadStepPin(E_AXIS axis);
 
+// ✅ Hard limit checking (reads limit switch GPIO pins)
+// Returns true if ANY limit switch is triggered
+bool MOTION_UTILS_CheckHardLimits(uint8_t invert_mask);
+
+// Check specific axis limit switches
+bool MOTION_UTILS_CheckAxisLimits(E_AXIS axis, uint8_t invert_mask);
+
 #endif // MOTION_UTILS_H
