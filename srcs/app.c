@@ -201,8 +201,18 @@ void APP_Tasks ( void )
         
         case APP_IDLE:
         {
-            // ===== DEBUG TEST DISABLED - ENABLE SERIAL ONLY =====
-            // (Debug test code removed to restore serial communication)
+            // ===== LED2 STATUS INDICATOR =====
+            // Heartbeat when idle, toggles fast during motion (ISR toggles LED2)
+            static uint32_t led_counter = 0;
+            led_counter++;
+            
+            // Slow heartbeat when idle (1 Hz = toggle every 50,000 iterations @ ~100kHz)
+            if(appData.motionQueueCount == 0 && led_counter >= 50000) {
+                LED2_Toggle();
+                led_counter = 0;
+            }
+            // During motion, ISR toggles LED2 on each step (fast blink)
+            // LED2 will blink at step rate, visible motion indicator
             
             // ===== MOTION PHASE PROCESSING (HIGHEST PRIORITY) =====
             // ✅ Following Harmony pattern: Protocol handlers run INSIDE states
@@ -476,6 +486,9 @@ void APP_Tasks ( void )
         case APP_ALARM:
         {
             // Emergency stop state - all motion halted
+            // LED2 constant ON to indicate alarm
+            LED2_Set();
+            
             // User must acknowledge alarm and reset
             STEPPER_DisableAll();
             break;

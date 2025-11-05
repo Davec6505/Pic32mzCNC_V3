@@ -49,8 +49,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "peripheral/coretimer/plib_coretimer.h"
-#include "peripheral/ocmp/plib_ocmp8.h"
 #include "peripheral/tmr/plib_tmr6.h"
+#include "peripheral/ocmp/plib_ocmp8.h"
 #include "peripheral/uart/plib_uart2.h"
 #include "peripheral/tmr/plib_tmr2.h"
 #include "peripheral/clk/plib_clk.h"

@@ -18,6 +18,9 @@ typedef struct {
 
 #define MAX_MOTION_SEGMENTS 16  // Lookahead buffer size
 
+// ✅ Number of axes (must match E_AXIS enum in data_structures.h)
+#define AXIS_COUNT 4
+
 // Forward declaration for E_AXIS (defined in common.h)
 typedef enum {
     AXIS_X = 0,

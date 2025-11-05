@@ -71,6 +71,10 @@ void STEPPER_Initialize(APP_DATA* appData) {
     OCMP3_CallbackRegister(OCP3_ISR, (uintptr_t)NULL);
     OCMP4_CallbackRegister(OCP4_ISR, (uintptr_t)NULL);
 
+    // ✅ CRITICAL: Disable all OC interrupts FIRST (MCC Initialize enables them!)
+    // We'll enable them only when scheduling actual steps
+    IEC0CLR = _IEC0_OC5IE_MASK | _IEC0_OC1IE_MASK | _IEC0_OC3IE_MASK | _IEC0_OC4IE_MASK;
+
     // ✅ CRITICAL FIX: Set OCxR = OCxRS to a HIGH value to prevent spurious matches
     // According to PIC32MZ datasheet Table 16-2:
     // - OCxR = 0 with TMR2 = 0 generates immediate rising edge (spurious pulse!)
@@ -104,11 +108,8 @@ void STEPPER_Initialize(APP_DATA* appData) {
 
     // ✅ Enable all axes using motion_utils abstraction
     MOTION_UTILS_EnableAllAxes(true, enable_invert);
-
-    // ✅ Redundant but safe - ensure all axes disabled (OCxR = OCxRS)
-    for(int i = 0; i < NUM_OF_AXIS; i++) {
-        STEPPER_DisableAxis((E_AXIS)i);
-    }
+    
+    // ✅ Interrupts already disabled above - ready for first motion command
 }
 
 void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset) {
@@ -130,18 +131,22 @@ void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset) {
         case AXIS_X: // X axis
             OCMP5_CompareValueSet(pulse_start);           // ✅ PLIB OCxR
             OCMP5_CompareSecondaryValueSet(pulse_end);    // ✅ PLIB OCxRS
+            IEC0SET = _IEC0_OC5IE_MASK;                   // ✅ Enable interrupt
             break;
         case AXIS_Y: // Y axis
             OCMP1_CompareValueSet(pulse_start);           // ✅ PLIB OCxR
             OCMP1_CompareSecondaryValueSet(pulse_end);    // ✅ PLIB OCxRS
+            IEC0SET = _IEC0_OC1IE_MASK;                   // ✅ Enable interrupt
             break;
         case AXIS_Z: // Z axis
             OCMP3_CompareValueSet(pulse_start);           // ✅ PLIB OCxR
             OCMP3_CompareSecondaryValueSet(pulse_end);    // ✅ PLIB OCxRS
+            IEC0SET = _IEC0_OC3IE_MASK;                   // ✅ Enable interrupt
             break;
         case AXIS_A: // A axis
             OCMP4_CompareValueSet(pulse_start);           // ✅ PLIB OCxR
             OCMP4_CompareSecondaryValueSet(pulse_end);    // ✅ PLIB OCxRS
+            IEC0SET = _IEC0_OC4IE_MASK;                   // ✅ Enable interrupt
             break;
         case AXIS_COUNT:
         default:
@@ -156,26 +161,23 @@ void STEPPER_DisableAxis(E_AXIS axis) {
         return; // Invalid axis - do nothing
     }
     
-    // ✅ CRITICAL: Set to safe high value to prevent spurious matches
-    // Per datasheet Table 16-2: OCxR = 0 causes spurious pulses when TMR2 = 0
-    uint32_t safe_value = 0xFFFFFFFF;
+    // ✅ CRITICAL: Disable OC interrupt to prevent spurious triggers
+    // Setting OCxR=OCxRS=0xFFFFFFFF works, but TMR2 will eventually match on rollover
+    // Solution: Disable the interrupt entirely when axis is not in use
     
     switch(axis) {
         case AXIS_X:  // X disabled
-            OCMP5_CompareValueSet(safe_value);
-            OCMP5_CompareSecondaryValueSet(safe_value);
+            IEC0CLR = _IEC0_OC5IE_MASK;  // Disable OC5 interrupt
             break;
         case AXIS_Y:  // Y disabled
-            OCMP1_CompareValueSet(safe_value);
-            OCMP1_CompareSecondaryValueSet(safe_value);
+            IEC0CLR = _IEC0_OC1IE_MASK;  // Disable OC1 interrupt
             break;
         case AXIS_Z:  // Z disabled
-            OCMP3_CompareValueSet(safe_value);
-            OCMP3_CompareSecondaryValueSet(safe_value);
+            IEC0CLR = _IEC0_OC3IE_MASK;  // Disable OC3 interrupt
             break;
         case AXIS_A:  // A disabled
-            OCMP4_CompareValueSet(safe_value);
-            OCMP4_CompareSecondaryValueSet(safe_value);
+            IEC0CLR = _IEC0_OC4IE_MASK;  // Disable OC4 interrupt
+            break;
             break;
         case AXIS_COUNT:
         default:
@@ -242,7 +244,6 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 // ============================================================================
 
 void OCP5_ISR(uintptr_t context) {
-    // ✅ DEBUG: ALWAYS increment counter for hardware test (bypass motion check)
     // X Axis - position counter  
     if (direction_bits & (1 << AXIS_X)) {
         stepper_pos.x_steps++;
