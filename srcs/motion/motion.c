@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <stdio.h>  // ✅ snprintf
 
 #include "common.h"
 #include "data_structures.h"
@@ -11,6 +12,7 @@
 #include "kinematics.h"
 #include "settings.h"
 #include "../config/default/peripheral/tmr/plib_tmr2.h"  // ✅ TMR2 PLIB access
+#include "utils/uart_utils.h"  // ✅ Non-blocking UART utilities
 #include <math.h>
 
 // ============================================================================
@@ -231,6 +233,15 @@ void MOTION_Tasks(APP_DATA* appData) {
     // ===== SEGMENT LOADING (HIGHEST PRIORITY - BEFORE PHASE PROCESSING) =====
     // Load next segment from queue if current segment is NULL
     if(appData->currentSegment == NULL && appData->motionQueueCount > 0) {
+        // ✅ DEBUG: Confirm we're attempting to load segment
+        #if DEBUG_ == DBG_LEVEL_MOTION
+        char dbg1[128];
+        snprintf(dbg1, sizeof(dbg1), 
+                "[MOTION] Loading segment: queueCount=%u, tail=%u\r\n",
+                appData->motionQueueCount, appData->motionQueueTail);
+        UART3_Write((uint8_t*)dbg1, strlen(dbg1));
+        #endif
+        
         // Get segment from tail of circular buffer
         appData->currentSegment = &appData->motionQueue[appData->motionQueueTail];
         
@@ -252,6 +263,16 @@ void MOTION_Tasks(APP_DATA* appData) {
         appData->currentStepInterval = appData->currentSegment->initial_rate;
         appData->currentSegment->steps_completed = 0;
         
+        // ✅ DEBUG: Print segment parameters
+#if DEBUG_ == DBG_LEVEL_MOTION
+        char dbg2[128];
+        snprintf(dbg2, sizeof(dbg2), 
+                "[MOTION] Segment loaded: initial_rate=%u, steps=%u, accel_until=%u\r\n",
+                appData->currentSegment->initial_rate,
+                appData->currentSegment->steps_remaining,
+                appData->currentSegment->accelerate_until);
+        UART3_Write((uint8_t*)dbg2, strlen(dbg2));
+#endif
         // Set directions for all axes
         STEPPER_SetDirection(AXIS_X, appData->currentSegment->delta_x >= 0);
         STEPPER_SetDirection(AXIS_Y, appData->currentSegment->delta_y >= 0);
@@ -479,5 +500,238 @@ void MOTION_Arc(APP_DATA* appData) {
         appData->currentY = appData->arcEndPoint.y;
         appData->currentZ = appData->arcEndPoint.z;
         appData->currentA = appData->arcEndPoint.a;
+    }
+}
+
+
+
+// Add this new function after the existing functions
+
+/**
+ * @brief Process a single G-code event and convert to motion segments
+ * @param appData Pointer to application data structure
+ * @param event Pointer to G-code event to process
+ * @return true if event was processed successfully, false if motion queue full or error
+ */
+bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
+    
+    #if DEBUG_GCODE
+        char dbg[64];
+        snprintf(dbg, sizeof(dbg), "[MOTION] Processing event type=%d\r\n", event->type);
+        UART3_Write((uint8_t*)dbg, strlen(dbg));
+    #endif
+    
+    switch (event->type) {
+        case GCODE_EVENT_LINEAR_MOVE:
+        {
+            // Check if motion queue has space before processing
+            if(appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+                return false;  // Queue full - try again later
+            }
+            
+            // Build start and end coordinates
+            CoordinatePoint start = {appData->currentX, appData->currentY, appData->currentZ, appData->currentA};
+            CoordinatePoint end;
+            
+            if(appData->absoluteMode) {
+                // G90 absolute mode - use coordinates directly (or current if NAN)
+                end.x = isnan(event->data.linearMove.x) ? appData->currentX : event->data.linearMove.x;
+                end.y = isnan(event->data.linearMove.y) ? appData->currentY : event->data.linearMove.y;
+                end.z = isnan(event->data.linearMove.z) ? appData->currentZ : event->data.linearMove.z;
+                end.a = isnan(event->data.linearMove.a) ? appData->currentA : event->data.linearMove.a;
+            } else {
+                // G91 relative mode - add to current position (or keep current if NAN)
+                end.x = isnan(event->data.linearMove.x) ? appData->currentX : (appData->currentX + event->data.linearMove.x);
+                end.y = isnan(event->data.linearMove.y) ? appData->currentY : (appData->currentY + event->data.linearMove.y);
+                end.z = isnan(event->data.linearMove.z) ? appData->currentZ : (appData->currentZ + event->data.linearMove.z);
+                end.a = isnan(event->data.linearMove.a) ? appData->currentA : (appData->currentA + event->data.linearMove.a);
+            }
+            
+            // ✅ SOFT LIMIT CHECK
+            GRBL_Settings* settings = SETTINGS_GetCurrent();
+            bool limit_violation = false;
+            
+            if(!isnan(settings->max_travel_x) && !isnan(settings->max_travel_y) && !isnan(settings->max_travel_z)) {
+                if(fabsf(end.x) > settings->max_travel_x) limit_violation = true;
+                if(fabsf(end.y) > settings->max_travel_y) limit_violation = true;
+                if(fabsf(end.z) > settings->max_travel_z) limit_violation = true;
+            }
+            
+            if(limit_violation) {
+                appData->alarmCode = 2;  // Soft limit alarm
+                appData->state = APP_ALARM;
+                return false;
+            }
+            
+            // Use feedrate from event, or modal feedrate if not specified
+            float feedrate = event->data.linearMove.feedrate;
+            if(feedrate == 0.0f) {
+                feedrate = appData->modalFeedrate;
+            } else {
+                appData->modalFeedrate = feedrate;
+            }
+            
+            // Get next queue slot
+            MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
+            
+            #if DEBUG_GCODE
+            snprintf(dbg, sizeof(dbg), 
+                    "[MOTION] G1: X%.3f Y%.3f Z%.3f F%.1f\r\n",
+                    end.x, end.y, end.z, feedrate);
+            UART3_Write((uint8_t*)dbg, strlen(dbg));
+            #endif
+            
+            // Convert to motion segment
+            KINEMATICS_LinearMove(start, end, feedrate, segment);
+            
+            #if DEBUG_SEGMENT
+            snprintf(dbg, sizeof(dbg), 
+                    "[MOTION] Queued: count=%u, head=%u\r\n",
+                    appData->motionQueueCount + 1, appData->motionQueueHead);
+            UART3_Write((uint8_t*)dbg, strlen(dbg));
+            #endif
+
+            // Add to motion queue
+            appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+            appData->motionQueueCount++;
+            
+            // Update current position
+            appData->currentX = end.x;
+            appData->currentY = end.y;
+            appData->currentZ = end.z;
+            appData->currentA = end.a;
+            
+            return true;
+        }
+        
+        case GCODE_EVENT_ARC_MOVE:
+        {
+            // ✅ ARC MOTION - Initialize arc generation (KEEP ALL EXISTING ARC CODE!)
+            CoordinatePoint start = {appData->currentX, appData->currentY, appData->currentZ, appData->currentA};
+            CoordinatePoint end;
+            
+            if(appData->absoluteMode) {
+                end.x = event->data.arcMove.x;
+                end.y = event->data.arcMove.y;
+                end.z = event->data.arcMove.z;
+                end.a = event->data.arcMove.a;
+            } else {
+                end.x = appData->currentX + event->data.arcMove.x;
+                end.y = appData->currentY + event->data.arcMove.y;
+                end.z = appData->currentZ + event->data.arcMove.z;
+                end.a = appData->currentA + event->data.arcMove.a;
+            }
+            
+            CoordinatePoint center;
+            center.x = start.x + event->data.arcMove.centerX;
+            center.y = start.y + event->data.arcMove.centerY;
+            center.z = start.z;
+            center.a = 0.0f;
+            
+            // Radius validation
+            float r_start = sqrtf(event->data.arcMove.centerX * event->data.arcMove.centerX + 
+                                 event->data.arcMove.centerY * event->data.arcMove.centerY);
+            float r_end = sqrtf((end.x - center.x) * (end.x - center.x) + 
+                               (end.y - center.y) * (end.y - center.y));
+            
+            if(fabsf(r_start - r_end) > 0.005f) {
+                appData->alarmCode = 33;  // Arc radius error
+                appData->state = APP_ALARM;
+                return false;
+            }
+            
+            // Calculate angles
+            float start_angle = atan2f(start.y - center.y, start.x - center.x);
+            float end_angle = atan2f(end.y - center.y, end.x - center.x);
+            
+            float total_angle;
+            if(event->data.arcMove.clockwise) {
+                total_angle = start_angle - end_angle;
+                if(total_angle <= 0.0f) total_angle += 2.0f * M_PI;
+            } else {
+                total_angle = end_angle - start_angle;
+                if(total_angle <= 0.0f) total_angle += 2.0f * M_PI;
+            }
+            
+            // Initialize arc state
+            appData->arcGenState = ARC_GEN_ACTIVE;
+            appData->arcTheta = start_angle;
+            appData->arcThetaEnd = end_angle;
+            appData->arcCenter.x = center.x;
+            appData->arcCenter.y = center.y;
+            appData->arcCurrent = start;
+            appData->arcEndPoint = end;
+            appData->arcRadius = r_start;
+            appData->arcClockwise = event->data.arcMove.clockwise;
+            appData->arcPlane = appData->modalPlane;
+            appData->arcFeedrate = event->data.arcMove.feedrate;
+            
+            GRBL_Settings* settings = SETTINGS_GetCurrent();
+            float arc_length = r_start * total_angle;
+            uint32_t num_segments = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
+            if(num_segments < 1) num_segments = 1;
+            appData->arcThetaIncrement = total_angle / (float)num_segments;
+            if(!event->data.arcMove.clockwise) {
+                appData->arcThetaIncrement = fabsf(appData->arcThetaIncrement);
+            } else {
+                appData->arcThetaIncrement = -fabsf(appData->arcThetaIncrement);
+            }
+            
+            return true;
+        }
+        
+        case GCODE_EVENT_SPINDLE_ON:
+            appData->modalSpindleRPM = event->data.spindle.rpm;
+            // TODO: Spindle hardware control
+            return true;
+            
+        case GCODE_EVENT_SPINDLE_OFF:
+            appData->modalSpindleRPM = 0;
+            // TODO: Spindle hardware control
+            return true;
+            
+        case GCODE_EVENT_SET_ABSOLUTE:
+            appData->absoluteMode = true;
+            return true;
+            
+        case GCODE_EVENT_SET_RELATIVE:
+            appData->absoluteMode = false;
+            return true;
+            
+        case GCODE_EVENT_SET_WORK_OFFSET:
+            appData->currentX = event->data.setWorkOffset.x;
+            appData->currentY = event->data.setWorkOffset.y;
+            appData->currentZ = event->data.setWorkOffset.z;
+            appData->currentA = event->data.setWorkOffset.a;
+            return true;
+            
+        case GCODE_EVENT_SET_FEEDRATE:
+            appData->modalFeedrate = event->data.setFeedrate.feedrate;
+            return true;
+            
+        case GCODE_EVENT_SET_SPINDLE_SPEED:
+            appData->modalSpindleRPM = event->data.setSpindleSpeed.rpm;
+            return true;
+            
+        case GCODE_EVENT_SET_TOOL:
+            appData->modalToolNumber = event->data.setTool.toolNumber;
+            // TODO: Tool change logic
+            return true;
+            
+        case GCODE_EVENT_DWELL:
+            // TODO: Implement dwell
+            return true;
+            
+        case GCODE_EVENT_COOLANT_ON:
+            // TODO: Coolant control
+            return true;
+            
+        case GCODE_EVENT_COOLANT_OFF:
+            // TODO: Coolant control
+            return true;
+            
+        case GCODE_EVENT_NONE:
+        default:
+            return true;  // Ignore unknown events
     }
 }

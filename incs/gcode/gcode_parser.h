@@ -3,7 +3,7 @@
 
 
 #include "definitions.h"
-#include "plib_uart2.h"
+#include "plib_uart3.h"
 #include "plib_uart_common.h"
 #include "../data_structures.h"  // ✅ Use unified data structures (parent directory)
 
@@ -41,7 +41,8 @@ typedef enum {
     GCODE_EVENT_SET_RELATIVE,
     GCODE_EVENT_SET_FEEDRATE,       // Standalone F command (modal)
     GCODE_EVENT_SET_SPINDLE_SPEED,  // Standalone S command (modal)
-    GCODE_EVENT_SET_TOOL            // Standalone T command (modal)
+    GCODE_EVENT_SET_TOOL,           // Standalone T command (modal)
+    GCODE_EVENT_SET_WORK_OFFSET     // G92 - Set work coordinate system
 } GCODE_EventType;
 
 typedef struct {
@@ -78,6 +79,10 @@ typedef struct {
         struct {
             uint32_t toolNumber;    // Tool number
         } setTool;
+        
+        struct {
+            float x, y, z, a;       // Work offset coordinates (G92)
+        } setWorkOffset;
     } data;
 } GCODE_Event;
 

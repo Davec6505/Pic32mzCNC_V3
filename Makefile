@@ -30,11 +30,11 @@ DEP_TRACKING ?= 0
 # Note: Only affects Release builds; Debug always uses -O0
 OPT_LEVEL ?= 1
 
-# Debug flags control: set DEBUG_MOTION_BUFFER=1 to enable debug output
-# Usage: make all DEBUG_MOTION_BUFFER=1  (enable motion buffer debug messages)
-#        make all BUILD_CONFIG=Debug     (Debug builds have it enabled by default)
+# Debug flags control: set DEBUG=1 to enable debug output
+# Usage: make all DEBUG=1  (enable debug messages)
+#        make all BUILD_CONFIG=Debug     (Debug builds must be enabled)
 #        make all                        (disabled by default)
-DEBUG ?= 0
+DEBUG_ ?= 0
 
 # Junction look-ahead control: set to 1 to force exact-stop (disable junction blending)
 # Usage: make all DISABLE_JUNCTION_LOOKAHEAD=1
@@ -82,7 +82,7 @@ build:
 ifeq ($(USE_SHARED_LIB),1)
 	@echo "######  (Using pre-built shared library)  ########"
 endif
-	cd srcs && $(BUILD) COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) USE_SHARED_LIB=$(USE_SHARED_LIB) BUILD_CONFIG=$(BUILD_CONFIG) OPT_LEVEL=$(OPT_LEVEL) DEBUG_MOTION_BUFFER=$(DEBUG_MOTION_BUFFER) DISABLE_JUNCTION_LOOKAHEAD=$(DISABLE_JUNCTION_LOOKAHEAD) DEP_TRACKING=$(DEP_TRACKING)
+	cd srcs && $(BUILD) COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) USE_SHARED_LIB=$(USE_SHARED_LIB) BUILD_CONFIG=$(BUILD_CONFIG) OPT_LEVEL=$(OPT_LEVEL) DEBUG_MOTION_BUFFER=$(DEBUG_) DISABLE_JUNCTION_LOOKAHEAD=$(DISABLE_JUNCTION_LOOKAHEAD) DEP_TRACKING=$(DEP_TRACKING)
 	@echo "###### BIN TO HEX ########"
 	cd bins/$(BUILD_CONFIG) && "$(COMPILER_LOCATION)/xc32-bin2hex" $(MODULE)
 	@echo "######  BUILD COMPLETE (bins/$(BUILD_CONFIG)/$(MODULE).hex)  ########"
@@ -94,7 +94,7 @@ all: clean build
 # Build shared library from libs/*.c files
 shared_lib:
 	@echo "######  BUILDING SHARED LIBRARY ($(BUILD_CONFIG))  ########"
-	cd srcs && $(BUILD) shared_lib COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) BUILD_CONFIG=$(BUILD_CONFIG) OPT_LEVEL=$(OPT_LEVEL) DEBUG_MOTION_BUFFER=$(DEBUG_MOTION_BUFFER) DISABLE_JUNCTION_LOOKAHEAD=$(DISABLE_JUNCTION_LOOKAHEAD)
+	cd srcs && $(BUILD) shared_lib COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) BUILD_CONFIG=$(BUILD_CONFIG) OPT_LEVEL=$(OPT_LEVEL) DEBUG_MOTION_BUFFER=$(DEBUG_) DISABLE_JUNCTION_LOOKAHEAD=$(DISABLE_JUNCTION_LOOKAHEAD)
 	@echo "######  SHARED LIBRARY COMPLETE (libs/$(BUILD_CONFIG)/libCS23shared.a)  ########"
 
 # Quiet build - shows only errors, warnings, and completion status
@@ -102,17 +102,17 @@ quiet:
 	@echo "######  QUIET BUILD (errors/warnings only)  ########"
 ifeq ($(OS),Windows_NT)
 	@powershell -NoProfile -ExecutionPolicy Bypass -Command \
-	"\$$output = & { Push-Location srcs; make COMPILER_LOCATION='$(COMPILER_LOCATION)' DFP_LOCATION='$(DFP_LOCATION)' DFP='$(DFP)' DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) 2>&1; Pop-Location }; \
-	\$$filtered = \$$output | Select-String -Pattern 'error|warning' -CaseSensitive:\$$false; \
-	if (\$$filtered) { \$$filtered | Write-Host -ForegroundColor Red }; \
-	if (\$$LASTEXITCODE -eq 0) { \
-		cd bins; & '$(COMPILER_LOCATION)/xc32-bin2hex' $(MODULE) | Out-Null; \
-		if (\$$LASTEXITCODE -eq 0) { Write-Host '######  BUILD COMPLETE (no errors)  ########' -ForegroundColor Green } \
-		else { Write-Host '######  HEX CONVERSION FAILED  ########' -ForegroundColor Red; exit 1 } \
-	} else { Write-Host '######  BUILD FAILED  ########' -ForegroundColor Red; exit 1 }"
+    "\$$output = & { Push-Location srcs; make COMPILER_LOCATION='$(COMPILER_LOCATION)' DFP_LOCATION='$(DFP_LOCATION)' DFP='$(DFP)' DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) DEBUG_=$(DEBUG_) 2>&1; Pop-Location }; \
+    \$$filtered = \$$output | Select-String -Pattern 'error|warning' -CaseSensitive:\$$false; \
+    if (\$$filtered) { \$$filtered | Write-Host -ForegroundColor Red }; \
+    if (\$$LASTEXITCODE -eq 0) { \
+        cd bins/$(BUILD_CONFIG); & '$(COMPILER_LOCATION)/xc32-bin2hex' $(MODULE) | Out-Null; \
+        if (\$$LASTEXITCODE -eq 0) { Write-Host '######  BUILD COMPLETE (no errors)  ########' -ForegroundColor Green } \
+        else { Write-Host '######  HEX CONVERSION FAILED  ########' -ForegroundColor Red; exit 1 } \
+    } else { Write-Host '######  BUILD FAILED  ########' -ForegroundColor Red; exit 1 }"
 else
-	@cd srcs && $(BUILD) COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) 2>&1 | grep -iE 'error|warning' || echo "No errors or warnings"
-	@if [ $$? -eq 0 ]; then cd bins && "$(COMPILER_LOCATION)/xc32-bin2hex" $(MODULE) >/dev/null 2>&1 && echo "######  BUILD COMPLETE  ########"; fi
+	@cd srcs && $(BUILD) COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) DEBUG_=$(DEBUG_) 2>&1 | grep -iE 'error|warning' || echo "No errors or warnings"
+	@if [ $$? -eq 0 ]; then cd bins/$(BUILD_CONFIG) && "$(COMPILER_LOCATION)/xc32-bin2hex" $(MODULE) >/dev/null 2>&1 && echo "######  BUILD COMPLETE  ########"; fi
 endif
 
 build_dir:
@@ -122,7 +122,7 @@ build_dir:
 
 debug:
 	@echo "####### DEBUGGING OUTPUTS #######"
-	cd srcs && $(BUILD) debug COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE)
+	cd srcs && $(BUILD) debug COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) BUILD_CONFIG=$(BUILD_CONFIG) DEBUG_=$(DEBUG_)
 
 platform:
 	@echo "####### PLATFORM INFO #######"
@@ -208,6 +208,14 @@ ifeq ($(OS),Windows_NT)
 	Write-Host 'make BUILD_CONFIG=Debug  ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Incremental Debug build (-g3 -O0, full symbols).' -ForegroundColor White; \
 	Write-Host 'make all BUILD_CONFIG=Debug' -ForegroundColor Yellow -NoNewline; Write-Host ' - Full Debug rebuild (clean + build).' -ForegroundColor White; \
 	Write-Host ''; \
+	Write-Host '--- DEBUG OUTPUT CONTROL ---' -ForegroundColor Cyan; \
+	Write-Host 'DEBUG_=0                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - All debug output disabled (default).' -ForegroundColor White; \
+	Write-Host 'DEBUG_=1                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - UART debug output enabled (DBG_LEVEL_UART).' -ForegroundColor White; \
+	Write-Host 'DEBUG_=2                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - GCODE debug output enabled (DBG_LEVEL_GCODE).' -ForegroundColor White; \
+	Write-Host 'DEBUG_=3                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - SEGMENT debug output enabled (DBG_LEVEL_SEGMENT).' -ForegroundColor White; \
+	Write-Host 'DEBUG_=4                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - MOTION debug output enabled (DBG_LEVEL_MOTION).' -ForegroundColor White; \
+	Write-Host 'DEBUG_=5                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - STEPPER debug output enabled (DBG_LEVEL_STEPPER).' -ForegroundColor White; \
+	Write-Host ''; \
 	Write-Host '--- BUILD CONFIGURATIONS ---' -ForegroundColor Cyan; \
 	Write-Host 'BUILD_CONFIG=Release     ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Balanced build: -g -O1 (default, suitable for debugging + performance).' -ForegroundColor White; \
 	Write-Host 'BUILD_CONFIG=Debug       ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Debug build: -g3 -O0 (maximum debug symbols, no optimization).' -ForegroundColor White; \
@@ -251,6 +259,14 @@ else
 	@echo -e "\033[0;33mmake all                 \033[0m - Full rebuild (clean + build from scratch, Release config)."
 	@echo -e "\033[0;33mmake BUILD_CONFIG=Debug  \033[0m - Incremental Debug build (-g3 -O0, full symbols)."
 	@echo -e "\033[0;33mmake all BUILD_CONFIG=Debug\033[0m - Full Debug rebuild (clean + build)."
+	@echo ""
+	@echo -e "\033[0;36m--- DEBUG OUTPUT CONTROL ---\033[0m"
+	@echo -e "\033[0;33mDEBUG_=0                 \033[0m - All debug output disabled (default)."
+	@echo -e "\033[0;33mDEBUG_=1                 \033[0m - UART debug output enabled (DBG_LEVEL_UART)."
+	@echo -e "\033[0;33mDEBUG_=2                 \033[0m - GCODE debug output enabled (DBG_LEVEL_GCODE)."
+	@echo -e "\033[0;33mDEBUG_=3                 \033[0m - SEGMENT debug output enabled (DBG_LEVEL_SEGMENT)."
+	@echo -e "\033[0;33mDEBUG_=4                 \033[0m - MOTION debug output enabled (DBG_LEVEL_MOTION)."
+	@echo -e "\033[0;33mDEBUG_=5                 \033[0m - STEPPER debug output enabled (DBG_LEVEL_STEPPER)."
 	@echo ""
 	@echo -e "\033[0;36m--- BUILD CONFIGURATIONS ---\033[0m"
 	@echo -e "\033[0;33mBUILD_CONFIG=Release     \033[0m - Balanced build: -g -O1 (default, suitable for debugging + performance)."

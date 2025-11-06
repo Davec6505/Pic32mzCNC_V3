@@ -14,6 +14,7 @@
 // *****************************************************************************
 
 #include <string.h>
+#include <stdio.h>  // ✅ snprintf
 #include <math.h>  // For fabsf in limit checks
 #include "app.h"
 #include "settings.h"
@@ -21,6 +22,8 @@
 #include "motion_utils.h"  // For hard limit checking
 #include "config/default/peripheral/ocmp/plib_ocmp5.h"  // ✅ DEBUG: For OC5 test
 #include "config/default/peripheral/tmr/plib_tmr2.h"    // ✅ DEBUG: For TMR2 counter
+#include "config/default/peripheral/uart/plib_uart3.h"  // ✅ DEBUG output
+#include "utils/uart_utils.h"  // ✅ Non-blocking UART utilities
 #include "motion.h"  // Make sure this is included
 
 // *****************************************************************************
@@ -134,7 +137,9 @@ void APP_Initialize ( void )
     appData.arcClockwise = false;
     appData.arcPlane = 0;  // XY plane
     appData.arcFeedrate = 0.0f;
-
+    
+    // ✅ Initialize UART utilities (callback-based non-blocking output)
+    UART_Initialize();
 
 }
 
@@ -241,6 +246,8 @@ void APP_Tasks ( void )
 
             // ✅ STEP 3: HARD LIMIT CHECK (GRBL safety feature)
             // Check limit switches with inversion mask from settings
+            // ⚠️ TEMPORARILY DISABLED FOR UART TESTING
+            /*
             GRBL_Settings* settings = SETTINGS_GetCurrent();
             if(MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
                 // ⚠️ HARD LIMIT TRIGGERED - Emergency stop!
@@ -248,236 +255,14 @@ void APP_Tasks ( void )
                 appData.state = APP_ALARM;
                 break;  // Immediate transition to alarm state
             }
+            */
 
             // ✅ STEP 4: Process ONE G-code event per iteration (non-blocking!)
             GCODE_Event event;
+                     
             if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
-                switch (event.type) {
-                    case GCODE_EVENT_LINEAR_MOVE:
-                    {
-                        // Check if motion queue has space before processing
-                        if(appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
-                            // Build start and end coordinates
-                            CoordinatePoint start = {appData.currentX, appData.currentY, appData.currentZ, appData.currentA};
-                            CoordinatePoint end;
-                            
-                            if(appData.absoluteMode) {
-                                // G90 absolute mode - use coordinates directly (or current if NAN)
-                                end.x = isnan(event.data.linearMove.x) ? appData.currentX : event.data.linearMove.x;
-                                end.y = isnan(event.data.linearMove.y) ? appData.currentY : event.data.linearMove.y;
-                                end.z = isnan(event.data.linearMove.z) ? appData.currentZ : event.data.linearMove.z;
-                                end.a = isnan(event.data.linearMove.a) ? appData.currentA : event.data.linearMove.a;
-                            } else {
-                                // G91 relative mode - add to current position (or keep current if NAN)
-                                end.x = isnan(event.data.linearMove.x) ? appData.currentX : (appData.currentX + event.data.linearMove.x);
-                                end.y = isnan(event.data.linearMove.y) ? appData.currentY : (appData.currentY + event.data.linearMove.y);
-                                end.z = isnan(event.data.linearMove.z) ? appData.currentZ : (appData.currentZ + event.data.linearMove.z);
-                                end.a = isnan(event.data.linearMove.a) ? appData.currentA : (appData.currentA + event.data.linearMove.a);
-                            }
-                            
-                            // ✅ SOFT LIMIT CHECK (non-blocking GRBL implementation)
-                            // Check target position against max_travel settings
-                            GRBL_Settings* settings = SETTINGS_GetCurrent();
-                            bool limit_violation = false;
-                            
-                            // ✅ CRITICAL: Only check limits if settings are valid (not NAN)
-                            // If settings corrupted, allow motion (fail-safe operation)
-                            if(!isnan(settings->max_travel_x) && !isnan(settings->max_travel_y) && !isnan(settings->max_travel_z)) {
-                                // Machine coordinates are negative (GRBL convention: 0,0,0 is max travel position)
-                                // Work coordinates typically positive, but we check absolute values
-                                if(fabsf(end.x) > settings->max_travel_x) {
-                                    limit_violation = true;
-                                }
-                                if(fabsf(end.y) > settings->max_travel_y) {
-                                    limit_violation = true;
-                                }
-                                if(fabsf(end.z) > settings->max_travel_z) {
-                                    limit_violation = true;
-                                }
-                            }
-                            
-                            // If limit violated, trigger alarm (GRBL behavior)
-                            if(limit_violation) {
-                                appData.alarmCode = 2;  // Soft limit alarm
-                                appData.state = APP_ALARM;
-                                break;  // Exit event processing immediately
-                            }
-                            
-                            // Use feedrate from event, or modal feedrate if not specified
-                            float feedrate = event.data.linearMove.feedrate;
-                            if(feedrate == 0.0f) {
-                                feedrate = appData.modalFeedrate;
-                            } else {
-                                // Update modal feedrate
-                                appData.modalFeedrate = feedrate;
-                            }
-                            
-                            // Get next queue slot
-                            MotionSegment* segment = &appData.motionQueue[appData.motionQueueHead];
-                            
-                            // Convert to motion segment using kinematics (reuse existing function)
-                            KINEMATICS_LinearMove(start, end, feedrate, segment);
-                            
-                            // Add to motion queue
-                            appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-                            appData.motionQueueCount++;
-                            
-                            // Update current position (work coordinates)
-                            appData.currentX = end.x;
-                            appData.currentY = end.y;
-                            appData.currentZ = end.z;
-                            appData.currentA = end.a;
-                        }
-                        break;
-                    }
-                        
-                    case GCODE_EVENT_SPINDLE_ON:
-                        // Update modal spindle RPM
-                        appData.modalSpindleRPM = event.data.spindle.rpm;
-                        // TODO: Implement spindle control hardware interface
-                        break;
-                        
-                    case GCODE_EVENT_SPINDLE_OFF:
-                        appData.modalSpindleRPM = 0;
-                        // TODO: Implement spindle control hardware interface
-                        break;
-                        
-                    case GCODE_EVENT_SET_ABSOLUTE:
-                        // G90 - absolute positioning mode
-                        appData.absoluteMode = true;
-                        break;
-                        
-                    case GCODE_EVENT_SET_RELATIVE:
-                        // G91 - relative positioning mode
-                        appData.absoluteMode = false;
-                        break;
-                        
-                    case GCODE_EVENT_SET_FEEDRATE:
-                        // Standalone F command - update modal feedrate (GRBL v1.1 compliant)
-                        appData.modalFeedrate = event.data.setFeedrate.feedrate;
-                        break;
-                        
-                    case GCODE_EVENT_SET_SPINDLE_SPEED:
-                        // Standalone S command - update modal spindle speed (GRBL v1.1 compliant)
-                        appData.modalSpindleRPM = event.data.setSpindleSpeed.rpm;
-                        break;
-                        
-                    case GCODE_EVENT_SET_TOOL:
-                        // Tool change command (T command)
-                        appData.modalToolNumber = event.data.setTool.toolNumber;
-                        // TODO: Implement tool change logic
-                        break;
-                        
-                    case GCODE_EVENT_DWELL:
-                        // G4 dwell command
-                        // TODO: Implement non-blocking dwell using CORETIMER
-                        break;
-                        
-                    case GCODE_EVENT_ARC_MOVE:
-                    {
-                        // G2/G3 arc commands - Initialize incremental arc generation
-                        // Calculate arc parameters, then stream segments over multiple iterations
-                        
-                        // Build start and end coordinates
-                        CoordinatePoint start = {appData.currentX, appData.currentY, appData.currentZ, appData.currentA};
-                        CoordinatePoint end;
-                        
-                        if(appData.absoluteMode) {
-                            // G90 absolute mode
-                            end.x = event.data.arcMove.x;
-                            end.y = event.data.arcMove.y;
-                            end.z = event.data.arcMove.z;
-                            end.a = event.data.arcMove.a;
-                        } else {
-                            // G91 relative mode
-                            end.x = appData.currentX + event.data.arcMove.x;
-                            end.y = appData.currentY + event.data.arcMove.y;
-                            end.z = appData.currentZ + event.data.arcMove.z;
-                            end.a = appData.currentA + event.data.arcMove.a;
-                        }
-                        
-                        // Center is ALWAYS incremental (centerX/centerY offsets from start)
-                        CoordinatePoint center;
-                        center.x = start.x + event.data.arcMove.centerX;
-                        center.y = start.y + event.data.arcMove.centerY;
-                        center.z = start.z;  // Z doesn't participate in arc center
-                        center.a = 0.0f;
-                        
-                        // Verify radius (GRBL arc validation)
-                        float r_start = sqrtf(event.data.arcMove.centerX * event.data.arcMove.centerX + 
-                                             event.data.arcMove.centerY * event.data.arcMove.centerY);
-                        float r_end = sqrtf((end.x - center.x) * (end.x - center.x) + 
-                                           (end.y - center.y) * (end.y - center.y));
-                        
-                        if(fabsf(r_start - r_end) > 0.005f) {
-                            // Radius error - abort arc
-                            appData.alarmCode = 33;  // GRBL alarm: arc radius error
-                            appData.state = APP_ALARM;
-                            break;
-                        }
-                        
-                        // Calculate angles
-                        float start_angle = atan2f(start.y - center.y, start.x - center.x);
-                        float end_angle = atan2f(end.y - center.y, end.x - center.x);
-                        
-                        // Calculate total angle (handle wrap-around)
-                        float total_angle;
-                        if(event.data.arcMove.clockwise) {
-                            // G2 clockwise
-                            total_angle = start_angle - end_angle;
-                            if(total_angle <= 0.0f) total_angle += 2.0f * M_PI;
-                        } else {
-                            // G3 counter-clockwise
-                            total_angle = end_angle - start_angle;
-                            if(total_angle <= 0.0f) total_angle += 2.0f * M_PI;
-                        }
-                        
-                        // ✅ Initialize arc generation state (incremental streaming)
-                        // Arc generation happens in MOTION_Arc() called from main loop
-                        appData.arcGenState = ARC_GEN_ACTIVE;
-                        appData.arcTheta = start_angle;
-                        appData.arcThetaEnd = end_angle;
-                        appData.arcCenter.x = center.x;
-                        appData.arcCenter.y = center.y;
-                        appData.arcCurrent = start;
-                        appData.arcEndPoint = end;
-                        appData.arcRadius = r_start;
-                        appData.arcClockwise = event.data.arcMove.clockwise;
-                        appData.arcPlane = appData.modalPlane;
-                        appData.arcFeedrate = event.data.arcMove.feedrate;
-                        
-                        // Calculate arc segment increment
-                        GRBL_Settings* settings = SETTINGS_GetCurrent();
-                        float arc_length = r_start * total_angle;
-                        uint32_t num_segments = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
-                        if(num_segments < 1) num_segments = 1;
-                        appData.arcThetaIncrement = total_angle / (float)num_segments;
-                        if(!event.data.arcMove.clockwise) {
-                            // CCW = positive angle increment
-                            appData.arcThetaIncrement = fabsf(appData.arcThetaIncrement);
-                        } else {
-                            // CW = negative angle increment
-                            appData.arcThetaIncrement = -fabsf(appData.arcThetaIncrement);
-                        }
-                        
-                        break;
-                    }
-                    
-                    case GCODE_EVENT_COOLANT_ON:
-                        // M7/M8 coolant on
-                        // TODO: Implement coolant control hardware interface
-                        break;
-                    
-                    case GCODE_EVENT_COOLANT_OFF:
-                        // M9 coolant off
-                        // TODO: Implement coolant control hardware interface
-                        break;
-                    
-                    case GCODE_EVENT_NONE:
-                    default:
-                        // No action for unknown events
-                        break;
-                }
+                // ✅ All event processing moved to motion.c for clean separation
+                MOTION_ProcessGcodeEvent(&appData, &event);
             }
             
             break;

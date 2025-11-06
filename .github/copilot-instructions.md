@@ -3,35 +3,186 @@
 ## Project Overview
 This is a CNC motion control system for PIC32MZ microcontrollers using hardware timers and Bresenham interpolation for precise multi-axis stepper motor control.
 
-## 🚀 Current Implementation Status (November 4, 2025)
-- ✅ **Professional event-driven G-code system** with clean architecture
-- ✅ **Event queue implementation** respecting APP_DATA abstraction layer
-- ✅ **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T
-- ✅ **Core architecture implemented** with absolute compare mode
-- ✅ **Single instance pattern in appData** for clean separation  
-- ✅ **Proper tokenization** - G/M commands keep all parameters (LinuxCNC/GRBL compatible)
-- ✅ **Multi-command line support** - "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
-- ✅ **Modal parameter support** - Standalone F, S, T commands (GRBL v1.1 compliant)
-- ✅ **16-command circular buffer** with flow control and overflow protection
-- ✅ **Harmony state machine pattern** - proper APP_Tasks architecture
-- ✅ **Non-blocking event processing** - one event per iteration
-- ✅ **Kinematics module complete** with physics calculations and velocity profiling
-- ✅ **Stepper module complete** with hardware abstraction and emergency stop
-- ✅ **Persistent GRBL settings** with NVM flash storage (29 parameters including arc)
-- ✅ **Delayed flash initialization** - read after peripherals ready (APP_LOAD_SETTINGS state)
-- ✅ **Unified data structures** - no circular dependencies, clean module separation
-- ✅ **LED blink rate stable** - no slowdown with complex commands
-- ✅ **Hardware FPU enabled** - Single-precision floating point for motion planning
-- ✅ **Trapezoidal velocity profiling IMPLEMENTED** - KINEMATICS_LinearMove with full physics
-- ✅ **Emergency stop system complete** - APP_ALARM state with hard/soft limit checking
-- ✅ **Position tracking and modal state** - Work coordinates with G90/G91 support
-- ✅ **Safety system complete** - STEPPER_DisableAll(), MOTION_UTILS_CheckHardLimits()
-- ✅ **256 microstepping validated** - ISR budget analysis shows 42% headroom at 512kHz
-- ✅ **Single ISR architecture designed** - GRBL pattern, no multi-ISR complexity
-- ✅ **PRIORITY PHASE SYSTEM IMPLEMENTED** - Hybrid ISR/main loop architecture (best of both worlds!)
-- ✅ **INCREMENTAL ARC INTERPOLATION COMPLETE** - Non-blocking G2/G3 with FPU acceleration
-- ✅ **Motion phase system operational** - VELOCITY/BRESENHAM/SCHEDULE/COMPLETE phases
-- ✅ **Project compiles successfully** with XC32 compiler
+## 🚀 Current Implementation Status (November 6, 2025)
+### ✅ COMPLETED FEATURES
+- **Professional event-driven G-code system** with clean architecture
+- **Event queue implementation** respecting APP_DATA abstraction layer
+- **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T
+- **Core architecture implemented** with absolute compare mode
+- **Single instance pattern in appData** for clean separation  
+- **Proper tokenization** - G/M commands keep all parameters (LinuxCNC/GRBL compatible)
+- **Multi-command line support** - "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
+- **Modal parameter support** - Standalone F, S, T commands (GRBL v1.1 compliant)
+- **16-command circular buffer** with flow control and overflow protection
+- **Harmony state machine pattern** - proper APP_Tasks architecture
+- **Non-blocking event processing** - one event per iteration
+- **Kinematics module complete** with physics calculations and velocity profiling
+- **Stepper module complete** with hardware abstraction and emergency stop
+- **Persistent GRBL settings** with NVM flash storage (29 parameters including arc)
+- **Delayed flash initialization** - read after peripherals ready (APP_LOAD_SETTINGS state)
+- **Unified data structures** - no circular dependencies, clean module separation
+- **LED blink rate stable** - no slowdown with complex commands
+- **Hardware FPU enabled** - Single-precision floating point for motion planning
+- **Trapezoidal velocity profiling IMPLEMENTED** - KINEMATICS_LinearMove with full physics
+- **Emergency stop system complete** - APP_ALARM state with hard/soft limit checking
+- **Position tracking and modal state** - Work coordinates with G90/G91 support
+- **Safety system complete** - STEPPER_DisableAll(), MOTION_UTILS_CheckHardLimits()
+- **256 microstepping validated** - ISR budget analysis shows 42% headroom at 512kHz
+- **Single ISR architecture designed** - GRBL pattern, no multi-ISR complexity
+- **PRIORITY PHASE SYSTEM IMPLEMENTED** - Hybrid ISR/main loop architecture (best of both worlds!)
+- **INCREMENTAL ARC INTERPOLATION COMPLETE** - Non-blocking G2/G3 with FPU acceleration
+- **Motion phase system operational** - VELOCITY/BRESENHAM/SCHEDULE/COMPLETE phases
+- **Project compiles successfully** with XC32 compiler
+- **UART3 fully functional** - TX and RX working perfectly, status queries respond
+- **Non-blocking UART utilities module** - uart_utils.c/h with callback-based output (November 6, 2025)
+- **LED2_Toggle() debug added** - Visual motion confirmation in STEPPER_ScheduleStep() (November 6, 2025)
+- **Clean build system** - make all defaults to Release, make clean removes everything (November 6, 2025)
+
+### 🔧 NON-BLOCKING UART UTILITIES (November 6, 2025)
+**Module:** `srcs/utils/uart_utils.c`, `incs/utils/uart_utils.h`
+
+**Purpose:** Centralized non-blocking UART communication for debug output and GRBL protocol responses, preventing real-time motion interference.
+
+**Implementation:**
+- **Callback-based architecture**: UART3_WriteCallbackRegister() with persistent notifications
+- **Global flag**: `volatile bool uart3TxReady` tracks TX buffer state
+- **Event handler**: `UART_EVENT_WRITE_THRESHOLD_REACHED` sets flag when buffer ready
+- **Non-blocking printf**: `UART_Printf()` checks flag before sending, drops messages if busy
+- **Protocol helpers**: `UART_SendOK()`, `UART_IsReady()`
+
+**Key Functions:**
+```c
+void UART_Initialize(void);           // Setup callback and notifications
+bool UART_Printf(const char* fmt, ...); // Non-blocking formatted output
+void UART_SendOK(void);               // Send "OK\r\n" response
+bool UART_IsReady(void);              // Check TX ready state
+```
+
+**Initialization Pattern:**
+```c
+// In APP_Initialize() - called once at startup
+UART_Initialize();  // Registers callback and enables notifications
+```
+
+**Usage Pattern:**
+```c
+// Non-blocking debug output (safe for ISR and main loop)
+if (UART_Printf("[DEBUG] Value: %d\r\n", value)) {
+    // Message sent successfully
+} else {
+    // TX busy, message dropped (no blocking)
+}
+
+// Protocol response
+UART_SendOK();  // Sends "OK\r\n" when ready
+```
+
+**Benefits:**
+- ✅ **No blocking** - Real-time motion never waits for UART
+- ✅ **ISR-safe** - Can be called from interrupts (messages drop if busy)
+- ✅ **Centralized** - Single module for all UART communication
+- ✅ **Persistent callbacks** - No need to re-register after each write
+- ✅ **Rate-limited** - Natural flow control via uart3TxReady flag
+
+**Files Updated:**
+- `srcs/app.c` - Added `#include "utils/uart_utils.h"`, calls UART_Initialize()
+- `srcs/gcode/gcode_parser.c` - Uses UART_SendOK() for protocol responses
+- `srcs/motion/motion.c` - Uses UART_Printf() for debug output
+- `srcs/motion/stepper.c` - Uses UART_Printf() for debug output, LED2_Toggle() for visual confirmation
+
+### 🔧 VISUAL MOTION DEBUG (November 6, 2025)
+**Added:** `LED2_Toggle()` in `STEPPER_ScheduleStep()` (srcs/motion/stepper.c line ~125)
+
+**Purpose:** Visual confirmation that motion scheduling is executing
+
+**Behavior:**
+- **Rapid blink (many Hz)** → `STEPPER_ScheduleStep()` IS being called → Motion system working
+- **Slow blink (~1Hz heartbeat)** → Function NOT being called → Phase system or segment loading issue
+
+**Usage:**
+```gcode
+G92 X0 Y0 Z0    # Set work origin
+G1 X1 F100      # Move 1mm in X axis
+```
+
+**Observe LED2:**
+- If rapid blink: Motion hardware OK, check if motors actually moving
+- If slow blink: Motion segments not loading or phase system stuck
+
+### 🔧 ACTIVE DEBUGGING SESSION (November 5-6, 2025)
+**Problem:** G-code commands are accepted (OK response) but position never updates. Motion does not execute.
+
+**Root Cause Found:** Commands are being queued but `GCODE_GetNextEvent()` is not successfully converting them to events that reach the motion system.
+
+**Debug Progress Chain:**
+1. ✅ **UART3 communication working** - Banner prints, status queries respond correctly
+2. ✅ **G-code parser receiving commands** - "OK" responses confirm reception
+3. ✅ **Tokenization working** - `[GCODE] Extract called, length=X`, `[GCODE] Tokens=X`
+4. ✅ **Commands being queued** - `[GCODE] Queued: G1X10F100` confirms queue population
+5. ✅ **GCODE_GetNextEvent() being called** - Function executes in APP_IDLE event loop
+6. ✅ **Non-blocking UART implemented** - uart_utils module prevents motion blocking
+7. ✅ **LED2 visual debug added** - Will show if STEPPER_ScheduleStep() executes
+8. ❌ **CRITICAL ISSUE IDENTIFIED:** `parse_command_to_event()` is being called but events are NOT reaching APP_Tasks event processing
+9. ❌ **No motion segments generated** - `[MOTION] Loading segment:` never prints
+10. ❌ **Position stays 0.000** - Motion system never executes
+
+**Debug Output Added (Currently in Code):**
+- `srcs/gcode/gcode_parser.c`:
+  - Line ~141: `[GCODE] Extract called, length=X` - Confirms buffer extraction
+  - Line ~151: `[GCODE] Tokens=X` - Shows tokenization count
+  - Line ~167: `[GCODE] Queued: <cmd>` - Shows what entered queue
+  - Line ~217-228: `[GCODE] GetNextEvent:` and `parse_command_to_event returned:` (DISABLED - too verbose, floods UART)
+- `srcs/app.c`:
+  - Line ~269: `[APP] Event received: type=X` - Would show if event retrieved (NEVER PRINTS!)
+  - Line ~322: `[APP] G1 Event: X Y Z F` - Would show linear move details (NEVER PRINTS!)
+  - Line ~329: `[APP] Segment queued: count=X` - Would show segment added (NEVER PRINTS!)
+- `srcs/motion/motion.c`:
+  - Line ~237: `[MOTION] Loading segment: queueCount=X` - Would show segment load attempt (NEVER PRINTS!)
+  - Line ~260: `[MOTION] Segment loaded: initial_rate=X` - Would show timing parameters (NEVER PRINTS!)
+- `srcs/motion/stepper.c`:
+  - Line ~125: `LED2_Toggle()` - Visual confirmation if STEPPER_ScheduleStep() called
+  - Line ~132: `[STEPPER] Axis X: now=X, offset=X, pulse_start=X` - Would show step scheduling (NEVER PRINTS!)
+
+**Observed Behavior:**
+```
+G92X0Y0Z0
+[GCODE] Extract called, length=10
+[GCODE] Tokens=2
+[GCODE] Queued: G92X0Y0Z0
+OK
+
+G1X10F100
+[GCODE] Extract called, length=10
+[GCODE] Tokens=2
+[GCODE] Queued: G1X10F100
+OK
+
+?
+<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000|FS:0,0>
+```
+
+**Key Finding:** NO `[APP] Event received:` messages appear, meaning `GCODE_GetNextEvent()` returns false even though commands are in queue.
+
+**Next Steps for Testing:**
+1. **Flash firmware with LED2_Toggle()** - Visual confirmation of motion execution
+2. **Test simple motion**: `G92 X0`, then `G1 X1 F100`
+3. **Observe LED2 behavior**:
+   - Rapid blink = `STEPPER_ScheduleStep()` executing → Check motor drivers
+   - Slow blink = Function not called → Phase system or event parsing issue
+4. **Enable selective debug** - Only G1/G92 events, not control characters
+5. **Check parse_command_to_event() return value** - Is it returning false for valid G-code?
+
+**Critical Hypothesis:** `parse_command_to_event()` is likely returning **false** for valid G-code commands (G92, G1), preventing events from being created. The `?` status query floods output when debug enabled, suggesting it's being parsed repeatedly without being consumed.
+
+**Modified Files (November 5-6 debug session):**
+- `srcs/utils/uart_utils.c` - Created non-blocking UART utilities module
+- `incs/utils/uart_utils.h` - UART utilities header with function prototypes
+- `srcs/motion/motion.c` - Added debug output (lines 237, 260), updated to use uart_utils
+- `srcs/motion/stepper.c` - Added LED2_Toggle() (line ~125), debug output (line 132), uses uart_utils
+- `srcs/app.c` - Added debug output (lines 269, 322, 329), calls UART_Initialize(), uses uart_utils
+- `srcs/gcode/gcode_parser.c` - Uses UART_SendOK() for protocol responses
+- `srcs/Makefile` - Added directory creation before linking, clean target removes all build artifacts
+- `srcs/gcode/gcode_parser.c` - Added debug output (lines 141, 151, 167, 217-228), added UART3 include
 
 **See README.md TODO section for remaining implementation tasks (homing, spindle/coolant, advanced features)**
 

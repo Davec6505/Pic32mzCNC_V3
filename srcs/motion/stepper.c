@@ -1,5 +1,5 @@
 #include "stepper.h"
-#include "../common.h"
+#include "common.h"
 #include "settings.h"  // ✅ Add settings module
 #include "motion_utils.h"  // ✅ GPIO abstraction layer
 #include "definitions.h"
@@ -8,6 +8,9 @@
 #include "../config/default/peripheral/ocmp/plib_ocmp1.h"  // ✅ Y axis (OC1)
 #include "../config/default/peripheral/ocmp/plib_ocmp3.h"  // ✅ Z axis (OC3)
 #include "../config/default/peripheral/ocmp/plib_ocmp4.h"  // ✅ A axis (OC4)
+#include "utils/uart_utils.h"  // ✅ Non-blocking UART utilities
+#include <stdio.h>   // ✅ snprintf
+#include <string.h>  // ✅ strlen
 
 // Callback ISR handlers for abstraction.
 void OCP5_ISR(uintptr_t context);  // X Axis Step Complete
@@ -118,6 +121,8 @@ void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset) {
         return; // Invalid axis - do nothing
     }
     
+    LED2_Toggle();  // ✅ DEBUG: Toggle to show ScheduleStep being called (visible rapid blink)
+    
     uint32_t now = TMR2_CounterGet();  // ✅ Use PLIB function
     
     // ✅ CRITICAL: Ensure minimum offset to prevent missed interrupts
@@ -126,6 +131,15 @@ void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset) {
     
     uint32_t pulse_start = now + offset;  // ABSOLUTE value
     uint32_t pulse_end = pulse_start + pulse_width;  // ABSOLUTE value
+    
+    // ✅ DEBUG: Print scheduling values
+    #if DEBUG_ == DBG_LEVEL_STEPPER
+    char debug_msg[128];
+    snprintf(debug_msg, sizeof(debug_msg), 
+            "[STEPPER] Axis %d: now=%u, offset=%u, pulse_start=%u\r\n",
+            axis, now, offset, pulse_start);
+    UART3_Write((uint8_t*)debug_msg, strlen(debug_msg));
+    #endif
     
     switch(axis) {
         case AXIS_X: // X axis
@@ -244,6 +258,8 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 // ============================================================================
 
 void OCP5_ISR(uintptr_t context) {
+    LED2_Toggle();  // ✅ DEBUG: Visual indication that ISR is firing
+    
     // X Axis - position counter  
     if (direction_bits & (1 << AXIS_X)) {
         stepper_pos.x_steps++;

@@ -1,14 +1,14 @@
 /*******************************************************************************
-  UART2 PLIB
+  UART3 PLIB
 
   Company:
     Microchip Technology Inc.
 
   File Name:
-    plib_uart2.h
+    plib_uart3.h
 
   Summary:
-    UART2 PLIB Header File
+    UART3 PLIB Header File
 
   Description:
     None
@@ -38,8 +38,8 @@
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
 
-#ifndef PLIB_UART2_H
-#define PLIB_UART2_H
+#ifndef PLIB_UART3_H
+#define PLIB_UART3_H
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -61,49 +61,49 @@
 // *****************************************************************************
 // *****************************************************************************
 
-#define UART2_FrequencyGet()    (uint32_t)(50000000UL)
+#define UART3_FrequencyGet()    (uint32_t)(50000000UL)
 
-/****************************** UART2 API *********************************/
+/****************************** UART3 API *********************************/
 
-void UART2_Initialize( void );
+void UART3_Initialize( void );
 
-bool UART2_SerialSetup( UART_SERIAL_SETUP *setup, uint32_t srcClkFreq );
+bool UART3_SerialSetup( UART_SERIAL_SETUP *setup, uint32_t srcClkFreq );
 
-UART_ERROR UART2_ErrorGet( void );
+UART_ERROR UART3_ErrorGet( void );
 
-bool UART2_AutoBaudQuery( void );
+bool UART3_AutoBaudQuery( void );
 
-void UART2_AutoBaudSet( bool enable );
+void UART3_AutoBaudSet( bool enable );
 
-size_t UART2_Write(uint8_t* pWrBuffer, const size_t size );
+size_t UART3_Write(uint8_t* pWrBuffer, const size_t size );
 
-size_t UART2_WriteCountGet(void);
+size_t UART3_WriteCountGet(void);
 
-size_t UART2_WriteFreeBufferCountGet(void);
+size_t UART3_WriteFreeBufferCountGet(void);
 
-size_t UART2_WriteBufferSizeGet(void);
+size_t UART3_WriteBufferSizeGet(void);
 
-bool UART2_TransmitComplete(void);
+bool UART3_TransmitComplete(void);
 
-bool UART2_WriteNotificationEnable(bool isEnabled, bool isPersistent);
+bool UART3_WriteNotificationEnable(bool isEnabled, bool isPersistent);
 
-void UART2_WriteThresholdSet(uint32_t nBytesThreshold);
+void UART3_WriteThresholdSet(uint32_t nBytesThreshold);
 
-void UART2_WriteCallbackRegister( UART_RING_BUFFER_CALLBACK callback, uintptr_t context);
+void UART3_WriteCallbackRegister( UART_RING_BUFFER_CALLBACK callback, uintptr_t context);
 
-size_t UART2_Read(uint8_t* pRdBuffer, const size_t size);
+size_t UART3_Read(uint8_t* pRdBuffer, const size_t size);
 
-size_t UART2_ReadCountGet(void);
+size_t UART3_ReadCountGet(void);
 
-size_t UART2_ReadFreeBufferCountGet(void);
+size_t UART3_ReadFreeBufferCountGet(void);
 
-size_t UART2_ReadBufferSizeGet(void);
+size_t UART3_ReadBufferSizeGet(void);
 
-bool UART2_ReadNotificationEnable(bool isEnabled, bool isPersistent);
+bool UART3_ReadNotificationEnable(bool isEnabled, bool isPersistent);
 
-void UART2_ReadThresholdSet(uint32_t nBytesThreshold);
+void UART3_ReadThresholdSet(uint32_t nBytesThreshold);
 
-void UART2_ReadCallbackRegister( UART_RING_BUFFER_CALLBACK callback, uintptr_t context);
+void UART3_ReadCallbackRegister( UART_RING_BUFFER_CALLBACK callback, uintptr_t context);
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility
@@ -113,4 +113,4 @@ void UART2_ReadCallbackRegister( UART_RING_BUFFER_CALLBACK callback, uintptr_t c
 #endif
 // DOM-IGNORE-END
 
-#endif // PLIB_UART2_H
+#endif // PLIB_UART3_H

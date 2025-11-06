@@ -29,6 +29,8 @@
 #include "utils.h"
 #include "settings.h"
 #include "data_structures.h"  // ✅ Access to GCODE_CommandQueue with nested motion info
+#include "utils/uart_utils.h"        // ✅ Non-blocking UART utilities
+#include "../config/default/peripheral/uart/plib_uart3.h"  // ✅ UART3 PLIB (for baud, init)
 
 // ✅ Flow control threshold - leave 2 slots free for safety
 #define MOTION_BUFFER_THRESHOLD 2
@@ -37,7 +39,6 @@
 static uint8_t txBuffer[128];
 static uint8_t rxBuffer[50];
 static volatile uint32_t nBytesRead = 0;
-static volatile bool txThresholdEventReceived = false;
 static volatile bool rxThresholdEventReceived = false;
 
 /* local datatypes */
@@ -73,58 +74,46 @@ void usartReadEventHandler(UART_EVENT event, uintptr_t context )
     if (event == UART_EVENT_READ_THRESHOLD_REACHED)
     {
         /* Receiver should atleast have the thershold number of bytes in the ring buffer */
-        nBytesAvailable = UART2_ReadCountGet();
+        nBytesAvailable = UART3_ReadCountGet();
         
-        nBytesRead += UART2_Read((uint8_t*)&rxBuffer[nBytesRead], nBytesAvailable);                          
+        nBytesRead += UART3_Read((uint8_t*)&rxBuffer[nBytesRead], nBytesAvailable);                          
     }
 }
 
-void usartWriteEventHandler(UART_EVENT event, uintptr_t context )
-{
-    txThresholdEventReceived = true;
-}
-
-
 void GCODE_USART_Initialize( uint32_t RD_thresholds)
 {
-    uint32_t nBytes = 0;        
-
-
-    /* Register a callback for write events */
-    UART2_WriteCallbackRegister(usartWriteEventHandler, (uintptr_t) NULL);
+    
+    // ✅ Initialize UART utilities (registers callback, enables notifications)
+    UART_Initialize();
     
     /* Register a callback for read events */
-    UART2_ReadCallbackRegister(usartReadEventHandler, (uintptr_t) NULL);    
+    UART3_ReadCallbackRegister(usartReadEventHandler, (uintptr_t) NULL);    
     
     
     // *******************************************************************************************
     // * Print the size of the read buffer on the terminal Dummy test
     // *******************************************************************************************
-    nBytes = sprintf((char*)txBuffer, "RX Buffer Size = %d\r\n", (int)UART2_ReadBufferSizeGet());
-    
-    UART2_Write((uint8_t*)txBuffer, nBytes);  
-    
-    /* Print the size of the write buffer on the terminal */
-    nBytes = sprintf((char*)txBuffer, "TX Buffer Size = %d\r\n", (int)UART2_WriteBufferSizeGet());
-    
-    UART2_Write((uint8_t*)txBuffer, nBytes);    
-    
-    UART2_Write((uint8_t*)GRBL_FIRMWARE_VERSION, sizeof(GRBL_FIRMWARE_VERSION));    
-    UART2_Write((uint8_t*)GRBL_BUILD_DATE, sizeof(GRBL_BUILD_DATE));    
-    UART2_Write((uint8_t*)GRBL_BUILD_TIME, sizeof(GRBL_BUILD_TIME));    
+#if  DEBUG_ == DBG_LEVEL_UART
+    UART_Printf("RX Buffer Size = %d\r\n", (int)UART3_ReadBufferSizeGet());
+    UART_Printf("TX Buffer Size = %d\r\n", (int)UART3_WriteBufferSizeGet());
+#endif
+
+    UART_SendMessage(GRBL_FIRMWARE_VERSION);
+    UART_SendMessage(GRBL_BUILD_DATE);
+    UART_SendMessage(GRBL_BUILD_TIME);    
 
     /* set write threshold to indicate when the TX buffer is full */
     /* enable notifications to get notified when the TX buffer is empty */
-    UART2_WriteThresholdSet(UART2_WriteBufferSizeGet());   
+    UART3_WriteThresholdSet(UART3_WriteBufferSizeGet());   
     
     /* Enable notifications, disabled for now */
-    UART2_WriteNotificationEnable(false, false);
+    UART3_WriteNotificationEnable(false, false);
 
    /* set a threshold value to receive a callback after every 1 characters are received */
-    UART2_ReadThresholdSet(RD_thresholds);
+    UART3_ReadThresholdSet(RD_thresholds);
 
     /* Disable RX event notifications */
-    UART2_ReadNotificationEnable(false, false);
+    UART3_ReadNotificationEnable(false, false);
 }
 
 
@@ -139,6 +128,13 @@ GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t len
 {
     GCODE_CommandQueue* cmdQueue = commandQueue;
     
+    // ✅ DEBUG: Confirm function called
+    #if DEBUG_ == DBG_LEVEL_GCODE
+    char dbg[164];
+    snprintf(dbg, sizeof(dbg), "[GCODE] Extract called, length=%u\r\n", length);
+    UART3_Write((uint8_t*)dbg, strlen(dbg));
+    #endif
+
     // Null-terminate buffer for string processing
     char line_buffer[256];
     uint32_t safe_length = (length < sizeof(line_buffer) - 1) ? length : sizeof(line_buffer) - 1;
@@ -150,6 +146,12 @@ GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t len
     TokenArray tokens;
     uint32_t token_count = UTILS_TokenizeGcodeLine(line_buffer, &tokens);
     
+    // ✅ DEBUG: Show tokenization result
+    #if DEBUG_ == DBG_LEVEL_GCODE
+    snprintf(dbg, sizeof(dbg), "[GCODE] Tokens=%u\r\n", token_count);
+    UART3_Write((uint8_t*)dbg, strlen(dbg));
+    #endif
+
     // Add each token to the command queue
     for (uint32_t i = 0; i < token_count; i++) {
         // Skip empty tokens and comments
@@ -166,6 +168,14 @@ GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t len
                        tokens.tokens[i], token_len);
                 cmdQueue->commands[cmdQueue->head].command[token_len] = '\0';
                 
+                // ✅ DEBUG: Show what we queued
+#if DEBUG_ == DBG_LEVEL_GCODE
+                 char dbg[128];
+            snprintf(dbg, sizeof(dbg), "[GCODE] Queued: %s\r\n", tokens.tokens[i]);
+                UART3_Write((uint8_t*)dbg, strlen(dbg));
+#endif
+
+
                 // Advance queue
                 cmdQueue->head = (cmdQueue->head + 1) % GCODE_MAX_COMMANDS;
                 cmdQueue->count++;
@@ -210,9 +220,27 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
     // Get next command from queue
     GCODE_Command* current_cmd = &cmdQueue->commands[cmdQueue->tail];
     
+    // ✅ DEBUG: Show what we're parsing (only for G commands to reduce spam)
+#if DEBUG_ == DBG_LEVEL_GCODE
+    if(current_cmd->command[0] == 'G') {
+        char dbg[128];
+        snprintf(dbg, sizeof(dbg), "[GCODE] GetNextEvent: cmd='%s', count=%u\r\n", 
+                current_cmd->command, cmdQueue->count);
+        UART3_Write((uint8_t*)dbg, strlen(dbg));
+    }
+#endif   
     // Parse command into event
     bool event_valid = parse_command_to_event(current_cmd->command, event);
-    
+
+#if DEBUG_ == DBG_LEVEL_GCODE
+    // ✅ DEBUG: Show parse result (only for G commands)
+    if(current_cmd->command[0] == 'G') {
+        char dbg2[128];
+        snprintf(dbg2, sizeof(dbg2), "[GCODE] parse_command_to_event returned: %d\r\n", event_valid);
+        UART3_Write((uint8_t*)dbg2, strlen(dbg2));
+    }
+#endif
+
     if (event_valid) {
         // Remove processed command from queue
         cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
@@ -232,7 +260,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
     {
     case GCODE_STATE_IDLE:
         /* check if command has been received */
-       nBytesAvailable = UART2_ReadCountGet();
+       nBytesAvailable = UART3_ReadCountGet();
 
         // sucessive calls buffering to allow all chars to stream in.
         if(nBytesAvailable > 0){
@@ -241,7 +269,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             uint32_t bytes_to_read = (nBytesAvailable < space_available) ? nBytesAvailable : space_available;
             
             if (bytes_to_read > 0) {
-                uint32_t new_bytes = UART2_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
+                uint32_t new_bytes = UART3_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
                 nBytesRead += new_bytes;
             }
             
@@ -294,7 +322,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
         
             // ✅ FLOW CONTROL: Check motion buffer and SEND OK immediately if space
             if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-                UART2_Write((uint8_t*)"OK\r\n", 4);  // ✅ Send immediately
+                UART_SendOK();  // ✅ Send immediately
             } else {
                 // ✅ Buffer nearly full - withhold "OK"
                 okPending = true;
@@ -327,7 +355,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
     // Send it now if motion buffer has space
     if (okPending && 
         cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-        UART2_Write((uint8_t*)"OK\r\n", 4);
+        UART_SendOK();
         okPending = false;
     }
     
@@ -357,17 +385,17 @@ case GCODE_STATE_CONTROL_CHAR:
             nBytesRead = snprintf((char*)txBuffer, sizeof(txBuffer),
                                 "<Idle|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:0,0>\r\n",
                                 mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z);
-            UART2_Write((uint8_t*)txBuffer, nBytesRead);
+            UART3_Write((uint8_t*)txBuffer, nBytesRead);
             break;
         }
         case '~':  // Cycle start/resume
-            UART2_Write((uint8_t*)"OK\r\n", 4);
+            UART_SendOK();
             break;
         case '!':  // Feed hold
-            UART2_Write((uint8_t*)"OK\r\n", 4);
+            UART_SendOK();
             break;
         case 0x18: // Soft reset (Ctrl+X)
-            UART2_Write((uint8_t*)GRBL_FIRMWARE_VERSION, sizeof(GRBL_FIRMWARE_VERSION));
+            UART3_Write((uint8_t*)GRBL_FIRMWARE_VERSION, sizeof(GRBL_FIRMWARE_VERSION));
             break;
             
         // ✅ NEW: Settings commands handler
@@ -384,9 +412,9 @@ case GCODE_STATE_CONTROL_CHAR:
                 }
             }
             
-            // If no terminator yet, read more bytes from UART2
+            // If no terminator yet, read more bytes from UART3
             while(!has_terminator){
-                uint32_t bytes_available = UART2_ReadCountGet();
+                uint32_t bytes_available = UART3_ReadCountGet();
                 
                 if(bytes_available == 0){
                     // No more data available right now, exit and wait for next GCODE_Tasks() call
@@ -398,7 +426,7 @@ case GCODE_STATE_CONTROL_CHAR:
                 uint32_t bytes_to_read = (bytes_available < space_available) ? bytes_available : space_available;
                 
                 if(bytes_to_read > 0){
-                    uint32_t new_bytes = UART2_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
+                    uint32_t new_bytes = UART3_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
                     nBytesRead += new_bytes;
                     
                     // Check again for terminator
@@ -423,14 +451,14 @@ case GCODE_STATE_CONTROL_CHAR:
             } else if(nBytesRead >= 6 && strncmp((char*)rxBuffer, "$RST=$", 6) == 0){
                 // ✅ Restore defaults to RAM only
                 SETTINGS_RestoreDefaults(SETTINGS_GetCurrent());
-                UART2_Write((uint8_t*)"ok\r\n", 4);
+                UART_SendOK();
                 
             } else if(nBytesRead >= 4 && strncmp((char*)rxBuffer, "$WR", 3) == 0){
                 // ✅ NEW: Explicit write command to save settings to NVM
                 if(SETTINGS_SaveToFlash(SETTINGS_GetCurrent())){
-                    UART2_Write((uint8_t*)"ok\r\n", 4);
+                    UART_SendOK();
                 } else {
-                    UART2_Write((uint8_t*)"error:9\r\n", 9);  // Error 9 = Settings write failed
+                    UART3_Write((uint8_t*)"error:9\r\n", 9);  // Error 9 = Settings write failed
                 }
                 
             } else {
@@ -445,9 +473,9 @@ case GCODE_STATE_CONTROL_CHAR:
                     
                     if(SETTINGS_SetValue(SETTINGS_GetCurrent(), param, value)){
                         // ✅ Value updated in RAM only - user must send $WR to persist
-                        UART2_Write((uint8_t*)"ok\r\n", 4);
+                        UART_SendOK();
                     } else {
-                        UART2_Write((uint8_t*)"error:3\r\n", 9);  // Error 3 = Invalid parameter
+                        UART3_Write((uint8_t*)"error:3\r\n", 9);  // Error 3 = Invalid parameter
                     }
                     
                 } else {
@@ -460,10 +488,10 @@ case GCODE_STATE_CONTROL_CHAR:
                     // Check if parameter is valid
                     if(val != 0.0f || param == 31 || param == 4 || param == 5 || param == 2 || param == 3){
                         snprintf(buffer, sizeof(buffer), "$%u=%.3f\r\n", (unsigned int)param, val);
-                        UART2_Write((uint8_t*)buffer, strlen(buffer));
-                        UART2_Write((uint8_t*)"ok\r\n", 4);
+                        UART3_Write((uint8_t*)buffer, strlen(buffer));
+                        UART_SendOK();
                     } else {
-                        UART2_Write((uint8_t*)"error:3\r\n", 9);
+                        UART3_Write((uint8_t*)"error:3\r\n", 9);
                     }
                 }
             }
@@ -484,7 +512,7 @@ case GCODE_STATE_CONTROL_CHAR:
     case GCODE_STATE_ERROR:
         // Send GRBL-style error message
         nBytesRead = sprintf((char*)txBuffer, "error:1\r\n"); // Error code 1 = G-code syntax error
-        UART2_Write((uint8_t*)txBuffer, nBytesRead);
+        UART3_Write((uint8_t*)txBuffer, nBytesRead);
         
         nBytesRead = 0;
         memset(rxBuffer, 0, sizeof(rxBuffer));
@@ -551,6 +579,19 @@ bool parse_command_to_event(const char* command, GCODE_Event* event)
     }
     else if (strstr(command, "G91")) {
         event->type = GCODE_EVENT_SET_RELATIVE;
+        return true;
+    }
+    else if (strstr(command, "G92")) {
+        // G92 - Set work coordinate system (set current position)
+        event->type = GCODE_EVENT_SET_WORK_OFFSET;
+        
+        // Extract coordinates
+        CoordinatePoint coords = parse_coordinate_values(command);
+        event->data.setWorkOffset.x = coords.x;
+        event->data.setWorkOffset.y = coords.y;
+        event->data.setWorkOffset.z = coords.z;
+        event->data.setWorkOffset.a = coords.a;
+        
         return true;
     }
     else if (strstr(command, "G1") || strstr(command, "G01")) {
@@ -663,3 +704,4 @@ bool parse_command_to_event(const char* command, GCODE_Event* event)
     // Command not recognized or not implemented
     return false;
 }
+

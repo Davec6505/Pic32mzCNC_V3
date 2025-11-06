@@ -70,9 +70,9 @@ void OUTPUT_COMPARE_1_Handler (void);
 void OUTPUT_COMPARE_3_Handler (void);
 void OUTPUT_COMPARE_4_Handler (void);
 void OUTPUT_COMPARE_5_Handler (void);
-void UART2_FAULT_Handler (void);
-void UART2_RX_Handler (void);
-void UART2_TX_Handler (void);
+void UART3_FAULT_Handler (void);
+void UART3_RX_Handler (void);
+void UART3_TX_Handler (void);
 void FLASH_CONTROL_Handler (void);
 
 
@@ -101,19 +101,19 @@ void __attribute__((used)) __ISR(_OUTPUT_COMPARE_5_VECTOR, ipl4SRS) OUTPUT_COMPA
     OUTPUT_COMPARE_5_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_UART2_FAULT_VECTOR, ipl1SRS) UART2_FAULT_Handler (void)
+void __attribute__((used)) __ISR(_UART3_FAULT_VECTOR, ipl1SRS) UART3_FAULT_Handler (void)
 {
-    UART2_FAULT_InterruptHandler();
+    UART3_FAULT_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_UART2_RX_VECTOR, ipl5SRS) UART2_RX_Handler (void)
+void __attribute__((used)) __ISR(_UART3_RX_VECTOR, ipl5SRS) UART3_RX_Handler (void)
 {
-    UART2_RX_InterruptHandler();
+    UART3_RX_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_UART2_TX_VECTOR, ipl3SRS) UART2_TX_Handler (void)
+void __attribute__((used)) __ISR(_UART3_TX_VECTOR, ipl3SRS) UART3_TX_Handler (void)
 {
-    UART2_TX_InterruptHandler();
+    UART3_TX_InterruptHandler();
 }
 
 void __attribute__((used)) __ISR(_FLASH_CONTROL_VECTOR, ipl1SRS) FLASH_CONTROL_Handler (void)
