@@ -105,8 +105,6 @@ ROOT     := ..
 BUILD_CONFIG ?= Default
 
 # Output directories based on configuration
-# ✅ SIMPLIFIED: All .o files go directly in objs/ folder (no Debug/Release subfolders)
-# Use 'make clean' when swapping between Debug/Release builds
 BASE_BIN_DIR  := $(ROOT)/bins
 BASE_LIB_DIR  := $(ROOT)/libs
 BASE_OBJ_DIR  := $(ROOT)/objs
@@ -114,7 +112,7 @@ BASE_OUT_DIR  := $(ROOT)/other
 
 BIN_DIR  := $(BASE_BIN_DIR)/$(BUILD_CONFIG)
 LIB_DIR  := $(BASE_LIB_DIR)/$(BUILD_CONFIG)
-OBJ_DIR  := $(BASE_OBJ_DIR)
+OBJ_DIR  := $(BASE_OBJ_DIR)/$(BUILD_CONFIG)
 OUT_DIR  := $(BASE_OUT_DIR)/$(BUILD_CONFIG)
 
 INC_DIR  := $(ROOT)/incs
@@ -197,6 +195,8 @@ ifneq ($(filter-out build_dir clean clean_all rem_dir mk_dir debug debug_path,$(
       # Debug: Full debug symbols, no optimization, debug defines
       OPT_FLAGS := -g3 -O0
       CONFIG_DEFINES := -DDEBUG -DXPRJ_Debug=Debug
+      # Debug builds enable DEBUG_MOTION_BUFFER by default
+      DEBUG_MOTION_BUFFER := 1
       $(info *** DEBUG BUILD: -g3 -O0 with debug symbols ***)
   else ifeq ($(BUILD_CONFIG),Release)
       # Release: Uses OPT_LEVEL from root Makefile (default: -O1)
@@ -209,28 +209,17 @@ ifneq ($(filter-out build_dir clean clean_all rem_dir mk_dir debug debug_path,$(
   endif
 endif
 
-# Control debug output level from root Makefile
-# DEBUG_ is passed from root Makefile (0-6 for exclusive debug levels)
-# Maps to DBG_LEVEL_* in common.h for conditional compilation
-DEBUG_ ?= 0
-CFLAGS += -DDEBUG_=$(DEBUG_)
-
-# Display debug level info during build
-ifneq ($(DEBUG_),0)
-    $(info *** DEBUG OUTPUT ENABLED: Level $(DEBUG_) ***)
-endif
-
-
-# Control debug flags from root Makefile
-# Map DEBUG_ variable to compile-time define
-CFLAGS += -DDEBUG_=$(DEBUG_)
-
-# Add DEBUG_ if enabled (either from root Makefile or Debug build)
-ifeq ($(DEBUG),1)
-    CONFIG_DEFINES += -DDEBUG_
+# Add DEBUG_MOTION_BUFFER if enabled (either from root Makefile or Debug build)
+ifeq ($(DEBUG_MOTION_BUFFER),1)
+    CONFIG_DEFINES += -DDEBUG_MOTION_BUFFER
     $(info *** DEBUG_MOTION_BUFFER enabled ***)
 endif
 
+# Map root policy flag to compile-time define to optionally force exact-stop behavior
+ifeq ($(DISABLE_JUNCTION_LOOKAHEAD),1)
+    CONFIG_DEFINES += -DDEBUG_DISABLE_JUNCTION_LOOKAHEAD
+    $(info *** DEBUG_DISABLE_JUNCTION_LOOKAHEAD (exact-stop) enabled ***)
+endif
 
 ifeq ($(DEP_TRACKING),1)
    $(info *** DEP_TRACKING enabled ***)
@@ -282,8 +271,6 @@ DIRECT_ASM := -c $(CONFIG_DEFINES) -Wa,--defsym=__MPLAB_BUILD=1,-MD=$(OBJ_DIR)/s
 # Default target: build executable
 $(BIN_DIR)/$(MODULE): $(OBJS)
 	@echo "Building project for $(DEVICE)"
-	@$(call MKDIR,$(BIN_DIR))
-	@$(call MKDIR,$(OUT_DIR))
 ifeq ($(USE_SHARED_LIB),1)
 	@echo "Linking with pre-built shared library: libCS23shared.a"
 	$(DIRECT_LINK) -o $@ $^ $(LINK_LIBS)
@@ -390,12 +377,13 @@ build_dir:
 
 
 
+
 clean:
-	@echo "Cleaning up ALL build artifacts ($(detected_OS)) with DRY_RUN=$(DRY_RUN)"
-	@$(call RM,$(BASE_BIN_DIR),*)
-	@$(call RM,$(BASE_LIB_DIR),*)
-	@$(call RM,$(BASE_OBJ_DIR),*)
-	@$(call RM,$(BASE_OUT_DIR),*)
+	@echo "Cleaning up object files, binaries, and libraries ($(detected_OS)) with DRY_RUN=$(DRY_RUN)"
+	@$(call RM,$(BIN_DIR),*)
+	@$(call RM,$(LIB_DIR),*.a)
+	@$(call RM,$(OBJ_DIR),*)
+	@$(call RM,$(OUT_DIR),*)
 	@echo "Clean complete."
 
 
