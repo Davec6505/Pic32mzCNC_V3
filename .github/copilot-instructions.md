@@ -394,40 +394,6 @@ void __ISR(_TIMER_2_VECTOR, IPL1SOFT) TMR2Handler(void) {
 
 ### Professional G-Code Event System ✅
 - **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
-- **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91 commands
-- **Abstraction layer respect**: No APP_DATA exposure, maintains clean boundaries
-- **Multi-command tokenization**: "G90G1X10Y10F1000S200M3" → individual events
-- **Zero memory allocation**: Deterministic processing for real-time systems
-- **Utils module**: Professional string parsing with robust tokenization
-- **Flow control**: 16-command circular buffer with "OK" withholding
-- **Real-time characters**: Bypass tokenization for immediate '?!~^X' processing
-- **GRBL compliance**: Full v1.1 protocol support with proper status reporting
-
-### GRBL v1.1 Protocol Compliance
-- **One "OK" per G-code line**: Send acknowledgment only after complete line is received and queued
-- **Line-oriented buffering**: Accumulate bytes until `\n` or `\r` terminator before processing
-- **Static variable pattern**: Use `static bool has_line_terminator` to persist state across polled function calls
-  - Allows state to accumulate during byte reception
-  - **CRITICAL**: Reset to `false` after processing to prevent stale state
-- **Early exit pattern**: Check `!has_line_terminator` and break immediately to prevent premature processing
-- **Control characters bypass buffering**: `?!~^X` process immediately without waiting for terminator
-- **Flow control**: Withhold "OK" when command queue is full (GRBL behavior)
-- **Real-time commands never get "OK"**: 
-  - `?` → Status report only
-  - `!` → Feed hold, silent
-  - `~` → Resume, silent
-  - `^X` → Reset + banner only
-- **Empty lines ignored**: Whitespace-only input gets no response
-- **Echo disabled**: GRBL doesn't echo commands by default
-
-### Single Instance Pattern in appData ✅
-- **All major data structures** centralized in APP_DATA struct
-- **No static module data** - clean separation of concerns  
-- **Pass by reference** through function calls for explicit ownership
-- **Work coordinates protected** by private static in kinematics module
-
-### Professional G-Code Event System ✅
-- **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
 - **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T commands
 - **Proper tokenization**: G/M commands consume ALL parameters until next G/M
   - Example: `G90G1X10Y10F1000` → Tokens: `"G90"`, `"G1X10Y10F1000"`
@@ -527,7 +493,7 @@ case GCODE_STATE_IDLE:
                 break;
             }
         }
-        
+
         // Check first byte for control characters (bypass line buffering)
         bool control_char_found = false;
         for(uint8_t i = 0; i < sizeof(GRBL_CONTROL_CHARS); i++){
@@ -908,7 +874,7 @@ uint8_t modalPlane;                // Modal plane state (G17=0, G18=1, G19=2)
 - **Parameters**:
   - `X Y Z`: End point coordinates (absolute or relative based on G90/G91)
   - `I J K`: Center offset from **start point** (always incremental)
-  - Example: `G2 X10 Y0 I5 J0` → Arc from current pos to (10,0), center at (current.x+5, current.y+0)
+  - Example: `G2 X10 Y0 I5 J0` → Arc from current pos to (10,0), center at (5,0), radius=5mm
 
 **Arc Calculations (implemented in app.c lines 487-574):**
 1. **Center point**: `center.x = start.x + centerX`, `center.y = start.y + centerY`
@@ -1072,42 +1038,31 @@ G2 X10 Y0 I5 J0   ; CW arc from (0,0) to (10,0), center at (5,0), radius=5mm
 - **Pre-allocate buffer** in caller (APP_DATA or stack)
 - **Error checking**: Verify radius matches at start and end
 
-## Remaining Implementation Tasks
+## 🔧 BUILD SYSTEM STATUS (November 6, 2025)
 
-**See README.md TODO section for detailed implementation checklists:**
-- Homing system (GPIO, G28, $H cycle, settings $22-$27)
-- Spindle & coolant control (PWM, M3/M5/M7/M9, settings $30-$31)
-- TMR2 rollover monitoring (controlled reset pattern)
-- G17/G18/G19 plane selection (arc interpolation in XZ/YZ)
-- Advanced G-code features (G54-G59, real-time overrides, parking)
-- Look-ahead motion planning (junction deviation, velocity optimization)
+### Current State
+- ✅ **Build works** - `make all` defaults to Release, project compiles successfully
+- ✅ **Clean works** - `make clean` removes all build artifacts
+- ⚠️ **Makefile is overcomplicated** - needs review and simplification
 
-## Development Workflow
-1. Build: `make` or `make all` (clean + build)
-2. Flash: MikroE bootloader
-3. Clean: `make clean`
+### Known Issues
+- Makefile has become too complex with multiple layers of directory handling
+- `make clean` initially stalls (PowerShell scanning large directory trees)
+- Directory creation logic is convoluted
+- OBJ_DIR structure unclear (Debug/Release vs flat structure debate)
 
-## When Suggesting Code
-- Always use absolute timer values for OCx registers
-- Never suggest stopping TMR2 during motion
-- Keep ISR implementations minimal
-- Use state machines for complex logic, not interrupts
-- Respect the dominant/subordinate axis architecture
-- Consider dynamic axis swapping capability
-- **For arcs**: Use FPU, verify radius, generate all segments atomically
+### For Tonight's Review
+The Makefile needs to be simplified with clear requirements:
+1. **Simple clean** - fast removal of all build artifacts
+2. **Simple build** - `make all` defaults to Release
+3. **Debug build** - `make BUILD_CONFIG=Debug` for debug builds
+4. **Object files** - decide on final directory structure (flat vs nested)
+5. **No PowerShell stalls** - clean should be instant, not scan entire trees
 
-## Questions to Ask
-When uncertain about implementation details:
-- "Is this the dominant or subordinate axis?"
-- "Should this logic run in ISR or state machine?"
-- "Are we using absolute or relative timer values?"
-- "Does this arc need radius verification?"
-- "How many segments will this arc generate?"
-- "Does this require scheduling ahead of TMR2?"
+**Original goal (not achieved):**
+- Keep bins/Debug and bins/Release structure ✅ (works)
+- Remove Debug/Release from objs/ (currently unclear if this works)
+- Fast clean operation ❌ (currently stalls)
 
-## Questions to Ask
-When uncertain about implementation details:
-- "Is this the dominant or subordinate axis?"
-- "Should this logic run in ISR or state machine?"
-- "Are we using absolute or relative timer values?"
-- "Does this require scheduling ahead of TMR2?"
+### Recommendation for Tonight
+Start fresh from a known-good Makefile state and make ONE change at a time, testing after each change.
