@@ -101,7 +101,12 @@ void GCODE_USART_Initialize( uint32_t RD_thresholds)
     // Use direct UART writes for startup banner to avoid early drops
     UART3_Write((uint8_t*)GRBL_FIRMWARE_VERSION, (uint32_t)strlen(GRBL_FIRMWARE_VERSION));
     UART3_Write((uint8_t*)GRBL_BUILD_DATE, (uint32_t)strlen(GRBL_BUILD_DATE));
-    UART3_Write((uint8_t*)GRBL_BUILD_TIME, (uint32_t)strlen(GRBL_BUILD_TIME));    
+    UART3_Write((uint8_t*)GRBL_BUILD_TIME, (uint32_t)strlen(GRBL_BUILD_TIME));
+    
+    // ✅ Clear any garbage from RX buffer at startup (prevents spurious OK on first command)
+    nBytesRead = 0;
+    memset((void*)rxBuffer, 0, sizeof(rxBuffer));
+    okPending = false;
 
     /* set write threshold to indicate when the TX buffer is full */
     /* enable notifications to get notified when the TX buffer is empty */
@@ -236,6 +241,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
 {
     GCODE_CommandQueue* cmdQueue = commandQueue;
     uint32_t nBytesAvailable = 0;
+    uint32_t cmd_end = 0;  // Track terminator position for buffer shifting
     
     switch (gcodeData.state)
     {
@@ -275,79 +281,83 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
                 }
             }
 
-            //must not continue until line terminator is found
-            if(!has_line_terminator){
+            // ✅ If control char found, immediately break to handler (skip G-code processing)
+            if(control_char_found){
+                // Don't send OK for control characters
+                // Reset line terminator flag since we're not processing as G-code
+                has_line_terminator = false;
+                // Break out - next iteration will process in GCODE_STATE_CONTROL_CHAR
                 break;
-            }
-
-        // ✅ Check for actual G-code ONCE before deciding what to do
-        bool has_gcode = false;
-        for(uint32_t i = 0; i < nBytesRead; i++) {
-            if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' &&
-                rxBuffer[i] != ' ' && rxBuffer[i] != '\t' && rxBuffer[i] != 0) {
-                    // Found valid G-code character*/
-                    has_gcode = true;               
-                    break;
-              //  }
-            }
-        }
-
-        // If we reach here, no control chars found = G-code command
-        // Process the buffer as G-code (null-terminated string)
-        if(control_char_found){              
-            // Fall through to GCODE_STATE_CONTROL_CHAR
-        
-        } else if(has_line_terminator && has_gcode){
-            // Process G-code line
-            cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
-        
-            // ✅ FLOW CONTROL: Check motion buffer and SEND OK immediately if space
-            if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-               UART_SendOK();  // ✅ Send immediately
+                
             } else {
-                // ✅ Buffer nearly full - withhold "OK"
-                okPending = true;
+                // Not a control char - process as regular G-code
+
+                //must not continue until line terminator is found
+                if(!has_line_terminator){
+                    break;
+                }
+
+                // ✅ Check for actual G-code ONCE before deciding what to do
+                bool has_gcode = false;
+                for(uint32_t i = 0; i < nBytesRead; i++) {
+                    if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' &&
+                        rxBuffer[i] != ' ' && rxBuffer[i] != '\t' && rxBuffer[i] != 0) {
+                            // Found valid G-code character*/
+                            has_gcode = true;               
+                            break;
+                      //  }
+                    }
+                }
+
+                if(has_gcode){
+                    // Process G-code line
+                    cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
+                
+                    // ✅ FLOW CONTROL: Check motion buffer and SEND OK immediately if space
+                    if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
+                       UART_SendOK();  // ✅ Send immediately
+                    } else {
+                        // ✅ Buffer nearly full - withhold "OK"
+                        okPending = true;
+                    }
+                
+                    // Clear buffer and reset for next line
+                    nBytesRead = 0; 
+                    memset(rxBuffer, 0, sizeof(rxBuffer));
+                    gcodeData.state = GCODE_STATE_IDLE;
+                    has_line_terminator = false;
+                    break;
+                    
+                } else {
+                    // ✅ Line terminator but no G-code (empty line or whitespace only)
+                    // Clear buffer, don't send "OK", stay in IDLE
+                    nBytesRead = 0; 
+                    memset(rxBuffer, 0, sizeof(rxBuffer));
+                    gcodeData.state = GCODE_STATE_IDLE;
+                    has_line_terminator = false;
+                    break;
+                }
             }
-            
-            // Clear buffer and reset for next line
-            nBytesRead = 0; 
-            memset(rxBuffer, 0, sizeof(rxBuffer));
-            gcodeData.state = GCODE_STATE_IDLE;
-            has_line_terminator = false;
-            break;
-            
-        } else if(has_line_terminator && !has_gcode){
-            // ✅ Line terminator but no G-code (empty line or whitespace only)
-            // Clear buffer, don't send "OK", stay in IDLE
-            nBytesRead = 0; 
-            memset(rxBuffer, 0, sizeof(rxBuffer));
-            gcodeData.state = GCODE_STATE_IDLE;
-            has_line_terminator = false;
-            break;
             
         } else {
-            // ✅ Incomplete line - wait for more data
-            // Don't clear buffer, don't send "OK", just exit and accumulate more bytes
+            // ✅ CRITICAL: Check if we have a pending OK from previous call
+            // Send it now if motion buffer has space
+            if (okPending && 
+                cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
+                UART_SendOK();
+                okPending = false;
+            }
+            
+            // If no bytes break out of switch
+            gcodeData.state = GCODE_STATE_IDLE;
             break;
         }
-
-    } else {
-            // ✅ CRITICAL: Check if we have a pending OK from previous call
-    // Send it now if motion buffer has space
-    if (okPending && 
-        cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-        UART_SendOK();
-        okPending = false;
-    }
-    
-        // If no bytes break out of switch
-        gcodeData.state = GCODE_STATE_IDLE;
-        break;
-    }
-    // ✅ Fall through to GCODE_STATE_CONTROL_CHAR only when control_char_found = true
+        break;  // End of GCODE_STATE_IDLE
     
 case GCODE_STATE_CONTROL_CHAR:
+    {
     /* Handle specific control characters per GRBL protocol */
+    bool buffer_already_cleared = false;  // Flag to skip shared buffer shifting
     switch(rxBuffer[0]) {
         case '?':  // Status query - NO "OK" response
         {
@@ -392,13 +402,31 @@ case GCODE_STATE_CONTROL_CHAR:
                                 state, mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z,
                                 feedrate_mm_min, (unsigned)spindle_rpm);
             UART3_Write((uint8_t*)txBuffer, nBytesRead);
+            
+            // ✅ CRITICAL: Clear buffer after status query (real-time command)
+            nBytesRead = 0;
+            memset(rxBuffer, 0, sizeof(rxBuffer));
+            gcodeData.state = GCODE_STATE_IDLE;
+            buffer_already_cleared = true;
             break;
         }
-        case '~':  // Cycle start/resume
-            UART_SendOK();
+        case '~':  // Cycle start/resume - NO response (real-time command)
+            // TODO: Implement cycle start functionality
+            
+            // ✅ Clear buffer after real-time command
+            nBytesRead = 0;
+            memset(rxBuffer, 0, sizeof(rxBuffer));
+            gcodeData.state = GCODE_STATE_IDLE;
+            buffer_already_cleared = true;
             break;
-        case '!':  // Feed hold
-            UART_SendOK();
+        case '!':  // Feed hold - NO response (real-time command)
+            // TODO: Implement feed hold functionality
+            
+            // ✅ Clear buffer after real-time command
+            nBytesRead = 0;
+            memset(rxBuffer, 0, sizeof(rxBuffer));
+            gcodeData.state = GCODE_STATE_IDLE;
+            buffer_already_cleared = true;
             break;
         case 0x18: // Soft reset (Ctrl+X)
         
@@ -471,8 +499,9 @@ case GCODE_STATE_CONTROL_CHAR:
                 uint32_t bytes_available = UART3_ReadCountGet();
                 
                 if(bytes_available == 0){
-                    // No more data available right now, exit and wait for next GCODE_Tasks() call
-                    return;  // Stay in CONTROL_CHAR state, buffer preserved
+                    // No more data available right now - exit and wait for next call
+                    // BUT keep state as CONTROL_CHAR so we resume here
+                    return;
                 }
                 
                 // Read more bytes into rxBuffer
@@ -496,13 +525,58 @@ case GCODE_STATE_CONTROL_CHAR:
             }
             
             // Now we have complete command, parse it
+            // ✅ CRITICAL: Find the terminator position and only process up to it
+            // UGS sends commands rapidly - multiple commands may be in buffer
+            cmd_end = 0;  // Reset for this command
+            for(uint32_t i = 0; i < nBytesRead; i++){
+                if(rxBuffer[i] == '\r' || rxBuffer[i] == '\n'){
+                    rxBuffer[i] = '\0';  // Null-terminate at first CR/LF
+                    cmd_end = i;
+                    break;
+                }
+            }
+            
             if(strncmp((char*)rxBuffer, "$$", 2) == 0){
                 SETTINGS_PrintAll(SETTINGS_GetCurrent());
+                // Note: SETTINGS_PrintAll() sends "ok" internally
                 
             } else if(strncmp((char*)rxBuffer, "$I", 2) == 0){
                 SETTINGS_PrintBuildInfo();
+                // Note: SETTINGS_PrintBuildInfo() sends "ok" internally
                 
-            } else if(nBytesRead >= 6 && strncmp((char*)rxBuffer, "$RST=$", 6) == 0){
+            } else if(strncmp((char*)rxBuffer, "$G", 2) == 0){
+                // ✅ GRBL $G command - print parser state (modal settings)
+                extern APP_DATA appData;
+                char state_buffer[128];
+                int len = 0;
+                
+                // Format: [GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]
+                len += sprintf(&state_buffer[len], "[GC:");
+                len += sprintf(&state_buffer[len], "G0 ");  // Motion mode (G0=rapid, G1=linear)
+                len += sprintf(&state_buffer[len], "G54 "); // Work coordinate system
+                len += sprintf(&state_buffer[len], "G%d ", appData.modalPlane == 0 ? 17 : (appData.modalPlane == 1 ? 18 : 19)); // Plane
+                len += sprintf(&state_buffer[len], "G21 "); // Units (mm)
+                len += sprintf(&state_buffer[len], "G%d ", appData.absoluteMode ? 90 : 91); // Distance mode
+                len += sprintf(&state_buffer[len], "G94 "); // Feed rate mode
+                len += sprintf(&state_buffer[len], "M5 ");  // Spindle off
+                len += sprintf(&state_buffer[len], "M9 ");  // Coolant off
+                len += sprintf(&state_buffer[len], "T%u ", appData.modalToolNumber); // Tool
+                len += sprintf(&state_buffer[len], "F%.1f ", appData.modalFeedrate); // Feedrate
+                len += sprintf(&state_buffer[len], "S%u", appData.modalSpindleRPM); // Spindle RPM
+                len += sprintf(&state_buffer[len], "]\r\n");
+                
+                // ✅ Ensure complete transmission
+                size_t total_sent = 0;
+                while(total_sent < len) {
+                    size_t sent = UART3_Write((uint8_t*)&state_buffer[total_sent], len - total_sent);
+                    total_sent += sent;
+                    if(sent == 0 && total_sent < len) {
+                        for(volatile uint32_t i = 0; i < 1000; i++);
+                    }
+                }
+                UART_SendOK();  // ✅ GRBL system.c returns STATUS_OK for $G command
+                
+            } else if(strncmp((char*)rxBuffer, "$RST=$", 6) == 0){
                 // ✅ Restore defaults to RAM only
                 SETTINGS_RestoreDefaults(SETTINGS_GetCurrent());
                 UART_SendOK();
@@ -557,10 +631,42 @@ case GCODE_STATE_CONTROL_CHAR:
             break;
     }
 
-    // Clear buffer and return to idle
-    nBytesRead = 0;
-    memset(rxBuffer, 0, sizeof(rxBuffer));
-    gcodeData.state = GCODE_STATE_IDLE;
+    // ✅ CRITICAL: Shift remaining bytes after the processed command
+    // UGS sends commands rapidly - next command may already be in buffer
+    // Skip this if buffer was already cleared by real-time command handler
+    if(!buffer_already_cleared) {
+        uint32_t bytes_after_cmd = nBytesRead - (cmd_end + 1);  // Skip past terminator
+        if(bytes_after_cmd > 0) {
+        // Move remaining bytes to start of buffer
+        memmove(rxBuffer, &rxBuffer[cmd_end + 1], bytes_after_cmd);
+        nBytesRead = bytes_after_cmd;
+        
+        // ✅ Check if remaining bytes are only whitespace/terminators
+        bool only_whitespace = true;
+        for(uint32_t i = 0; i < nBytesRead; i++) {
+            if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' && 
+               rxBuffer[i] != ' ' && rxBuffer[i] != '\t' && rxBuffer[i] != 0) {
+                only_whitespace = false;
+                break;
+            }
+        }
+        
+        if(only_whitespace) {
+            // Only whitespace left - clear buffer completely
+            nBytesRead = 0;
+            memset(rxBuffer, 0, sizeof(rxBuffer));
+        }
+        
+        // ✅ CRITICAL: Return to IDLE so next iteration re-evaluates command type
+        gcodeData.state = GCODE_STATE_IDLE;
+    } else {
+        // No remaining data - clear buffer and return to idle
+        nBytesRead = 0;
+        memset(rxBuffer, 0, sizeof(rxBuffer));
+        gcodeData.state = GCODE_STATE_IDLE;
+    }
+    }  // End of buffer_already_cleared check
+    }  // End of GCODE_STATE_CONTROL_CHAR scope
     break;
 
     case GCODE_STATE_ERROR:

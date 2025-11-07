@@ -204,20 +204,45 @@ void MOTION_Tasks(APP_DATA* appData) {
     if(appData->currentSegment != NULL) {
         MotionSegment* seg = appData->currentSegment;
         
-        // Simple velocity profiling (can be enhanced with real trapezoid later)
-        uint32_t new_rate = seg->nominal_rate;  // For now, use constant cruise rate
+        // ✅ TRAPEZOIDAL VELOCITY PROFILING
+        uint32_t new_rate;
         
-        // TODO: Implement acceleration/deceleration based on steps_completed
-        // if (seg->steps_completed < seg->accelerate_until) {
-        //     new_rate = calculate_accel_rate(seg);
-        // } else if (seg->steps_completed > seg->decelerate_after) {
-        //     new_rate = calculate_decel_rate(seg);
-        // }
+        if(seg->steps_completed < seg->accelerate_until) {
+            // ✅ ACCELERATION PHASE
+            // Rate decreases (interval gets shorter, speed increases)
+            // new_rate = initial_rate - (steps_completed * rate_delta)
+            new_rate = seg->initial_rate - ((int32_t)seg->steps_completed * abs(seg->rate_delta));
+            
+            // Clamp to nominal rate (don't overshoot)
+            if(new_rate < seg->nominal_rate) {
+                new_rate = seg->nominal_rate;
+            }
+            
+        } else if(seg->steps_completed > seg->decelerate_after) {
+            // ✅ DECELERATION PHASE
+            // Rate increases (interval gets longer, speed decreases)
+            uint32_t decel_steps = seg->steps_completed - seg->decelerate_after;
+            new_rate = seg->nominal_rate + ((int32_t)decel_steps * abs(seg->rate_delta));
+            
+            // Clamp to final rate (don't slow below minimum)
+            if(new_rate > seg->final_rate) {
+                new_rate = seg->final_rate;
+            }
+            
+        } else {
+            // ✅ CRUISE PHASE (constant velocity)
+            new_rate = seg->nominal_rate;
+        }
         
         // Update PR2 if rate changed (non-blocking, single register write)
         if(new_rate != appData->currentStepInterval) {
             STEPPER_SetStepRate(new_rate);
             appData->currentStepInterval = new_rate;
+            
+            DEBUG_PRINT_MOTION("[MOTION] Rate update: %lu (steps=%lu, phase=%s)\r\n", 
+                             new_rate, seg->steps_completed,
+                             (seg->steps_completed < seg->accelerate_until) ? "ACCEL" :
+                             (seg->steps_completed > seg->decelerate_after) ? "DECEL" : "CRUISE");
         }
     }
     

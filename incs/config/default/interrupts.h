@@ -57,6 +57,7 @@
 // *****************************************************************************
 // *****************************************************************************
 void OUTPUT_COMPARE_1_InterruptHandler( void );
+void TIMER_5_InterruptHandler( void );
 void UART3_FAULT_InterruptHandler( void );
 void UART3_RX_InterruptHandler( void );
 void UART3_TX_InterruptHandler( void );

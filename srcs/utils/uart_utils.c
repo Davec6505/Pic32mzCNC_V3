@@ -69,7 +69,7 @@ bool UART_Printf(const char* format, ...) {
 /* ========== GRBL PROTOCOL MESSAGE HELPERS ========== */
 
 bool UART_SendOK(void) {
-    return UART_Write((uint8_t*)"OK\r\n", 4);
+    return UART_Write((uint8_t*)"ok\r\n", 4);  // GRBL spec requires lowercase
 }
 
 bool UART_SendGrblStatus(const char* state, 

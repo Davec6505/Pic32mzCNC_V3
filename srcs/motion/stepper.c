@@ -4,23 +4,26 @@
 #include "motion_utils.h"
 #include "definitions.h"
 #include "../config/default/peripheral/tmr/plib_tmr4.h"  // TMR4 access (16-bit)
+#include "../config/default/peripheral/tmr/plib_tmr5.h"  // TMR5 pulse width timer
 #include "../config/default/peripheral/ocmp/plib_ocmp1.h"  // OC1 master timer
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>  // abs()
 
 // ============================================================================
-// ARCHITECTURE: Single OC1 Master Timer + GPIO Step Pulses (GRBL Pattern)
+// ARCHITECTURE: Single OC1 Master Timer + GPIO Step Pulses + TMR5 Pulse Width
 // ============================================================================
 // - OC1 generates periodic interrupts at step rate (continuous pulse mode)
 // - TMR4 (16-bit) provides time base, PR4 controls step rate
 // - ISR runs Bresenham + sets GPIO pins HIGH for axes needing steps
-// - GPIO pins cleared after pulse width delay (~5µs)
-// - No multi-axis OC coordination - simple and reliable!
+// - TMR5 one-shot clears GPIO pins after pulse width (~3µs)
+// - Priority: OC1=5, TMR5=4 sub=1 (TMR5 slightly lower to avoid nesting)
+// - No blocking delays in ISR - hardware-driven pulse timing!
 // ============================================================================
 
-// Forward declaration of OC1 ISR
+// Forward declarations
 void OCP1_ISR(uintptr_t context);
+void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context);
 
 // ============================================================================
 // Static Data - Motion Control State
@@ -54,9 +57,6 @@ static volatile int32_t delta_y = 0;
 static volatile int32_t delta_z = 0;
 static volatile int32_t delta_a = 0;
 
-// Pulse width configuration (from settings)
-static uint32_t pulse_width_cycles = 1000;  // Default ~5µs @ 200MHz CPU
-
 // Settings cache for ISR performance
 static uint8_t step_pulse_invert_mask = 0;
 static uint8_t direction_invert_mask = 0;
@@ -74,17 +74,14 @@ void STEPPER_Initialize(APP_DATA* appData) {
     direction_invert_mask = settings->step_direction_invert;
     enable_invert = settings->step_enable_invert;
     
-    // Calculate pulse width in CPU cycles for delay loop
-    // settings->step_pulse_time is in microseconds
-    // At 200MHz CPU: 1µs = 200 cycles, but loop overhead ~5 cycles per iteration
-    pulse_width_cycles = (uint32_t)(settings->step_pulse_time * 200.0f / 5.0f);
-    if (pulse_width_cycles < 100) pulse_width_cycles = 100;  // Minimum 2.5µs
-    
     // Update steps_per_mm from settings
     stepper_pos.steps_per_mm_x = settings->steps_per_mm_x;
     stepper_pos.steps_per_mm_y = settings->steps_per_mm_y;
     stepper_pos.steps_per_mm_z = settings->steps_per_mm_z;
     stepper_pos.steps_per_deg_a = settings->steps_per_mm_a;
+    
+    // Register TMR5 callback for step pulse width (clears GPIO after 3µs)
+    TMR5_CallbackRegister(TMR5_PulseWidthCallback, (uintptr_t)NULL);
     
     // Register OC1 callback (master timer)
     OCMP1_CallbackRegister(OCP1_ISR, (uintptr_t)NULL);
@@ -309,18 +306,27 @@ void OCP1_ISR(uintptr_t context) {
         }
     }
     
-    // ===== PULSE WIDTH DELAY =====
-    // Manual delay for ~5µs pulse width (adjust pulse_width_cycles as needed)
-    for(volatile uint32_t i = 0; i < pulse_width_cycles; i++);
-    
-    // ===== CLEAR ALL STEP PINS =====
-    LATCCLR = (1<<1) | (1<<2) | (1<<3) | (1<<4);
+    // ===== START TMR5 FOR PULSE WIDTH =====
+    // TMR5 pre-configured to fire after 3µs, will clear GPIO in callback
+    TMR5_Start();
     
     // ===== SIGNAL MAIN LOOP =====
     if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
         app_data_ref->currentSegment->steps_completed++;
         app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;
     }
+}
+
+// ============================================================================
+// TMR5 Callback - Clears Step Pins After 3µs Pulse Width
+// ============================================================================
+
+void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context) {
+    // Stop TMR5 (one-shot mode)
+    TMR5_Stop();
+    
+    // Clear all step pins (end of pulse)
+    LATCCLR = (1<<1) | (1<<2) | (1<<3) | (1<<4);
 }
 
 // End of stepper.c

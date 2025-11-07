@@ -59,14 +59,15 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 
 **Build Usage:**
 ```bash
-# Single subsystem
-make DEBUG_FLAGS="DEBUG_MOTION"
+# Single subsystem (builds to Debug folder with debug symbols)
+make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION"
 
 # Multiple subsystems
-make DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE DEBUG_SEGMENT"
+make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE DEBUG_SEGMENT"
 
-# Release build (no debug, default)
+# Release build (no debug, default - builds to Release folder)
 make
+make BUILD_CONFIG=Release
 ```
 
 **Code Usage:**
@@ -86,6 +87,56 @@ DEBUG_EXEC_SEGMENT(LED1_Set());  // Visual indicator
 ```
 
 **Documentation:** See `docs/DEBUG_SYSTEM_TUTORIAL.md` for complete guide with examples, best practices, and troubleshooting.
+
+### ⚠️ CRITICAL DEBUG WORKFLOW (November 7, 2025)
+**ALWAYS use the compile-time debug system instead of manual UART writes!**
+
+❌ **WRONG - Manual Debug (DO NOT DO THIS):**
+```c
+// BAD: Manual UART writes that clutter code
+char debug_buf[64];
+snprintf(debug_buf, sizeof(debug_buf), "[DEBUG] Value: %d\r\n", value);
+UART3_Write((uint8_t*)debug_buf, strlen(debug_buf));
+```
+
+✅ **CORRECT - Use Debug Macros:**
+```c
+// GOOD: Clean debug macros that compile to nothing in release
+DEBUG_PRINT_GCODE("[GCODE] Value: %d\r\n", value);
+```
+
+**Debugging Protocol Issues (e.g., UGS connection):**
+1. **Add debug macros** to the relevant code section:
+   ```c
+   DEBUG_PRINT_GCODE("[GCODE $] Buffer: nBytesRead=%u\r\n", (unsigned)nBytesRead);
+   DEBUG_EXEC_GCODE({
+       UART_Printf("[GCODE $] Hex dump: ");
+       for(uint32_t i = 0; i < nBytesRead; i++) {
+           UART_Printf("%02X ", rxBuffer[i]);
+       }
+       UART_Printf("\r\n");
+   });
+   ```
+
+2. **Build with debug flag:**
+   ```bash
+   make clean && make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_GCODE"
+   ```
+
+3. **Flash and test** - debug output appears in terminal
+
+4. **Release build** - debug code removed automatically:
+   ```bash
+   make clean && make BUILD_CONFIG=Release
+   # or simply:
+   make clean && make
+   ```
+
+**Why This Matters:**
+- Manual debug code gets forgotten and left in production
+- Debug macros are self-documenting (flag name shows what's being debugged)
+- Zero performance impact in release builds
+- Easy to enable/disable without code changes
 
 ### 🔧 NON-BLOCKING UART UTILITIES (November 6, 2025)
 **Module:** `srcs/utils/uart_utils.c`, `incs/utils/uart_utils.h`
@@ -222,6 +273,74 @@ OK
 5. **Check parse_command_to_event() return value** - Is it returning false for valid G-code?
 
 **Critical Hypothesis:** `parse_command_to_event()` is likely returning **false** for valid G-code commands (G92, G1), preventing events from being created. The `?` status query floods output when debug enabled, suggesting it's being parsed repeatedly without being consumed.
+
+### 🔧 ACTIVE DEBUGGING SESSION - UGS CONNECTION (November 7, 2025)
+**Problem:** UGS connects, sends commands (`?`, `$I`, `$$`), but immediately disconnects. Putty works correctly, confirming firmware responds.
+
+**UGS Connection Sequence Observed:**
+```
+*** Connecting to jserialcomm://COM4:115200
+*** Fetching device status
+>>> ?
+*** Fetching device version
+>>> $I
+<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000|FS:0,0>
+*** Fetching device settings
+>>> $$
+*** Connection closed
+```
+
+**Key Findings:**
+1. ✅ UGS sends `?` (status query) - firmware responds correctly
+2. ❌ UGS sends `$I` (build info) - **NO RESPONSE SEEN**
+3. ❌ UGS sends `$$` (settings) - **CONNECTION CLOSES**
+
+**Root Cause Analysis:**
+- **Putty works** → Firmware CAN respond to `$I` command
+- **UGS fails** → Firmware NOT responding when UGS sends it
+- **Hypothesis:** Byte-by-byte reception or timing difference between UGS and Putty
+
+**GRBL Protocol Requirements (from UGS source code):**
+- `$I` response format: `[VER: 1.1h.20251102:]\r\n[OPT: VHM,35,1024,4]\r\nok\r\n`
+- **CRITICAL:** Space after colons required! `[VER: ]` not `[VER:]`
+- **CRITICAL:** Space after colons required! `[OPT: ]` not `[OPT:]`
+
+**Fixes Applied:**
+1. ✅ Added spaces after colons in `SETTINGS_PrintBuildInfo()` (settings.c line ~427)
+2. ✅ Added DEBUG_GCODE macros to `case '$':` handler in gcode_parser.c
+
+**Debug Macros Added (November 7, 2025):**
+```c
+// In gcode_parser.c case '$': handler
+DEBUG_PRINT_GCODE("[GCODE $] Entered $ handler: nBytesRead=%u\r\n", (unsigned)nBytesRead);
+DEBUG_EXEC_GCODE({
+    UART_Printf("[GCODE $] Buffer hex: ");
+    for(uint32_t i = 0; i < nBytesRead && i < 10; i++) {
+        UART_Printf("%02X ", rxBuffer[i]);
+    }
+    UART_Printf("\r\n");
+});
+DEBUG_PRINT_GCODE("[GCODE $] has_terminator=%d\r\n", has_terminator);
+DEBUG_PRINT_GCODE("[GCODE $] bytes_available=%u\r\n", (unsigned)bytes_available);
+DEBUG_PRINT_GCODE("[GCODE $] Complete command received: '%c%c' (0x%02X 0x%02X)\r\n", ...);
+DEBUG_PRINT_GCODE("[GCODE $] Matched $I command, calling SETTINGS_PrintBuildInfo\r\n");
+```
+
+**Next Steps:**
+1. Build with `make clean && make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_GCODE"`
+2. Flash firmware
+3. Connect with UGS and observe debug output
+4. Check if `$I` command is being received and parsed correctly
+5. Verify spaces in response format match GRBL spec
+
+**Files Modified:**
+- `srcs/settings/settings.c` - Fixed `$I` response format with spaces
+- `srcs/gcode/gcode_parser.c` - Added DEBUG_GCODE macros for $ handler
+- `.github/copilot-instructions.md` - Documented debug workflow (this file)
+
+**Critical Hypothesis:** `parse_command_to_event()` is likely returning **false** for valid G-code commands (G92, G1), preventing events from being created. The `?` status query floods output when debug enabled, suggesting it's being parsed repeatedly without being consumed.
+
+### 🔧 OLD DEBUGGING SESSION - MOTION NOT EXECUTING (November 5-6, 2025)
 
 **Modified Files (November 5-6 debug session):**
 - `srcs/utils/uart_utils.c` - Created non-blocking UART utilities module
