@@ -364,9 +364,17 @@ case GCODE_STATE_CONTROL_CHAR:
             StepperPosition* pos = STEPPER_GetPosition();
             WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
             
+            DEBUG_PRINT_GCODE("[STATUS] Raw steps: X=%ld Y=%ld Z=%ld\r\n", 
+                             (long)pos->x_steps, (long)pos->y_steps, (long)pos->z_steps);
+            DEBUG_PRINT_GCODE("[STATUS] Steps/mm: X=%.2f Y=%.2f Z=%.2f\r\n",
+                             pos->steps_per_mm_x, pos->steps_per_mm_y, pos->steps_per_mm_z);
+            
             float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
             float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
             float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
+            
+            DEBUG_PRINT_GCODE("[STATUS] MPos floats: X=%.3f Y=%.3f Z=%.3f\r\n",
+                             mpos_x, mpos_y, mpos_z);
             
             float wpos_x = mpos_x - wcs->offset.x;
             float wpos_y = mpos_y - wcs->offset.y;

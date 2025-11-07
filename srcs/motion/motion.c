@@ -275,8 +275,13 @@ void MOTION_Tasks(APP_DATA* appData) {
 void MOTION_Arc(APP_DATA* appData) {
     // Only generate if arc is active and motion queue has space
     if(appData->arcGenState != ARC_GEN_ACTIVE || appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+        DEBUG_PRINT_MOTION("[ARC] Blocked: state=%d, queueCount=%d\r\n", 
+                          appData->arcGenState, appData->motionQueueCount);
         return;
     }
+    
+    DEBUG_PRINT_MOTION("[ARC] Generating segment: theta=%.3f, target=%.3f, inc=%.3f\r\n",
+                      appData->arcTheta, appData->arcThetaEnd, appData->arcThetaIncrement);
     
     // Increment angle for next segment
     appData->arcTheta += appData->arcThetaIncrement;
@@ -284,10 +289,14 @@ void MOTION_Arc(APP_DATA* appData) {
     CoordinatePoint next;
     bool is_last_segment = false;
     
-    // Determine if this is the final segment
-    if(appData->arcClockwise) {
+    // Determine if this is the final segment based on direction
+    // CW: theta decreases (negative increment), check if we've passed the end
+    // CCW: theta increases (positive increment), check if we've passed the end
+    if(appData->arcThetaIncrement < 0.0f) {
+        // Clockwise - theta decreasing
         is_last_segment = (appData->arcTheta <= appData->arcThetaEnd);
     } else {
+        // Counter-clockwise - theta increasing
         is_last_segment = (appData->arcTheta >= appData->arcThetaEnd);
     }
     
