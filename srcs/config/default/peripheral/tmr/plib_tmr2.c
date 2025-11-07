@@ -65,19 +65,19 @@ void TMR2_Initialize(void)
     /*
     SIDL = 0
     TCKPS =2
-    T32   = 1
+    T32   = 0
     TCS = 0
     */
-    T2CONSET = 0x28;
+    T2CONSET = 0x20;
 
     /* Clear counter */
     TMR2 = 0x0;
 
     /*Set period */
-    PR2 = 312499999U;
+    PR2 = 25011U;
 
-    /* Enable TMR Interrupt of odd numbered timer in 32-bit mode */
-    IEC0SET = _IEC0_T3IE_MASK;
+    /* Enable TMR Interrupt */
+    IEC0SET = _IEC0_T2IE_MASK;
 
 }
 
@@ -93,19 +93,19 @@ void TMR2_Stop (void)
     T2CONCLR = _T2CON_ON_MASK;
 }
 
-void TMR2_PeriodSet(uint32_t period)
+void TMR2_PeriodSet(uint16_t period)
 {
     PR2  = period;
 }
 
-uint32_t TMR2_PeriodGet(void)
+uint16_t TMR2_PeriodGet(void)
 {
-    return PR2;
+    return (uint16_t)PR2;
 }
 
-uint32_t TMR2_CounterGet(void)
+uint16_t TMR2_CounterGet(void)
 {
-    return (TMR2);
+    return (uint16_t)(TMR2);
 }
 
 
@@ -115,11 +115,11 @@ uint32_t TMR2_FrequencyGet(void)
 }
 
 
-void __attribute__((used)) TIMER_3_InterruptHandler (void)
+void __attribute__((used)) TIMER_2_InterruptHandler (void)
 {
     uint32_t status  = 0U;
-    status = IFS0bits.T3IF;
-    IFS0CLR = _IFS0_T3IF_MASK;
+    status = IFS0bits.T2IF;
+    IFS0CLR = _IFS0_T2IF_MASK;
 
     if((tmr2Obj.callback_fn != NULL))
     {
@@ -131,13 +131,13 @@ void __attribute__((used)) TIMER_3_InterruptHandler (void)
 
 void TMR2_InterruptEnable(void)
 {
-    IEC0SET = _IEC0_T3IE_MASK;
+    IEC0SET = _IEC0_T2IE_MASK;
 }
 
 
 void TMR2_InterruptDisable(void)
 {
-    IEC0CLR = _IEC0_T3IE_MASK;
+    IEC0CLR = _IEC0_T2IE_MASK;
 }
 
 

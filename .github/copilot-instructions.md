@@ -3,7 +3,7 @@
 ## Project Overview
 This is a CNC motion control system for PIC32MZ microcontrollers using hardware timers and Bresenham interpolation for precise multi-axis stepper motor control.
 
-## 🚀 Current Implementation Status (November 6, 2025)
+## 🚀 Current Implementation Status (November 7, 2025)
 ### ✅ COMPLETED FEATURES
 - **Professional event-driven G-code system** with clean architecture
 - **Event queue implementation** respecting APP_DATA abstraction layer
@@ -21,7 +21,6 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - **Persistent GRBL settings** with NVM flash storage (29 parameters including arc)
 - **Delayed flash initialization** - read after peripherals ready (APP_LOAD_SETTINGS state)
 - **Unified data structures** - no circular dependencies, clean module separation
-- **LED blink rate stable** - no slowdown with complex commands
 - **Hardware FPU enabled** - Single-precision floating point for motion planning
 - **Trapezoidal velocity profiling IMPLEMENTED** - KINEMATICS_LinearMove with full physics
 - **Emergency stop system complete** - APP_ALARM state with hard/soft limit checking
@@ -34,9 +33,59 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - **Motion phase system operational** - VELOCITY/BRESENHAM/SCHEDULE/COMPLETE phases
 - **Project compiles successfully** with XC32 compiler
 - **UART3 fully functional** - TX and RX working perfectly, status queries respond
-- **Non-blocking UART utilities module** - uart_utils.c/h with callback-based output (November 6, 2025)
-- **LED2_Toggle() debug added** - Visual motion confirmation in STEPPER_ScheduleStep() (November 6, 2025)
-- **Clean build system** - make all defaults to Release, make clean removes everything (November 6, 2025)
+- **Non-blocking UART utilities module** - uart_utils.c/h with callback-based output
+- **Professional compile-time debug system** - Zero runtime overhead, multiple subsystems (November 7, 2025)
+- **Clean build system** - make/make all defaults to Release, make build for incremental (November 7, 2025)
+
+### 🔧 COMPILE-TIME DEBUG SYSTEM (November 7, 2025)
+**Module:** `incs/common.h`, `srcs/Makefile`, `docs/DEBUG_SYSTEM_TUTORIAL.md`
+
+**Purpose:** Professional debug infrastructure with ZERO runtime overhead. Debug code is completely removed by compiler in release builds via preprocessor macros.
+
+**Key Benefits:**
+- ✅ **Zero runtime overhead** - Debug code eliminated in release builds
+- ✅ **Multiple subsystems** - Enable/disable by subsystem (motion, gcode, stepper, etc.)
+- ✅ **Clean syntax** - Looks like regular printf, works everywhere
+- ✅ **No runtime checks** - Pure compile-time conditional compilation
+- ✅ **ISR-safe** - Can use DEBUG_EXEC_XXX for LED toggles in interrupts
+
+**Available Debug Flags:**
+- `DEBUG_MOTION` - Motion planning and segment execution
+- `DEBUG_GCODE` - G-code parsing and event processing
+- `DEBUG_STEPPER` - Low-level stepper ISR and pulse generation
+- `DEBUG_SEGMENT` - Segment loading and queue management
+- `DEBUG_UART` - UART communication
+- `DEBUG_APP` - Application state machine
+
+**Build Usage:**
+```bash
+# Single subsystem
+make DEBUG_FLAGS="DEBUG_MOTION"
+
+# Multiple subsystems
+make DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE DEBUG_SEGMENT"
+
+# Release build (no debug, default)
+make
+```
+
+**Code Usage:**
+```c
+// Include required headers
+#include "common.h"
+#include "utils/uart_utils.h"  // For DEBUG_PRINT_XXX macros
+#include "../config/default/peripheral/gpio/plib_gpio.h"  // For LED toggles
+
+// Debug print (compiles to UART_Printf in debug, nothing in release)
+DEBUG_PRINT_MOTION("[MOTION] Loading segment: steps=%lu\r\n", steps);
+
+// Debug execute (compiles to code in debug, nothing in release)
+DEBUG_EXEC_SEGMENT(LED1_Set());  // Visual indicator
+
+// In release builds, both lines above compile to ((void)0) - zero overhead
+```
+
+**Documentation:** See `docs/DEBUG_SYSTEM_TUTORIAL.md` for complete guide with examples, best practices, and troubleshooting.
 
 ### 🔧 NON-BLOCKING UART UTILITIES (November 6, 2025)
 **Module:** `srcs/utils/uart_utils.c`, `incs/utils/uart_utils.h`
@@ -1043,26 +1092,25 @@ G2 X10 Y0 I5 J0   ; CW arc from (0,0) to (10,0), center at (5,0), radius=5mm
 ### Current State
 - ✅ **Build works** - `make all` defaults to Release, project compiles successfully
 - ✅ **Clean works** - `make clean` removes all build artifacts
-- ⚠️ **Makefile is overcomplicated** - needs review and simplification
+- ✅ **Directory structure finalized** - Separate Debug/Release folders for bins, objs, libs, other
 
-### Known Issues
-- Makefile has become too complex with multiple layers of directory handling
-- `make clean` initially stalls (PowerShell scanning large directory trees)
-- Directory creation logic is convoluted
-- OBJ_DIR structure unclear (Debug/Release vs flat structure debate)
+### Directory Structure (Final)
+```
+bins/Debug/     - Debug executables (.hex files)
+bins/Release/   - Release executables (.hex files)
+objs/Debug/     - Debug object files (.o)
+objs/Release/   - Release object files (.o)
+libs/Debug/     - Debug libraries (.a)
+libs/Release/   - Release libraries (.a)
+other/Debug/    - Debug map files and XML
+other/Release/  - Release map files and XML
+```
 
-### For Tonight's Review
-The Makefile needs to be simplified with clear requirements:
-1. **Simple clean** - fast removal of all build artifacts
-2. **Simple build** - `make all` defaults to Release
-3. **Debug build** - `make BUILD_CONFIG=Debug` for debug builds
-4. **Object files** - decide on final directory structure (flat vs nested)
-5. **No PowerShell stalls** - clean should be instant, not scan entire trees
+### Build Commands
+```bash
+make all                    # Build Release (default)
+make BUILD_CONFIG=Debug     # Build Debug
+make clean                  # Clean current BUILD_CONFIG artifacts
+```
 
-**Original goal (not achieved):**
-- Keep bins/Debug and bins/Release structure ✅ (works)
-- Remove Debug/Release from objs/ (currently unclear if this works)
-- Fast clean operation ❌ (currently stalls)
-
-### Recommendation for Tonight
-Start fresh from a known-good Makefile state and make ONE change at a time, testing after each change.
+**No further Makefile changes planned** - current structure works well and follows standard practices.

@@ -4,15 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "common.h"
-#include "data_structures.h"  // ✅ APP_DATA defined here
-#include "plib_ocmp5.h"   //X Axis pulse
-#include "plib_ocmp2.h"   //Y Axis pulse
-#include "plib_ocmp3.h"   //Z Axis pulse
-#include "plib_ocmp4.h"   //A Axis pulse
-
-
-
-
+#include "data_structures.h"  // APP_DATA, MotionSegment defined here
 
 typedef struct {
     uint32_t x_steps, y_steps, z_steps, a_steps;
@@ -20,13 +12,15 @@ typedef struct {
     float steps_per_deg_a;
 } StepperPosition;
 
-void STEPPER_Initialize(APP_DATA* appData);                // ✅ Initialize with APP_DATA reference
-void STEPPER_SetStepInterval(uint32_t interval);
-void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset);  // Direct enum!
-void STEPPER_DisableAxis(E_AXIS axis);                    // Direct enum!
-void STEPPER_DisableAll(void);                            // Disable all axes (emergency stop)
+// ============================================================================
+// Public API
+// ============================================================================
+
+void STEPPER_Initialize(APP_DATA* appData);
+void STEPPER_LoadSegment(MotionSegment* segment);         // Load new segment for execution
+void STEPPER_SetStepRate(uint32_t rate_ticks);            // Update PR2 for velocity profiling
 void STEPPER_SetDirection(E_AXIS axis, bool forward);     // Set direction for axis
-void STEPPER_CheckTimerRollover(APP_DATA* appData);       // Monitor TMR2 for rollover
-StepperPosition* STEPPER_GetPosition(void);
+void STEPPER_DisableAll(void);                            // Emergency stop
+StepperPosition* STEPPER_GetPosition(void);               // Get current position
 
 #endif /* STEPPER_H */

@@ -29,7 +29,9 @@ void UART_Initialize(void) {
     // Register write callback
     UART3_WriteCallbackRegister(usartWriteEventHandler, (uintptr_t)NULL);
     
-    // Enable write notifications (CRITICAL: callback won't fire without this!)
+    // Set a low write threshold and enable notifications so callback fires on TX drain
+    // Threshold of 1 ensures we'll be notified as soon as there is any free space
+    UART3_WriteThresholdSet(1);
     UART3_WriteNotificationEnable(true, true);
     
     uart3TxReady = true;  // Initially ready
@@ -38,24 +40,17 @@ void UART_Initialize(void) {
 /* ========== NON-BLOCKING OUTPUT FUNCTIONS ========== */
 
 bool UART_Write(const uint8_t* msg, size_t len) {
-    if (!uart3TxReady || msg == NULL || len == 0) {
-        return false;  // TX busy or invalid parameters
+    if (msg == NULL || len == 0) {
+        return false;  // Invalid parameters
     }
-    
-    uart3TxReady = false;  // Mark as busy
+    // Always attempt a non-blocking write; PLIB returns 0 if no space
     size_t written = UART3_Write((uint8_t*)msg, len);
-    
-    if (written == 0) {
-        uart3TxReady = true;  // Failed to send, restore ready flag
-        return false;
-    }
-    
-    return true;  // Callback will set uart3TxReady = true when complete
+    return (written > 0);
 }
 
 bool UART_Printf(const char* format, ...) {
-    if (!uart3TxReady || format == NULL) {
-        return false;  // TX busy or invalid format
+    if (format == NULL) {
+        return false;  // Invalid format
     }
     
     static char buffer[256];  // Static to avoid stack overflow
@@ -81,7 +76,7 @@ bool UART_SendGrblStatus(const char* state,
                          float mpos_x, float mpos_y, float mpos_z,
                          float wpos_x, float wpos_y, float wpos_z,
                          float feedrate, uint32_t spindle_rpm) {
-    if (!uart3TxReady || state == NULL) {
+    if (state == NULL) {
         return false;
     }
     

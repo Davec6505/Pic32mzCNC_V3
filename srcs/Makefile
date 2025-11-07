@@ -209,7 +209,32 @@ ifneq ($(filter-out build_dir clean clean_all rem_dir mk_dir debug debug_path,$(
   endif
 endif
 
-# Add DEBUG_MOTION_BUFFER if enabled (either from root Makefile or Debug build)
+# ===== DEBUG FLAGS SYSTEM =====
+# Elegant compile-time debug control with zero runtime overhead
+# See incs/common.h for complete documentation
+#
+# Usage from root Makefile:
+#   make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"
+#
+# Available flags (enable multiple simultaneously):
+#   DEBUG_MOTION   - Motion planning and segment execution
+#   DEBUG_GCODE    - G-code parsing and event processing
+#   DEBUG_STEPPER  - Low-level stepper ISR and pulse generation
+#   DEBUG_SEGMENT  - Segment loading and queue management
+#   DEBUG_UART     - UART communication
+#   DEBUG_APP      - Application state machine
+#
+# Debug flags are passed as preprocessor defines (-DDEBUG_MOTION, etc.)
+# Compiler removes all debug code in release builds via optimization
+
+ifdef DEBUG_FLAGS
+    # Convert space-separated flags to compiler defines
+    DEBUG_DEFINES := $(foreach flag,$(DEBUG_FLAGS),-D$(flag))
+    CONFIG_DEFINES += $(DEBUG_DEFINES)
+    $(info *** DEBUG FLAGS: $(DEBUG_FLAGS) ***)
+endif
+
+# Legacy debug support (preserved for backward compatibility)
 ifeq ($(DEBUG_MOTION_BUFFER),1)
     CONFIG_DEFINES += -DDEBUG_MOTION_BUFFER
     $(info *** DEBUG_MOTION_BUFFER enabled ***)
@@ -274,9 +299,13 @@ $(BIN_DIR)/$(MODULE): $(OBJS)
 ifeq ($(USE_SHARED_LIB),1)
 	@echo "Linking with pre-built shared library: libCS23shared.a"
 	$(DIRECT_LINK) -o $@ $^ $(LINK_LIBS)
+	@echo "Linking complete."
 else
 	@echo "Linking object files to create the final executable"
+	@$(call MKDIR,$(dir $@))
+	@$(call MKDIR,$(OUT_DIR))
 	$(DIRECT_LINK) -o $@ $^
+	@echo "Linking complete."
 endif
 	@echo "Build complete. Output is in $(BIN_DIR)"
 

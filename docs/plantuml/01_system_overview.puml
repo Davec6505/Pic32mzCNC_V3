@@ -161,4 +161,57 @@ OC1 -> Planner : All X steps complete
 Planner -> Planner : Check all axes complete
 Planner -> Planner : Load next segment
 
+== Compile-Time Debug System (November 2025) ==
+participant "Makefile" as MAKE
+participant "Preprocessor" as PREPROC
+participant "Compiler" as COMPILER
+participant "Source Code" as SOURCE
+
+MAKE -> MAKE : User runs: make DEBUG_FLAGS="DEBUG_MOTION"
+MAKE -> PREPROC : Pass -DDEBUG_MOTION to compiler
+SOURCE -> SOURCE : Code contains:\nDEBUG_PRINT_MOTION("[MOTION] Value: %d", x);
+PREPROC -> PREPROC : Expand macro based on flags
+alt DEBUG_MOTION defined
+    PREPROC -> PREPROC : DEBUG_PRINT_MOTION → UART_Printf(...)
+    PREPROC -> COMPILER : Pass expanded code
+    COMPILER -> COMPILER : Compile UART_Printf call
+    note right of COMPILER
+      Debug build: Full debug output
+      ~150 bytes per debug statement
+    end note
+else DEBUG_MOTION not defined (Release)
+    PREPROC -> PREPROC : DEBUG_PRINT_MOTION → ((void)0)
+    PREPROC -> COMPILER : Pass no-op expression
+    COMPILER -> COMPILER : Optimize away ((void)0)
+    note right of COMPILER
+      Release build: ZERO overhead
+      Debug code completely removed
+      Binary size unchanged
+    end note
+end
+
+note over MAKE, COMPILER
+  ✅ Zero runtime overhead in release
+  ✅ No if() checks, no runtime cost
+  ✅ Pure compile-time elimination
+  ✅ Professional embedded pattern
+end note
+
+== Build System Flow (November 2025) ==
+participant "Developer" as DEV
+participant "make" as MAKE
+participant "Makefile" as MF
+
+DEV -> MAKE : make (no arguments)
+MAKE -> MF : .DEFAULT_GOAL = all
+MF -> MF : BUILD_CONFIG = Release (default)
+MF -> MF : Execute: make clean
+MF -> MF : Execute: make build
+note right of MF
+  Default: Full rebuild Release
+  Fast: make build (incremental)
+  Debug: make BUILD_CONFIG=Debug
+  Trace: make DEBUG_FLAGS="..."
+end note
+
 @enduml

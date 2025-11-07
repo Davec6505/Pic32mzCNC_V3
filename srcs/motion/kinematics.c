@@ -7,8 +7,8 @@
 #include <math.h>
 
 // Timer configuration for step interval calculations
-#define TIMER_TICKS_PER_SECOND 12500000UL  // 12.5MHz timer frequency
-#define TIMER_TICKS_PER_MICROSECOND 12.5f  // 12.5 ticks per microsecond
+// Timer frequency now queried dynamically (TMR4 in 16-bit mode)
+#define TIMER_TICKS_PER_SECOND_DYNAMIC() (TMR4_FrequencyGet())
 
 // Single instance of work coordinates managed by kinematics (physics module)
 static WorkCoordinateSystem work_coordinates;
@@ -107,6 +107,12 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     
     // Convert feedrate from mm/min to mm/sec
     float feedrate_mm_sec = feedrate / 60.0f;
+    // Guard: if no feed specified (0 or negative), fall back to a safe default
+    // This prevents divide-by-zero when computing nominal_rate and ensures motion proceeds after reset.
+    if (feedrate_mm_sec <= 0.0f) {
+        // Use a conservative default of 600 mm/min (10 mm/sec)
+        feedrate_mm_sec = 600.0f / 60.0f;
+    }
     
     // Get max_rate and acceleration for limiting axis (reuse existing settings)
     float max_rate_mm_min = 0.0f;
@@ -141,8 +147,8 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         feedrate_mm_sec = max_rate_mm_sec;
     }
     
-    // Timer frequency (reuse constant - no duplication)
-    const float TIMER_FREQ = 12500000.0f;  // 12.5 MHz from copilot-instructions.md
+    // Timer frequency (TMR4 in 16-bit mode)
+    const float TIMER_FREQ = (float)TMR4_FrequencyGet();
     
     // Get steps_per_mm for dominant axis (reuse existing variable)
     float steps_per_mm_dominant = stepper->steps_per_mm_x;
@@ -157,6 +163,10 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // Calculate nominal step interval (cruise speed)
     // steps_per_sec = feedrate_mm_sec * steps_per_mm
     float steps_per_sec = feedrate_mm_sec * steps_per_mm_dominant;
+    if (steps_per_sec < 1.0f) {
+        // Ensure at least 1 step/sec to avoid INF/NaN conversions
+        steps_per_sec = 1.0f;
+    }
     segment_buffer->nominal_rate = (uint32_t)(TIMER_FREQ / steps_per_sec);
     
     // Calculate acceleration profile (GRBL-style trapezoidal)
@@ -180,6 +190,15 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     float min_steps_per_sec = 500.0f;  // Configurable minimum
     segment_buffer->initial_rate = (uint32_t)(TIMER_FREQ / min_steps_per_sec);
     segment_buffer->final_rate = segment_buffer->initial_rate;
+
+    // Jerk smoothing: if trapezoidal profiling is effectively disabled (we currently
+    // run constant velocity in motion.c), clamp the initial rate to nominal so the
+    // first step does not arrive much earlier than subsequent steps.
+    if (segment_buffer->initial_rate < segment_buffer->nominal_rate) {
+        // initial_rate is a shorter interval (faster). For uniform timing we use nominal.
+        segment_buffer->initial_rate = segment_buffer->nominal_rate;
+        segment_buffer->final_rate   = segment_buffer->nominal_rate;
+    }
     
     // Rate delta per step (for integer ISR math)
     if(accel_steps > 0) {

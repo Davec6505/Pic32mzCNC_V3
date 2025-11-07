@@ -5,7 +5,7 @@
     Microchip Technology Inc.
 
   File Name:
-    plib_tmr2.h
+    plib_tmr4.h
 
   Summary:
     Data Type definition of the Timer Peripheral Interface Plib.
@@ -41,8 +41,8 @@
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
 
-#ifndef PLIB_TMR2_H
-#define PLIB_TMR2_H
+#ifndef PLIB_TMR4_H
+#define PLIB_TMR4_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -72,25 +72,22 @@
 
 
 // *****************************************************************************
-void TMR2_Initialize(void);
+void TMR4_Initialize(void);
 
-void TMR2_Start(void);
+void TMR4_Start(void);
 
-void TMR2_Stop(void);
+void TMR4_Stop(void);
 
-void TMR2_PeriodSet(uint16_t period);
+void TMR4_PeriodSet(uint16_t period);
 
-uint16_t TMR2_PeriodGet(void);
+uint16_t TMR4_PeriodGet(void);
 
-uint16_t TMR2_CounterGet(void);
+uint16_t TMR4_CounterGet(void);
 
-uint32_t TMR2_FrequencyGet(void);
+uint32_t TMR4_FrequencyGet(void);
 
-void TMR2_InterruptEnable(void);
 
-void TMR2_InterruptDisable(void);
-
-void TMR2_CallbackRegister( TMR_CALLBACK callback_fn, uintptr_t context );
+bool TMR4_PeriodHasExpired(void);
 
 
 // DOM-IGNORE-BEGIN
@@ -100,4 +97,4 @@ void TMR2_CallbackRegister( TMR_CALLBACK callback_fn, uintptr_t context );
 #endif
 // DOM-IGNORE-END
 
-#endif /* PLIB_TMR2_H */
+#endif /* PLIB_TMR4_H */

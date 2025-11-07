@@ -203,24 +203,49 @@
 #define Z_Min_PIN                  GPIO_PIN_RD13
 
 /*** Macros for StepX pin ***/
+#define StepX_Set()               (LATDSET = (1U<<4))
+#define StepX_Clear()             (LATDCLR = (1U<<4))
+#define StepX_Toggle()            (LATDINV= (1U<<4))
+#define StepX_OutputEnable()      (TRISDCLR = (1U<<4))
+#define StepX_InputEnable()       (TRISDSET = (1U<<4))
 #define StepX_Get()               ((PORTD >> 4) & 0x1U)
 #define StepX_GetLatch()          ((LATD >> 4) & 0x1U)
 #define StepX_PIN                  GPIO_PIN_RD4
 
+/*** Macros for master_control pin ***/
+#define master_control_Get()               ((PORTD >> 5) & 0x1U)
+#define master_control_GetLatch()          ((LATD >> 5) & 0x1U)
+#define master_control_PIN                  GPIO_PIN_RD5
+
 /*** Macros for StepY pin ***/
-#define StepY_Get()               ((PORTD >> 5) & 0x1U)
-#define StepY_GetLatch()          ((LATD >> 5) & 0x1U)
-#define StepY_PIN                  GPIO_PIN_RD5
+#define StepY_Set()               (LATFSET = (1U<<0))
+#define StepY_Clear()             (LATFCLR = (1U<<0))
+#define StepY_Toggle()            (LATFINV= (1U<<0))
+#define StepY_OutputEnable()      (TRISFCLR = (1U<<0))
+#define StepY_InputEnable()       (TRISFSET = (1U<<0))
+#define StepY_Get()               ((PORTF >> 0) & 0x1U)
+#define StepY_GetLatch()          ((LATF >> 0) & 0x1U)
+#define StepY_PIN                  GPIO_PIN_RF0
 
 /*** Macros for StepZ pin ***/
-#define StepZ_Get()               ((PORTF >> 0) & 0x1U)
-#define StepZ_GetLatch()          ((LATF >> 0) & 0x1U)
-#define StepZ_PIN                  GPIO_PIN_RF0
+#define StepZ_Set()               (LATFSET = (1U<<1))
+#define StepZ_Clear()             (LATFCLR = (1U<<1))
+#define StepZ_Toggle()            (LATFINV= (1U<<1))
+#define StepZ_OutputEnable()      (TRISFCLR = (1U<<1))
+#define StepZ_InputEnable()       (TRISFSET = (1U<<1))
+#define StepZ_Get()               ((PORTF >> 1) & 0x1U)
+#define StepZ_GetLatch()          ((LATF >> 1) & 0x1U)
+#define StepZ_PIN                  GPIO_PIN_RF1
 
 /*** Macros for StepA pin ***/
-#define StepA_Get()               ((PORTF >> 1) & 0x1U)
-#define StepA_GetLatch()          ((LATF >> 1) & 0x1U)
-#define StepA_PIN                  GPIO_PIN_RF1
+#define StepA_Set()               (LATGSET = (1U<<1))
+#define StepA_Clear()             (LATGCLR = (1U<<1))
+#define StepA_Toggle()            (LATGINV= (1U<<1))
+#define StepA_OutputEnable()      (TRISGCLR = (1U<<1))
+#define StepA_InputEnable()       (TRISGSET = (1U<<1))
+#define StepA_Get()               ((PORTG >> 1) & 0x1U)
+#define StepA_GetLatch()          ((LATG >> 1) & 0x1U)
+#define StepA_PIN                  GPIO_PIN_RG1
 
 /*** Macros for A_Min pin ***/
 #define A_Min_Set()               (LATASET = (1U<<6))

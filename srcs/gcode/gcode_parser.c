@@ -98,16 +98,16 @@ void GCODE_USART_Initialize( uint32_t RD_thresholds)
     UART_Printf("TX Buffer Size = %d\r\n", (int)UART3_WriteBufferSizeGet());
 #endif
 
-    UART_SendMessage(GRBL_FIRMWARE_VERSION);
-    UART_SendMessage(GRBL_BUILD_DATE);
-    UART_SendMessage(GRBL_BUILD_TIME);    
+    // Use direct UART writes for startup banner to avoid early drops
+    UART3_Write((uint8_t*)GRBL_FIRMWARE_VERSION, (uint32_t)strlen(GRBL_FIRMWARE_VERSION));
+    UART3_Write((uint8_t*)GRBL_BUILD_DATE, (uint32_t)strlen(GRBL_BUILD_DATE));
+    UART3_Write((uint8_t*)GRBL_BUILD_TIME, (uint32_t)strlen(GRBL_BUILD_TIME));    
 
     /* set write threshold to indicate when the TX buffer is full */
     /* enable notifications to get notified when the TX buffer is empty */
-    UART3_WriteThresholdSet(UART3_WriteBufferSizeGet());   
-    
+    //UART3_WriteThresholdSet(UART3_WriteBufferSizeGet());     
     /* Enable notifications, disabled for now */
-    UART3_WriteNotificationEnable(false, false);
+    //UART3_WriteNotificationEnable(false, false);
 
    /* set a threshold value to receive a callback after every 1 characters are received */
     UART3_ReadThresholdSet(RD_thresholds);
@@ -128,29 +128,38 @@ GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t len
 {
     GCODE_CommandQueue* cmdQueue = commandQueue;
     
-    // ✅ DEBUG: Confirm function called
-    #if DEBUG_ == DBG_LEVEL_GCODE
-    char dbg[164];
-    snprintf(dbg, sizeof(dbg), "[GCODE] Extract called, length=%u\r\n", length);
-    UART3_Write((uint8_t*)dbg, strlen(dbg));
-    #endif
-
     // Null-terminate buffer for string processing
     char line_buffer[256];
     uint32_t safe_length = (length < sizeof(line_buffer) - 1) ? length : sizeof(line_buffer) - 1;
     memcpy(line_buffer, buffer, safe_length);
     line_buffer[safe_length] = '\0';
+
+    // Normalize to uppercase to simplify parsing (G/M/X/Y/Z/A/F/S/T/I/J/K/P)
+    for (uint32_t i = 0; i < safe_length; i++) {
+        char c = line_buffer[i];
+        if (c >= 'a' && c <= 'z') {
+            line_buffer[i] = (char)(c - 'a' + 'A');
+        }
+    }
+    
+    // ✅ Strip non-printable control characters (except CR/LF/TAB/SPACE)
+    // This prevents issues with terminal emulators inserting Ctrl+C (0x03) etc.
+    uint32_t write_pos = 0;
+    for (uint32_t read_pos = 0; read_pos < safe_length; read_pos++) {
+        char c = line_buffer[read_pos];
+        // Keep printable chars (32-126) and CR/LF/TAB
+        if ((c >= 32 && c <= 126) || c == '\r' || c == '\n' || c == '\t') {
+            line_buffer[write_pos++] = c;
+        }
+        // Skip control characters (0x00-0x1F except CR/LF/TAB)
+    }
+    line_buffer[write_pos] = '\0';
+    safe_length = write_pos;
     
     // ✅ Tokenize properly: "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
     // Each G/M command gets ALL its parameters
     TokenArray tokens;
     uint32_t token_count = UTILS_TokenizeGcodeLine(line_buffer, &tokens);
-    
-    // ✅ DEBUG: Show tokenization result
-    #if DEBUG_ == DBG_LEVEL_GCODE
-    snprintf(dbg, sizeof(dbg), "[GCODE] Tokens=%u\r\n", token_count);
-    UART3_Write((uint8_t*)dbg, strlen(dbg));
-    #endif
 
     // Add each token to the command queue
     for (uint32_t i = 0; i < token_count; i++) {
@@ -167,14 +176,6 @@ GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t len
                 memcpy(cmdQueue->commands[cmdQueue->head].command, 
                        tokens.tokens[i], token_len);
                 cmdQueue->commands[cmdQueue->head].command[token_len] = '\0';
-                
-                // ✅ DEBUG: Show what we queued
-#if DEBUG_ == DBG_LEVEL_GCODE
-                 char dbg[128];
-            snprintf(dbg, sizeof(dbg), "[GCODE] Queued: %s\r\n", tokens.tokens[i]);
-                UART3_Write((uint8_t*)dbg, strlen(dbg));
-#endif
-
 
                 // Advance queue
                 cmdQueue->head = (cmdQueue->head + 1) % GCODE_MAX_COMMANDS;
@@ -219,36 +220,16 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
     
     // Get next command from queue
     GCODE_Command* current_cmd = &cmdQueue->commands[cmdQueue->tail];
-    
-    // ✅ DEBUG: Show what we're parsing (only for G commands to reduce spam)
-#if DEBUG_ == DBG_LEVEL_GCODE
-    if(current_cmd->command[0] == 'G') {
-        char dbg[128];
-        snprintf(dbg, sizeof(dbg), "[GCODE] GetNextEvent: cmd='%s', count=%u\r\n", 
-                current_cmd->command, cmdQueue->count);
-        UART3_Write((uint8_t*)dbg, strlen(dbg));
-    }
-#endif   
+
     // Parse command into event
     bool event_valid = parse_command_to_event(current_cmd->command, event);
 
-#if DEBUG_ == DBG_LEVEL_GCODE
-    // ✅ DEBUG: Show parse result (only for G commands)
-    if(current_cmd->command[0] == 'G') {
-        char dbg2[128];
-        snprintf(dbg2, sizeof(dbg2), "[GCODE] parse_command_to_event returned: %d\r\n", event_valid);
-        UART3_Write((uint8_t*)dbg2, strlen(dbg2));
-    }
-#endif
-
-    if (event_valid) {
-        // Remove processed command from queue
-        cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
-        cmdQueue->count--;
-        return true;
-    }
+    // ✅ CRITICAL: Always dequeue command, even if parsing failed
+    // Otherwise unparseable commands stay in queue forever causing infinite loops
+    cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
+    cmdQueue->count--;
     
-    return false;
+    return event_valid;
 }
 
 void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
@@ -322,7 +303,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
         
             // ✅ FLOW CONTROL: Check motion buffer and SEND OK immediately if space
             if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-                UART_SendOK();  // ✅ Send immediately
+               UART_SendOK();  // ✅ Send immediately
             } else {
                 // ✅ Buffer nearly full - withhold "OK"
                 okPending = true;
@@ -380,11 +361,36 @@ case GCODE_STATE_CONTROL_CHAR:
             float wpos_x = mpos_x - wcs->offset.x;
             float wpos_y = mpos_y - wcs->offset.y;
             float wpos_z = mpos_z - wcs->offset.z;
+
+            // Derive state and FS from appData runtime info
+            extern APP_DATA appData;
+            // Refined state derivation: Only report Run if an active segment still has steps remaining.
+            const char* state = "Idle";
+            if (appData.currentSegment != NULL) {
+                if (appData.currentSegment->steps_completed < appData.currentSegment->steps_remaining) {
+                    state = "Run";
+                } else {
+                    // Segment pointer not cleared yet but logically complete.
+                    // Opportunistically clear to keep status accurate.
+                    appData.currentSegment = NULL;
+                    appData.motionPhase = MOTION_PHASE_IDLE;
+                }
+            } else if (appData.motionQueueCount > 0) {
+                state = "Run"; // Pending segments waiting to load
+            }
+            float feedrate_mm_min = (state[0] == 'R') ? appData.modalFeedrate : 0.0f;
+            // If we are paradoxically in Run with zero feed (e.g. first move sans F), apply modal fallback.
+            if (state[0] == 'R' && feedrate_mm_min <= 0.0f) {
+                feedrate_mm_min = (appData.modalFeedrate > 0.0f) ? appData.modalFeedrate : 600.0f;
+                appData.modalFeedrate = feedrate_mm_min; // Persist the chosen default
+            }
+            uint32_t spindle_rpm = appData.modalSpindleRPM;
             
-            // Send GRBL status response (NO "OK")
+            // Send GRBL-compatible status response (NO "OK")
             nBytesRead = snprintf((char*)txBuffer, sizeof(txBuffer),
-                                "<Idle|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:0,0>\r\n",
-                                mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z);
+                                "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%u>\r\n",
+                                state, mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z,
+                                feedrate_mm_min, (unsigned)spindle_rpm);
             UART3_Write((uint8_t*)txBuffer, nBytesRead);
             break;
         }
@@ -395,7 +401,55 @@ case GCODE_STATE_CONTROL_CHAR:
             UART_SendOK();
             break;
         case 0x18: // Soft reset (Ctrl+X)
+        
+            // ✅ CRITICAL: Stop all motion immediately
+            STEPPER_DisableAll();  // Disable stepper outputs
+            
+            // ✅ Clear motion queue
+            extern APP_DATA appData;  // Access app data
+            appData.motionQueueCount = 0;
+            appData.motionQueueHead = 0;
+            appData.motionQueueTail = 0;
+            appData.currentSegment = NULL;  // ✅ CRITICAL: Clear segment pointer!
+            
+            // ✅ Clear G-code queue
+            cmdQueue->count = 0;
+            cmdQueue->head = 0;
+            cmdQueue->tail = 0;
+            
+            // ✅ Stop arc generation if active
+            appData.arcGenState = ARC_GEN_IDLE;
+            
+            // ✅ Reset motion phase
+            appData.motionPhase = MOTION_PHASE_IDLE;
+
+            // ✅ Reset modal and coordinate state for a clean start
+            appData.absoluteMode = true;          // G90
+            appData.modalFeedrate = 0.0f;         // No feed until set
+            appData.modalSpindleRPM = 0;
+            appData.modalToolNumber = 0;
+            appData.currentX = 0.0f;
+            appData.currentY = 0.0f;
+            appData.currentZ = 0.0f;
+            appData.currentA = 0.0f;
+            // Reset work coordinate offset
+            KINEMATICS_SetWorkOffset(0.0f, 0.0f, 0.0f);
+
+            // ✅ Disable OC interrupts explicitly (safety) - use correct modules
+            IEC0CLR = _IEC0_OC5IE_MASK;  // X
+            IEC0CLR = _IEC0_OC1IE_MASK;  // Y
+            IEC0CLR = _IEC0_OC3IE_MASK;  // Z
+            IEC0CLR = _IEC0_OC4IE_MASK;  // A
+
+            // ✅ Also mark UART TX as ready so next debug/status prints aren't dropped
+            uart3TxReady = true;
+            
+            // ✅ Send startup banner
             UART3_Write((uint8_t*)GRBL_FIRMWARE_VERSION, sizeof(GRBL_FIRMWARE_VERSION));
+            
+            // ✅ Transition to safe state
+            appData.state = APP_IDLE;
+            
             break;
             
         // ✅ NEW: Settings commands handler
@@ -569,6 +623,8 @@ bool parse_command_to_event(const char* command, GCODE_Event* event)
         return false;
     }
     
+    DEBUG_PRINT_GCODE("[GCODE] parse_command_to_event: '%s'\r\n", command);
+    
     // Initialize event
     event->type = GCODE_EVENT_NONE;
     
@@ -702,6 +758,7 @@ bool parse_command_to_event(const char* command, GCODE_Event* event)
     }
     
     // Command not recognized or not implemented
+    DEBUG_PRINT_GCODE("[GCODE] parse_command_to_event: FAILED to parse '%s'\r\n", command);
     return false;
 }
 

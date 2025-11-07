@@ -3,17 +3,17 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include <stdio.h>  // ✅ snprintf
+#include <stdio.h>
 
 #include "common.h"
 #include "data_structures.h"
-#include "stepper.h"      // ✅ Include stepper.h BEFORE motion.h to ensure STEPPER_SetDirection is declared
+#include "stepper.h"      // Include stepper.h BEFORE motion.h to ensure STEPPER_SetDirection is declared
 #include "motion.h"
 #include "kinematics.h"
 #include "settings.h"
-#include "../config/default/peripheral/tmr/plib_tmr2.h"  // ✅ TMR2 PLIB access
-#include "utils/uart_utils.h"  // ✅ Non-blocking UART utilities
-#include <math.h>
+#include "utils/uart_utils.h"  // Required for DEBUG_PRINT_XXX macros
+#include "../config/default/peripheral/tmr/plib_tmr4.h"  // TMR4 PLIB access (16-bit timer for OC1)
+#include "../config/default/peripheral/gpio/plib_gpio.h"  // Required for DEBUG_EXEC_XXX LED toggles
 
 // ============================================================================
 // Motion State Machine (Non-Blocking Architecture)
@@ -37,15 +37,9 @@ typedef enum {
 static MotionState motion_state = MOTION_STATE_IDLE;
 static MotionSegment* current_segment = NULL;
 
-// Bresenham error accumulators
-static int32_t error_y = 0;
-static int32_t error_z = 0;
-static int32_t error_a = 0;
-
-// Velocity profiling state
+// Velocity profiling state (Bresenham now in ISR)
 static uint32_t current_step_interval = 0;   // Timer ticks between steps
 static uint32_t steps_completed = 0;         // Steps executed in current segment
-static uint32_t next_step_time = 0;          // Absolute TMR2 value for next step
 
 // ============================================================================
 // Initialization
@@ -81,27 +75,13 @@ void MOTION_SegmentTasks(MotionSegment motionQueue[], uint32_t* head, uint32_t* 
             // Get segment from tail of circular buffer
             current_segment = &motionQueue[*tail];
             
-            // Initialize Bresenham error accumulators
-            // Errors start at delta/2 for symmetric rounding
-            error_y = current_segment->delta_x / 2;
-            error_z = current_segment->delta_x / 2;
-            error_a = current_segment->delta_x / 2;
+            // ✅ NEW ARCHITECTURE: Load entire segment into stepper module
+            // This sets directions, Bresenham errors, deltas, and initial PR2
+            STEPPER_LoadSegment(current_segment);
             
-            // Initialize velocity profiling
+            // Initialize local velocity state
             current_step_interval = current_segment->initial_rate;
             steps_completed = 0;
-            
-            // Set directions for all axes based on delta signs
-            // Positive delta = forward (true), negative = reverse (false)
-            STEPPER_SetDirection(AXIS_X, (bool)(current_segment->delta_x >= 0));
-            STEPPER_SetDirection(AXIS_Y, (bool)(current_segment->delta_y >= 0));
-            STEPPER_SetDirection(AXIS_Z, (bool)(current_segment->delta_z >= 0));
-            STEPPER_SetDirection(AXIS_A, (bool)(current_segment->delta_a >= 0));
-            
-            // Schedule first dominant axis step
-            uint32_t now = TMR2_CounterGet();  // ✅ Use PLIB function
-            next_step_time = now + current_step_interval;
-            STEPPER_ScheduleStep(current_segment->dominant_axis, next_step_time);
             
             // Transition to executing state
             motion_state = MOTION_STATE_EXECUTING;
@@ -109,108 +89,57 @@ void MOTION_SegmentTasks(MotionSegment motionQueue[], uint32_t* head, uint32_t* 
         }
             
         // ====================================================================
-        // EXECUTING: Bresenham + Velocity Profil
+        // EXECUTING: Monitor segment completion and update velocity (PR2)
+        // ====================================================================
         case MOTION_STATE_EXECUTING:
         {
-            // Poll timer - check if time for next step
-            uint32_t now = TMR2_CounterGet();  // ✅ Use PLIB function
-            
-            // CRITICAL: Use signed comparison for timer wraparound handling
-            if ((int32_t)(now - next_step_time) >= 0) {
-                
-                // ============================================================
-                // VELOCITY PROFILING (Trapezoidal)
-                // ============================================================
-                // Update step interval based on acceleration phase
-                
-                if (steps_completed < current_segment->accelerate_until) {
-                    // ACCELERATION PHASE
-                    // Increase speed (decrease interval)
-                    // TODO: Use precomputed rate table from segment
-                    current_step_interval = current_segment->initial_rate - 
-                        (steps_completed * current_segment->rate_delta);
-                    
-                } else if (steps_completed >= current_segment->decelerate_after) {
-                    // DECELERATION PHASE
-                    // Decrease speed (increase interval)
-                    uint32_t decel_steps = steps_completed - current_segment->decelerate_after;
-                    current_step_interval = current_segment->nominal_rate + 
-                        (decel_steps * current_segment->rate_delta);
-                    
-                } else {
-                    // CRUISE PHASE
-                    // Constant speed
-                    current_step_interval = current_segment->nominal_rate;
-                }
-                
-                // ============================================================
-                // BRANCHLESS BRESENHAM (MIPS Optimized)
-                // ============================================================
-                // Accumulate errors and schedule subordinate axes
-                // Branchless version eliminates branch misprediction penalties
-                
-                // Y-axis Bresenham
-                error_y += abs(current_segment->delta_y);
-                bool y_step = (error_y >= abs(current_segment->delta_x));
-                if (y_step) {
-                    STEPPER_ScheduleStep(AXIS_Y, next_step_time + 10);  // Slight offset to spread pulses
-                    error_y -= abs(current_segment->delta_x);
-                } else {
-                    STEPPER_DisableAxis(AXIS_Y);  // OCxR = OCxRS (no pulse)
-                }
-                
-                // Z-axis Bresenham
-                error_z += abs(current_segment->delta_z);
-                bool z_step = (error_z >= abs(current_segment->delta_x));
-                if (z_step) {
-                    STEPPER_ScheduleStep(AXIS_Z, next_step_time + 15);  // Slight offset
-                    error_z -= abs(current_segment->delta_x);
-                } else {
-                    STEPPER_DisableAxis(AXIS_Z);
-                }
-                
-                // A-axis Bresenham
-                error_a += abs(current_segment->delta_a);
-                bool a_step = (error_a >= abs(current_segment->delta_x));
-                if (a_step) {
-                    STEPPER_ScheduleStep(AXIS_A, next_step_time + 20);  // Slight offset
-                    error_a -= abs(current_segment->delta_x);
-                } else {
-                    STEPPER_DisableAxis(AXIS_A);
-                }
-                
-                // ============================================================
-                // SCHEDULE NEXT DOMINANT AXIS STEP
-                // ============================================================
-                
-                steps_completed++;
-                current_segment->steps_remaining--;
-                
-                if (current_segment->steps_remaining > 0) {
-                    // More steps remaining - schedule next
-                    next_step_time += current_step_interval;
-                    STEPPER_ScheduleStep(current_segment->dominant_axis, next_step_time);
-                    
-                } else {
-                    // Segment complete
-                    motion_state = MOTION_STATE_SEGMENT_COMPLETE;
-                }
+            // Check if segment is complete (ISR updates steps_completed)
+            if (current_segment->steps_completed >= current_segment->steps_remaining) {
+                motion_state = MOTION_STATE_SEGMENT_COMPLETE;
+                break;
             }
-            // If not time for next step yet, exit and check again next iteration
+            
+            // ============================================================
+            // VELOCITY PROFILING - Update PR2 based on acceleration state
+            // ============================================================
+            uint32_t new_rate;
+            
+            if (current_segment->steps_completed < current_segment->accelerate_until) {
+                // ACCELERATION PHASE - decrease rate (increase speed)
+                new_rate = current_segment->initial_rate - 
+                    (current_segment->steps_completed * current_segment->rate_delta);
+                if (new_rate < current_segment->nominal_rate) {
+                    new_rate = current_segment->nominal_rate;
+                }
+                
+            } else if (current_segment->steps_completed >= current_segment->decelerate_after) {
+                // DECELERATION PHASE - increase rate (decrease speed)
+                uint32_t decel_steps = current_segment->steps_completed - current_segment->decelerate_after;
+                new_rate = current_segment->nominal_rate + 
+                    (decel_steps * current_segment->rate_delta);
+                if (new_rate > current_segment->final_rate) {
+                    new_rate = current_segment->final_rate;
+                }
+                
+            } else {
+                // CRUISE PHASE - constant speed
+                new_rate = current_segment->nominal_rate;
+            }
+            
+            // Update step rate if changed
+            if (new_rate != current_step_interval) {
+                current_step_interval = new_rate;
+                STEPPER_SetStepRate(new_rate);  // Updates PR2
+            }
+            
             break;
         }
             
         // ====================================================================
-        // SEGMENT_COMPLETE: Finish current segment, move to next
+        // SEGMENT_COMPLETE: Dequeue and move to next segment or idle
         // ====================================================================
         case MOTION_STATE_SEGMENT_COMPLETE:
         {
-            // Disable all axes (stop pulse generation)
-            STEPPER_DisableAxis(AXIS_X);
-            STEPPER_DisableAxis(AXIS_Y);
-            STEPPER_DisableAxis(AXIS_Z);
-            STEPPER_DisableAxis(AXIS_A);
-            
             // Remove segment from queue
             *tail = (*tail + 1) % MAX_MOTION_SEGMENTS;
             (*count)--;
@@ -229,208 +158,95 @@ void MOTION_SegmentTasks(MotionSegment motionQueue[], uint32_t* head, uint32_t* 
     }
 }
 
+
 void MOTION_Tasks(APP_DATA* appData) {
-    // ===== SEGMENT LOADING (HIGHEST PRIORITY - BEFORE PHASE PROCESSING) =====
-    // Load next segment from queue if current segment is NULL
+    // ===== SIMPLIFIED MOTION CONTROL (NEW ARCHITECTURE) =====
+    // This function is called continuously from APP_Tasks (main loop).
+    // It manages segment loading and monitoring - all real-time work happens in OCP1_ISR!
+    
+    // ===== 1. SEGMENT LOADING =====
+    // Load new segment when currentSegment is NULL and queue has data
     if(appData->currentSegment == NULL && appData->motionQueueCount > 0) {
-        // ✅ DEBUG: Confirm we're attempting to load segment
-        #if DEBUG_ == DBG_LEVEL_MOTION
-        char dbg1[128];
-        snprintf(dbg1, sizeof(dbg1), 
-                "[MOTION] Loading segment: queueCount=%u, tail=%u\r\n",
-                appData->motionQueueCount, appData->motionQueueTail);
-        UART3_Write((uint8_t*)dbg1, strlen(dbg1));
-        #endif
-        
         // Get segment from tail of circular buffer
         appData->currentSegment = &appData->motionQueue[appData->motionQueueTail];
-        
-        // Initialize Bresenham error accumulators to delta/2 for symmetric rounding
-        int32_t dominant_delta = appData->currentSegment->delta_x;  // Assume X is dominant
-        switch(appData->currentSegment->dominant_axis) {
-            case AXIS_X: dominant_delta = appData->currentSegment->delta_x; break;
-            case AXIS_Y: dominant_delta = appData->currentSegment->delta_y; break;
-            case AXIS_Z: dominant_delta = appData->currentSegment->delta_z; break;
-            case AXIS_A: dominant_delta = appData->currentSegment->delta_a; break;
-            default: break;
+
+        // If this is a zero-length segment (no steps), skip it gracefully
+        if (appData->currentSegment->steps_remaining == 0) {
+            // Dequeue and move to next segment
+            appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
+            appData->motionQueueCount--;
+            appData->currentSegment = NULL;
+            return;  // Try again next iteration
         }
         
-        appData->bresenham_error_y = dominant_delta / 2;
-        appData->bresenham_error_z = dominant_delta / 2;
-        appData->bresenham_error_a = dominant_delta / 2;
-        
-        // Initialize velocity profiling
-        appData->currentStepInterval = appData->currentSegment->initial_rate;
-        appData->currentSegment->steps_completed = 0;
-        
-        // ✅ DEBUG: Print segment parameters
-#if DEBUG_ == DBG_LEVEL_MOTION
-        char dbg2[128];
-        snprintf(dbg2, sizeof(dbg2), 
-                "[MOTION] Segment loaded: initial_rate=%u, steps=%u, accel_until=%u\r\n",
-                appData->currentSegment->initial_rate,
-                appData->currentSegment->steps_remaining,
-                appData->currentSegment->accelerate_until);
-        UART3_Write((uint8_t*)dbg2, strlen(dbg2));
-#endif
-        // Set directions for all axes
-        STEPPER_SetDirection(AXIS_X, appData->currentSegment->delta_x >= 0);
-        STEPPER_SetDirection(AXIS_Y, appData->currentSegment->delta_y >= 0);
-        STEPPER_SetDirection(AXIS_Z, appData->currentSegment->delta_z >= 0);
-        STEPPER_SetDirection(AXIS_A, appData->currentSegment->delta_a >= 0);
+        // ✅ Load segment into ISR state (this is where the magic happens!)
+        STEPPER_LoadSegment(appData->currentSegment);
         
         // Update dominant axis tracker for ISR
         appData->dominantAxis = appData->currentSegment->dominant_axis;
         
-        // ✅ Don't schedule here - let phase system handle it
-        // Signal phase processing to begin (will schedule in MOTION_PHASE_SCHEDULE)
-        appData->motionPhase = MOTION_PHASE_VELOCITY;
+        // Set initial step rate (PR4 controls OC1 period)
+        STEPPER_SetStepRate(appData->currentSegment->initial_rate);
+        
+        // ===== DEBUG: Segment Loading =====
+        // This code ONLY appears in debug builds when DEBUG_SEGMENT is enabled
+        // In release builds, the compiler completely removes this code (zero overhead)
+        DEBUG_PRINT_SEGMENT("[SEGMENT] Loaded: steps=%lu, rate=%lu\r\n", 
+                            appData->currentSegment->steps_remaining,
+                            appData->currentSegment->initial_rate);
+        DEBUG_EXEC_SEGMENT(LED1_Set());  // Visual indicator: segment loaded
+        
+        return;  // Exit and let ISR start stepping
     }
     
-    // ===== PHASE PROCESSING (RUNS WHEN SEGMENT IS LOADED) =====
-    switch(appData->motionPhase) {
-                case MOTION_PHASE_VELOCITY:
-                {
-                    // Phase 0: Velocity conditioning (highest priority)
-                    // Update step interval based on acceleration/cruise/decel state
-                    if(appData->currentSegment != NULL) {
-                        MotionSegment* seg = appData->currentSegment;
-                        
-                        if(seg->steps_completed < seg->accelerate_until) {
-                            // Acceleration phase - interval decreases (speed increases)
-                            appData->currentStepInterval += seg->rate_delta;  // rate_delta is negative
-                            if(appData->currentStepInterval < seg->nominal_rate) {
-                                appData->currentStepInterval = seg->nominal_rate;  // Clamp to max speed
-                            }
-                        } else if(seg->steps_completed > seg->decelerate_after) {
-                            // Deceleration phase - interval increases (speed decreases)
-                            appData->currentStepInterval += seg->rate_delta;  // rate_delta is positive
-                            if(appData->currentStepInterval > seg->final_rate) {
-                                appData->currentStepInterval = seg->final_rate;  // Clamp to min speed
-                            }
-                        } else {
-                            // Cruise phase - maintain nominal rate
-                            appData->currentStepInterval = seg->nominal_rate;
-                        }
-                    }
-
-                    appData->motionPhase = MOTION_PHASE_BRESENHAM;
-                    // Fall through to next phase
-                }
-                    
-                case MOTION_PHASE_BRESENHAM:
-                {
-                    // Phase 1: Bresenham error accumulation
-                    // Determine which subordinate axes need steps
-                    if(appData->currentSegment != NULL) {
-                        MotionSegment* seg = appData->currentSegment;
-                        
-                        // Accumulate errors for subordinate axes (not dominant)
-                        if(seg->dominant_axis != AXIS_Y && seg->delta_y != 0) {
-                            appData->bresenham_error_y += seg->delta_y;
-                        }
-                        if(seg->dominant_axis != AXIS_Z && seg->delta_z != 0) {
-                            appData->bresenham_error_z += seg->delta_z;
-                        }
-                        if(seg->dominant_axis != AXIS_A && seg->delta_a != 0) {
-                            appData->bresenham_error_a += seg->delta_a;
-                        }
-                    }
-
-                    appData->motionPhase = MOTION_PHASE_SCHEDULE;
-                    // Fall through to next phase
-                }
-                    
-                case MOTION_PHASE_SCHEDULE:
-                {
-                    // Phase 2: OCx register scheduling
-                    // Write OCxR/OCxRS with absolute TMR2 values
-                    if(appData->currentSegment != NULL) {
-                        MotionSegment* seg = appData->currentSegment;
-                        
-                        // Get dominant axis delta for comparison
-                        int32_t dominant_delta = 0;
-                        switch(seg->dominant_axis) {
-                            case AXIS_X: dominant_delta = seg->delta_x; break;
-                            case AXIS_Y: dominant_delta = seg->delta_y; break;
-                            case AXIS_Z: dominant_delta = seg->delta_z; break;
-                            case AXIS_A: dominant_delta = seg->delta_a; break;
-                            default: break;
-                        }
-                        
-                        // Schedule dominant axis (always steps)
-                        STEPPER_ScheduleStep(seg->dominant_axis, appData->currentStepInterval);
-                        
-                        // Schedule subordinate axes if Bresenham says they need a step
-                        if(seg->dominant_axis != AXIS_Y && seg->delta_y != 0) {
-                            if(appData->bresenham_error_y >= dominant_delta) {
-                                STEPPER_ScheduleStep(AXIS_Y, appData->currentStepInterval);
-                                appData->bresenham_error_y -= dominant_delta;
-                            } else {
-                                STEPPER_DisableAxis(AXIS_Y);  // No step this cycle
-                            }
-                        }
-                        
-                        if(seg->dominant_axis != AXIS_Z && seg->delta_z != 0) {
-                            if(appData->bresenham_error_z >= dominant_delta) {
-                                STEPPER_ScheduleStep(AXIS_Z, appData->currentStepInterval);
-                                appData->bresenham_error_z -= dominant_delta;
-                            } else {
-                                STEPPER_DisableAxis(AXIS_Z);
-                            }
-                        }
-                        
-                        if(seg->dominant_axis != AXIS_A && seg->delta_a != 0) {
-                            if(appData->bresenham_error_a >= dominant_delta) {
-                                STEPPER_ScheduleStep(AXIS_A, appData->currentStepInterval);
-                                appData->bresenham_error_a -= dominant_delta;
-                            } else {
-                                STEPPER_DisableAxis(AXIS_A);
-                            }
-                        }
-                        
-                        // ✅ NOTE: steps_completed is incremented by ISR, not here!
-                        // This prevents double-incrementing and premature completion
-                    }
-                    
-                    appData->motionPhase = MOTION_PHASE_COMPLETE;
-                    // Fall through to next phase
-                }
-                    
-                case MOTION_PHASE_COMPLETE:
-                {
-                    // Phase 3: Segment completion check
-                    // Check if current segment done
-                    if(appData->currentSegment != NULL) {
-                        MotionSegment* seg = appData->currentSegment;
-                        
-                        if(seg->steps_completed >= seg->steps_remaining) {
-                            // ✅ Segment complete - remove from queue
-                            appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
-                            appData->motionQueueCount--;
-                            
-                            // Reset Bresenham errors for next segment
-                            appData->bresenham_error_y = 0;
-                            appData->bresenham_error_z = 0;
-                            appData->bresenham_error_a = 0;
-                            
-                            // Mark current segment as NULL so next one loads
-                            appData->currentSegment = NULL;
-                        }
-                    }
-                    
-                    // Return to IDLE (will be re-triggered by ISR on next dominant axis step)
-                    appData->motionPhase = MOTION_PHASE_IDLE;
-                    break;  // Exit phase processing
-                }
-                    
-                case MOTION_PHASE_IDLE:
-                    // No motion processing needed - fall through to other tasks
-                    break;
+    // ===== 2. VELOCITY PROFILING (DURING MOTION) =====
+    // Update step rate based on acceleration/cruise/decel
+    if(appData->currentSegment != NULL) {
+        MotionSegment* seg = appData->currentSegment;
+        
+        // Simple velocity profiling (can be enhanced with real trapezoid later)
+        uint32_t new_rate = seg->nominal_rate;  // For now, use constant cruise rate
+        
+        // TODO: Implement acceleration/deceleration based on steps_completed
+        // if (seg->steps_completed < seg->accelerate_until) {
+        //     new_rate = calculate_accel_rate(seg);
+        // } else if (seg->steps_completed > seg->decelerate_after) {
+        //     new_rate = calculate_decel_rate(seg);
+        // }
+        
+        // Update PR2 if rate changed (non-blocking, single register write)
+        if(new_rate != appData->currentStepInterval) {
+            STEPPER_SetStepRate(new_rate);
+            appData->currentStepInterval = new_rate;
+        }
+    }
+    
+    // ===== 3. SEGMENT COMPLETION CHECK =====
+    // Check if current segment is done (ISR updates steps_completed)
+    if(appData->currentSegment != NULL) {
+        MotionSegment* seg = appData->currentSegment;
+        
+        if(seg->steps_completed >= seg->steps_remaining) {
+            // ===== DEBUG: Segment Completion =====
+            DEBUG_PRINT_SEGMENT("[SEGMENT] Complete: %lu steps\r\n", seg->steps_completed);
+            DEBUG_EXEC_SEGMENT(LED1_Clear());  // Visual indicator: segment done
+            
+            // Segment complete - remove from queue
+            appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
+            appData->motionQueueCount--;
+            
+            // Mark current segment as NULL so next one loads
+            appData->currentSegment = NULL;
+            
+            // Stop TMR4 when ALL motion is complete (motion queue empty)
+            // TMR4 runs continuously across segments for smooth multi-segment motion
+            // Only stop when the complete distance has been reached (no more segments)
+            if(appData->motionQueueCount == 0) {
+                TMR4_Stop();
             }
- 
+        }
+    }
 }
-
 void MOTION_Arc(APP_DATA* appData) {
     // Only generate if arc is active and motion queue has space
     if(appData->arcGenState != ARC_GEN_ACTIVE || appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
@@ -515,17 +331,16 @@ void MOTION_Arc(APP_DATA* appData) {
  */
 bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
     
-    #if DEBUG_GCODE
-        char dbg[64];
-        snprintf(dbg, sizeof(dbg), "[MOTION] Processing event type=%d\r\n", event->type);
-        UART3_Write((uint8_t*)dbg, strlen(dbg));
-    #endif
+    DEBUG_PRINT_MOTION("[MOTION] ProcessEvent: type=%d\r\n", event->type);
     
     switch (event->type) {
         case GCODE_EVENT_LINEAR_MOVE:
         {
+            DEBUG_PRINT_MOTION("[MOTION] Linear move event\r\n");
+            
             // Check if motion queue has space before processing
             if(appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+                DEBUG_PRINT_MOTION("[MOTION] Queue full!\r\n");
                 return false;  // Queue full - try again later
             }
             
@@ -547,7 +362,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 end.a = isnan(event->data.linearMove.a) ? appData->currentA : (appData->currentA + event->data.linearMove.a);
             }
             
-            // ✅ SOFT LIMIT CHECK
+            // ✅ SOFT LIMIT CHECK - TEMPORARILY DISABLED FOR DEBUG
+            /*
             GRBL_Settings* settings = SETTINGS_GetCurrent();
             bool limit_violation = false;
             
@@ -562,10 +378,15 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 appData->state = APP_ALARM;
                 return false;
             }
+            */
             
             // Use feedrate from event, or modal feedrate if not specified
             float feedrate = event->data.linearMove.feedrate;
-            if(feedrate == 0.0f) {
+            if (feedrate == 0.0f) {
+                // If modal is also zero (e.g., after reset), apply a safe default (600 mm/min)
+                if (appData->modalFeedrate <= 0.0f) {
+                    appData->modalFeedrate = 600.0f;
+                }
                 feedrate = appData->modalFeedrate;
             } else {
                 appData->modalFeedrate = feedrate;
@@ -574,23 +395,28 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // Get next queue slot
             MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
             
-            #if DEBUG_GCODE
-            snprintf(dbg, sizeof(dbg), 
-                    "[MOTION] G1: X%.3f Y%.3f Z%.3f F%.1f\r\n",
-                    end.x, end.y, end.z, feedrate);
-            UART3_Write((uint8_t*)dbg, strlen(dbg));
-            #endif
+            DEBUG_PRINT_MOTION("[MOTION] Calling KINEMATICS_LinearMove: start=(%.2f,%.2f), end=(%.2f,%.2f), F=%.1f\r\n",
+                              start.x, start.y, end.x, end.y, feedrate);
             
             // Convert to motion segment
             KINEMATICS_LinearMove(start, end, feedrate, segment);
-            
-            #if DEBUG_SEGMENT
-            snprintf(dbg, sizeof(dbg), 
-                    "[MOTION] Queued: count=%u, head=%u\r\n",
-                    appData->motionQueueCount + 1, appData->motionQueueHead);
-            UART3_Write((uint8_t*)dbg, strlen(dbg));
-            #endif
 
+            DEBUG_PRINT_MOTION("[MOTION] Segment: steps=%lu, dx=%ld, dy=%ld, dz=%ld\r\n",
+                              segment->steps_remaining, segment->delta_x, segment->delta_y, segment->delta_z);
+
+            // Guard: skip zero-length segments (no steps)
+            if (segment->steps_remaining == 0) {
+                DEBUG_PRINT_MOTION("[MOTION] Zero-length segment - skipping\r\n");
+                // Update current position and treat as no-op
+                appData->currentX = end.x;
+                appData->currentY = end.y;
+                appData->currentZ = end.z;
+                appData->currentA = end.a;
+                return true;
+            }
+
+            DEBUG_PRINT_MOTION("[MOTION] Adding segment to queue (count will be %d)\r\n", appData->motionQueueCount + 1);
+            
             // Add to motion queue
             appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
             appData->motionQueueCount++;
@@ -699,11 +525,47 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             return true;
             
         case GCODE_EVENT_SET_WORK_OFFSET:
-            appData->currentX = event->data.setWorkOffset.x;
-            appData->currentY = event->data.setWorkOffset.y;
-            appData->currentZ = event->data.setWorkOffset.z;
-            appData->currentA = event->data.setWorkOffset.a;
+        {
+            // G92 - Set work coordinate offset so current machine position = specified work position
+            // Formula: offset = MPos - desired_WPos
+            // Example: If MPos=(29.975, 7.500) and we want WPos=(0,0), then offset=(29.975, 7.500)
+            // Note: Only updates axes that are specified (non-NaN values)
+            
+            StepperPosition* pos = STEPPER_GetPosition();
+            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
+            
+            // Get current machine position
+            float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
+            float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
+            float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
+            
+            // Calculate new offsets (only for specified axes)
+            float offset_x = wcs->offset.x;  // Keep existing
+            float offset_y = wcs->offset.y;  // Keep existing
+            float offset_z = wcs->offset.z;  // Keep existing
+            
+            // Update work position and offset for each specified axis
+            if (!isnan(event->data.setWorkOffset.x)) {
+                offset_x = mpos_x - event->data.setWorkOffset.x;
+                appData->currentX = event->data.setWorkOffset.x;
+            }
+            if (!isnan(event->data.setWorkOffset.y)) {
+                offset_y = mpos_y - event->data.setWorkOffset.y;
+                appData->currentY = event->data.setWorkOffset.y;
+            }
+            if (!isnan(event->data.setWorkOffset.z)) {
+                offset_z = mpos_z - event->data.setWorkOffset.z;
+                appData->currentZ = event->data.setWorkOffset.z;
+            }
+            if (!isnan(event->data.setWorkOffset.a)) {
+                appData->currentA = event->data.setWorkOffset.a;
+            }
+            
+            // Set the work coordinate offset
+            KINEMATICS_SetWorkCoordinates(offset_x, offset_y, offset_z);
+            
             return true;
+        }
             
         case GCODE_EVENT_SET_FEEDRATE:
             appData->modalFeedrate = event->data.setFeedrate.feedrate;

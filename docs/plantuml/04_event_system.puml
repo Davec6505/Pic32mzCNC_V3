@@ -117,4 +117,52 @@ note over UART, STEPPER
   • Future-proof architecture
 end note
 
+== Debug System Integration (November 2025) ==
+participant "Debug Macros" as DEBUG
+participant "UART Output" as UART_OUT
+
+APP -> DEBUG : DEBUG_PRINT_GCODE("[GCODE] Event: %d\\n", event.type)
+alt DEBUG_GCODE defined (Debug Build)
+    DEBUG -> UART_OUT : UART_Printf("[GCODE] Event: 1\\n")
+    note right of UART_OUT
+      Debug output appears
+      Trace event processing
+      Zero runtime checks
+    end note
+else DEBUG_GCODE not defined (Release Build)
+    DEBUG -> DEBUG : ((void)0) - no-op
+    note right of DEBUG
+      Compiler removes code
+      Zero overhead
+      No binary size impact
+    end note
+end
+
+KINEMATICS -> DEBUG : DEBUG_PRINT_MOTION("[MOTION] dX=%ld dY=%ld\\n", dx, dy)
+alt DEBUG_MOTION defined
+    DEBUG -> UART_OUT : UART_Printf("[MOTION] dX=400 dY=100\\n")
+else DEBUG_MOTION not defined
+    DEBUG -> DEBUG : Code eliminated by compiler
+end
+
+STEPPER -> DEBUG : DEBUG_EXEC_STEPPER(LED1_Toggle())
+alt DEBUG_STEPPER defined
+    DEBUG -> DEBUG : Execute: LED1_Toggle()
+    note right
+      Visual indicator
+      ISR-safe execution
+      Conditional compilation
+    end note
+else DEBUG_STEPPER not defined
+    DEBUG -> DEBUG : Code eliminated
+end
+
+note over DEBUG, UART_OUT
+  ✅ Compile-time debugging
+  ✅ Six subsystems: MOTION, GCODE, STEPPER,
+     SEGMENT, UART, APP
+  ✅ Usage: make DEBUG_FLAGS="DEBUG_MOTION"
+  ✅ Zero runtime overhead in release
+end note
+
 @enduml

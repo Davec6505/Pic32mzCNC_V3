@@ -14,17 +14,15 @@
 // *****************************************************************************
 
 #include <string.h>
-#include <stdio.h>  // ✅ snprintf
+#include <stdio.h>
 #include <math.h>  // For fabsf in limit checks
 #include "app.h"
 #include "settings.h"
 #include "kinematics.h"  // For KINEMATICS_LinearMove and CoordinatePoint
 #include "motion_utils.h"  // For hard limit checking
-#include "config/default/peripheral/ocmp/plib_ocmp5.h"  // ✅ DEBUG: For OC5 test
-#include "config/default/peripheral/tmr/plib_tmr2.h"    // ✅ DEBUG: For TMR2 counter
-#include "config/default/peripheral/uart/plib_uart3.h"  // ✅ DEBUG output
-#include "utils/uart_utils.h"  // ✅ Non-blocking UART utilities
-#include "motion.h"  // Make sure this is included
+#include "config/default/peripheral/coretimer/plib_coretimer.h"  // For CORETIMER heartbeat counter
+#include "utils/uart_utils.h"  // Non-blocking UART utilities
+#include "motion.h"
 
 // *****************************************************************************
 // *****************************************************************************
@@ -206,45 +204,55 @@ void APP_Tasks ( void )
         
         case APP_IDLE:
         {
-            // ===== LED2 STATUS INDICATOR =====
-            // Heartbeat when idle, toggles fast during motion (ISR toggles LED2)
-            static uint32_t led_counter = 0;
-            led_counter++;
-            
-            // Slow heartbeat when idle (1 Hz = toggle every 50,000 iterations @ ~100kHz)
-            if(appData.motionQueueCount == 0 && led_counter >= 50000) {
-                LED2_Toggle();
-                led_counter = 0;
+            // ===== LED2 BRING-UP SANITY =====
+            // Turn LED2 ON once on first entry to APP_IDLE to prove GPIO works
+            static bool led2_boot_shown = false;
+            if(!led2_boot_shown) {
+                LED2_Set();
+                led2_boot_shown = true;
+            }
+
+            // ===== LED2 STATUS INDICATOR (CORETIMER-TIMED, NOT LOOP-COUNT) =====
+            // Maintain stable heartbeat independent of loop workload
+            // Toggle about once per second when idle (no motion)
+            static uint32_t hb_last = 0;
+            const uint32_t HB_INTERVAL = 100000000U; // ~1s @ 100MHz Core Timer (200MHz CPU / 2)
+            if(appData.motionQueueCount == 0) {
+                uint32_t now_ticks = CORETIMER_CounterGet();
+                if ((uint32_t)(now_ticks - hb_last) >= HB_INTERVAL) {
+                    LED2_Toggle();
+                    hb_last = now_ticks;
+                }
             }
             // During motion, ISR toggles LED2 on each step (fast blink)
             // LED2 will blink at step rate, visible motion indicator
-            
-            // ===== MOTION PHASE PROCESSING (HIGHEST PRIORITY) =====
-            // ✅ Following Harmony pattern: Protocol handlers run INSIDE states
-            // This ensures they only execute when subsystems are ready
+            // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
+            // Read bytes, tokenize, and queue commands continuously
+            GCODE_Tasks(&appData.gcodeCommandQueue);
 
-            // ✅ TMR2 ROLLOVER MONITORING (CRITICAL - PREVENTS 343.6s OVERFLOW)
-            STEPPER_CheckTimerRollover(&appData);
-
-            // ✅ MOTION CONTROLLER (HIGHEST PRIORITY - LOAD NEXT SEGMENT) =====
-            MOTION_Tasks(&appData);
-
-            // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
-            // ✅ Moved to motion.c for clean separation
-            MOTION_Arc(&appData);
-            
-            // ===== RATE-LIMITED UART POLLING (EVERY ~10ms) =====
-            appData.uartPollCounter++;
-            if(appData.uartPollCounter >= 1250) {  // ~10ms @ 100kHz scan rate
-                GCODE_Tasks(&appData.gcodeCommandQueue);
-                appData.uartPollCounter = 0;
-            }
-            
-            // ✅ STEP 2: Sync motion queue status for flow control
+            // Sync motion queue status for flow control
             appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
             appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
 
-            // ✅ STEP 3: HARD LIMIT CHECK (GRBL safety feature)
+            // Convert one queued command into a motion event and enqueue segment(s)
+            // Doing this BEFORE motion ensures new segments can load immediately this cycle
+            {
+                GCODE_Event event;
+                if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
+                    DEBUG_PRINT_GCODE("[APP] Event type=%d\r\n", event.type);
+                    MOTION_ProcessGcodeEvent(&appData, &event);
+                }
+            }
+
+            // ===== MOTION CONTROLLER (SIMPLIFIED - NO ROLLOVER NEEDED WITH PR2) =====
+            MOTION_Tasks(&appData);
+
+            // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
+            if(appData.arcGenState == ARC_GEN_ACTIVE) {
+                MOTION_Arc(&appData);
+            }
+
+            // ===== HARD LIMIT CHECK (TEMP DISABLED) =====
             // Check limit switches with inversion mask from settings
             // ⚠️ TEMPORARILY DISABLED FOR UART TESTING
             /*
@@ -257,14 +265,6 @@ void APP_Tasks ( void )
             }
             */
 
-            // ✅ STEP 4: Process ONE G-code event per iteration (non-blocking!)
-            GCODE_Event event;
-                     
-            if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
-                // ✅ All event processing moved to motion.c for clean separation
-                MOTION_ProcessGcodeEvent(&appData, &event);
-            }
-            
             break;
         }
         

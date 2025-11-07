@@ -3,6 +3,9 @@
 MODULE     := CS23
 
 # Default target when running 'make' with no arguments
+# 'make' → incremental build (only rebuilds changed files) [FAST]
+# 'make all' → clean + full rebuild (Release by default)
+# 'make build' → same as 'make' (incremental)
 .DEFAULT_GOAL := build
 
 # Device configuration
@@ -203,79 +206,86 @@ ifeq ($(OS),Windows_NT)
 	Write-Host '######################################## BUILD COMMANDS ############################################' -ForegroundColor Green; \
 	Write-Host ''; \
 	Write-Host '--- QUICK START ---' -ForegroundColor Cyan; \
-	Write-Host 'make                     ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Incremental build (fast - only changed files, Release config).' -ForegroundColor White; \
-	Write-Host 'make all                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Full rebuild (clean + build from scratch, Release config).' -ForegroundColor White; \
-	Write-Host 'make BUILD_CONFIG=Debug  ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Incremental Debug build (-g3 -O0, full symbols).' -ForegroundColor White; \
-	Write-Host 'make all BUILD_CONFIG=Debug' -ForegroundColor Yellow -NoNewline; Write-Host ' - Full Debug rebuild (clean + build).' -ForegroundColor White; \
+	Write-Host 'make                     ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Full rebuild (clean + build, Release -O1) [DEFAULT]' -ForegroundColor White; \
+	Write-Host 'make all                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Same as ''make'' (clean + build Release)' -ForegroundColor White; \
+	Write-Host 'make build               ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Incremental build (fast - only changed files)' -ForegroundColor White; \
+	Write-Host 'make BUILD_CONFIG=Debug  ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Full Debug rebuild (-g3 -O0, full symbols)' -ForegroundColor White; \
 	Write-Host ''; \
-	Write-Host '--- DEBUG OUTPUT CONTROL ---' -ForegroundColor Cyan; \
-	Write-Host 'DEBUG_=0                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - All debug output disabled (default).' -ForegroundColor White; \
-	Write-Host 'DEBUG_=1                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - UART debug output enabled (DBG_LEVEL_UART).' -ForegroundColor White; \
-	Write-Host 'DEBUG_=2                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - GCODE debug output enabled (DBG_LEVEL_GCODE).' -ForegroundColor White; \
-	Write-Host 'DEBUG_=3                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - SEGMENT debug output enabled (DBG_LEVEL_SEGMENT).' -ForegroundColor White; \
-	Write-Host 'DEBUG_=4                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - MOTION debug output enabled (DBG_LEVEL_MOTION).' -ForegroundColor White; \
-	Write-Host 'DEBUG_=5                 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - STEPPER debug output enabled (DBG_LEVEL_STEPPER).' -ForegroundColor White; \
+	Write-Host '--- COMPILE-TIME DEBUG SYSTEM (Zero Overhead) ---' -ForegroundColor Cyan; \
+	Write-Host 'make DEBUG_FLAGS=\"DEBUG_MOTION\"' -ForegroundColor Yellow -NoNewline; Write-Host ' - Enable motion debug output' -ForegroundColor White; \
+	Write-Host 'make DEBUG_FLAGS=\"DEBUG_GCODE\"' -ForegroundColor Yellow -NoNewline; Write-Host ' - Enable G-code debug output' -ForegroundColor White; \
+	Write-Host 'make DEBUG_FLAGS=\"DEBUG_STEPPER\"' -ForegroundColor Yellow -NoNewline; Write-Host ' - Enable stepper ISR debug output' -ForegroundColor White; \
+	Write-Host 'make DEBUG_FLAGS=\"DEBUG_SEGMENT\"' -ForegroundColor Yellow -NoNewline; Write-Host ' - Enable segment loading debug output' -ForegroundColor White; \
+	Write-Host 'make DEBUG_FLAGS=\"DEBUG_MOTION DEBUG_GCODE\"' -ForegroundColor Yellow -NoNewline; Write-Host ' - Enable multiple subsystems' -ForegroundColor White; \
+	Write-Host ''; \
+	Write-Host 'Available flags: DEBUG_MOTION, DEBUG_GCODE, DEBUG_STEPPER, DEBUG_SEGMENT, DEBUG_UART, DEBUG_APP' -ForegroundColor DarkGray; \
+	Write-Host 'Note: Debug code is REMOVED by compiler in release builds (zero runtime overhead)' -ForegroundColor DarkGray; \
+	Write-Host 'See docs/DEBUG_SYSTEM_TUTORIAL.md for complete documentation' -ForegroundColor DarkGray; \
 	Write-Host ''; \
 	Write-Host '--- BUILD CONFIGURATIONS ---' -ForegroundColor Cyan; \
-	Write-Host 'BUILD_CONFIG=Release     ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Balanced build: -g -O1 (default, suitable for debugging + performance).' -ForegroundColor White; \
-	Write-Host 'BUILD_CONFIG=Debug       ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Debug build: -g3 -O0 (maximum debug symbols, no optimization).' -ForegroundColor White; \
+	Write-Host 'BUILD_CONFIG=Release     ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Balanced build: -g -O1 (default, debuggable + fast)' -ForegroundColor White; \
+	Write-Host 'BUILD_CONFIG=Debug       ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Debug build: -g3 -O0 (maximum symbols, no optimization)' -ForegroundColor White; \
 	Write-Host ''; \
 	Write-Host '--- OPTIMIZATION OVERRIDE (Release only) ---' -ForegroundColor Cyan; \
-	Write-Host 'make OPT_LEVEL=1         ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Release with -O1 optimization (default).' -ForegroundColor White; \
-	Write-Host 'make OPT_LEVEL=2         ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Release with -O2 optimization (recommended for production).' -ForegroundColor White; \
-	Write-Host 'make OPT_LEVEL=3         ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Release with -O3 optimization (maximum speed).' -ForegroundColor White; \
+	Write-Host 'make OPT_LEVEL=1         ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Release with -O1 optimization (default)' -ForegroundColor White; \
+	Write-Host 'make OPT_LEVEL=2         ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Release with -O2 optimization (production recommended)' -ForegroundColor White; \
+	Write-Host 'make OPT_LEVEL=3         ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Release with -O3 optimization (maximum speed)' -ForegroundColor White; \
 	Write-Host ''; \
 	Write-Host '--- DIRECTORY MANAGEMENT ---' -ForegroundColor Cyan; \
-	Write-Host 'make build_dir           ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Test directory creation (DRY_RUN=1 default, no action).' -ForegroundColor White; \
-	Write-Host 'make build_dir DRY_RUN=0 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Create build directories (bins/Debug, bins/Release, objs/, libs/).' -ForegroundColor White; \
+	Write-Host 'make build_dir           ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Test directory creation (DRY_RUN=1 default, no action)' -ForegroundColor White; \
+	Write-Host 'make build_dir DRY_RUN=0 ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Create build directories (bins/, objs/, libs/, other/)' -ForegroundColor White; \
 	Write-Host ''; \
 	Write-Host '--- CLEAN TARGETS ---' -ForegroundColor Cyan; \
-	Write-Host 'make clean               ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Clean current BUILD_CONFIG outputs (Debug or Release).' -ForegroundColor White; \
-	Write-Host 'make clean_all           ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Clean both Debug and Release configurations.' -ForegroundColor White; \
+	Write-Host 'make clean               ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Clean current BUILD_CONFIG outputs (Debug or Release)' -ForegroundColor White; \
+	Write-Host 'make clean_all           ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Clean both Debug and Release configurations' -ForegroundColor White; \
 	Write-Host ''; \
 	Write-Host '--- LIBRARY BUILDS ---' -ForegroundColor Cyan; \
-	Write-Host 'make shared_lib          ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Build shared library from libs/*.c files.' -ForegroundColor White; \
-	Write-Host 'make all USE_SHARED_LIB=1' -ForegroundColor Yellow -NoNewline; Write-Host ' - Build executable linked against pre-built library.' -ForegroundColor White; \
+	Write-Host 'make shared_lib          ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Build shared library from libs/*.c files' -ForegroundColor White; \
+	Write-Host 'make all USE_SHARED_LIB=1' -ForegroundColor Yellow -NoNewline; Write-Host ' - Build executable linked against pre-built library' -ForegroundColor White; \
 	Write-Host ''; \
 	Write-Host '--- FILTERED OUTPUT ---' -ForegroundColor Cyan; \
-	Write-Host 'make quiet               ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Build with filtered output (errors/warnings only).' -ForegroundColor White; \
+	Write-Host 'make quiet               ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Build with filtered output (errors/warnings only)' -ForegroundColor White; \
 	Write-Host ''; \
 	Write-Host '--- UTILITIES ---' -ForegroundColor Cyan; \
-	Write-Host 'make platform            ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Show platform information (OS, paths, toolchain).' -ForegroundColor White; \
-	Write-Host 'make help                ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Show this help message.' -ForegroundColor White; \
+	Write-Host 'make platform            ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Show platform information (OS, paths, toolchain)' -ForegroundColor White; \
+	Write-Host 'make help                ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Show this help message' -ForegroundColor White; \
 	Write-Host ''; \
 	Write-Host '--- EXAMPLES ---' -ForegroundColor Cyan; \
-	Write-Host 'make                     ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Quick incremental build (Release, -O1).' -ForegroundColor White; \
-	Write-Host 'make all OPT_LEVEL=3     ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Full rebuild with maximum optimization (Release, -O3).' -ForegroundColor White; \
-	Write-Host 'make BUILD_CONFIG=Debug  ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Incremental build with full debug symbols (Debug, -O0).' -ForegroundColor White; \
-	Write-Host 'make clean_all           ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Clean both Debug and Release before committing.' -ForegroundColor White; \
+	Write-Host 'make                     ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Quick full rebuild (Release, -O1)' -ForegroundColor White; \
+	Write-Host 'make build               ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Fast incremental build (only changed files)' -ForegroundColor White; \
+	Write-Host 'make all OPT_LEVEL=3     ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Production build with maximum optimization' -ForegroundColor White; \
+	Write-Host 'make BUILD_CONFIG=Debug DEBUG_FLAGS=\"DEBUG_MOTION DEBUG_SEGMENT\"' -ForegroundColor Yellow -NoNewline; Write-Host ' - Debug with motion tracing' -ForegroundColor White; \
+	Write-Host 'make clean_all           ' -ForegroundColor Yellow -NoNewline; Write-Host ' - Clean both Debug and Release before committing' -ForegroundColor White; \
 	Write-Host ''; \
 	Write-Host '#####################################################################################################' -ForegroundColor Green"
 else
 	@echo -e "\033[0;32m######################################## BUILD COMMANDS ############################################\033[0m"
 	@echo ""
 	@echo -e "\033[0;36m--- QUICK START ---\033[0m"
-	@echo -e "\033[0;33mmake                     \033[0m - Incremental build (fast - only changed files, Release config)."
-	@echo -e "\033[0;33mmake all                 \033[0m - Full rebuild (clean + build from scratch, Release config)."
-	@echo -e "\033[0;33mmake BUILD_CONFIG=Debug  \033[0m - Incremental Debug build (-g3 -O0, full symbols)."
-	@echo -e "\033[0;33mmake all BUILD_CONFIG=Debug\033[0m - Full Debug rebuild (clean + build)."
+	@echo -e "\033[0;33mmake                     \033[0m - Full rebuild (clean + build, Release -O1) [DEFAULT]"
+	@echo -e "\033[0;33mmake all                 \033[0m - Same as 'make' (clean + build Release)"
+	@echo -e "\033[0;33mmake build               \033[0m - Incremental build (fast - only changed files)"
+	@echo -e "\033[0;33mmake BUILD_CONFIG=Debug  \033[0m - Full Debug rebuild (-g3 -O0, full symbols)"
 	@echo ""
-	@echo -e "\033[0;36m--- DEBUG OUTPUT CONTROL ---\033[0m"
-	@echo -e "\033[0;33mDEBUG_=0                 \033[0m - All debug output disabled (default)."
-	@echo -e "\033[0;33mDEBUG_=1                 \033[0m - UART debug output enabled (DBG_LEVEL_UART)."
-	@echo -e "\033[0;33mDEBUG_=2                 \033[0m - GCODE debug output enabled (DBG_LEVEL_GCODE)."
-	@echo -e "\033[0;33mDEBUG_=3                 \033[0m - SEGMENT debug output enabled (DBG_LEVEL_SEGMENT)."
-	@echo -e "\033[0;33mDEBUG_=4                 \033[0m - MOTION debug output enabled (DBG_LEVEL_MOTION)."
-	@echo -e "\033[0;33mDEBUG_=5                 \033[0m - STEPPER debug output enabled (DBG_LEVEL_STEPPER)."
+	@echo -e "\033[0;36m--- COMPILE-TIME DEBUG SYSTEM (Zero Overhead) ---\033[0m"
+	@echo -e "\033[0;33mmake DEBUG_FLAGS=\"DEBUG_MOTION\"\033[0m - Enable motion debug output"
+	@echo -e "\033[0;33mmake DEBUG_FLAGS=\"DEBUG_GCODE\"\033[0m - Enable G-code debug output"
+	@echo -e "\033[0;33mmake DEBUG_FLAGS=\"DEBUG_STEPPER\"\033[0m - Enable stepper ISR debug output"
+	@echo -e "\033[0;33mmake DEBUG_FLAGS=\"DEBUG_SEGMENT\"\033[0m - Enable segment loading debug output"
+	@echo -e "\033[0;33mmake DEBUG_FLAGS=\"DEBUG_MOTION DEBUG_GCODE\"\033[0m - Enable multiple subsystems"
+	@echo ""
+	@echo -e "\033[0;90mAvailable flags: DEBUG_MOTION, DEBUG_GCODE, DEBUG_STEPPER, DEBUG_SEGMENT, DEBUG_UART, DEBUG_APP\033[0m"
+	@echo -e "\033[0;90mNote: Debug code is REMOVED by compiler in release builds (zero runtime overhead)\033[0m"
+	@echo -e "\033[0;90mSee docs/DEBUG_SYSTEM_TUTORIAL.md for complete documentation\033[0m"
 	@echo ""
 	@echo -e "\033[0;36m--- BUILD CONFIGURATIONS ---\033[0m"
-	@echo -e "\033[0;33mBUILD_CONFIG=Release     \033[0m - Balanced build: -g -O1 (default, suitable for debugging + performance)."
-	@echo -e "\033[0;33mBUILD_CONFIG=Debug       \033[0m - Debug build: -g3 -O0 (maximum debug symbols, no optimization)."
+	@echo -e "\033[0;33mBUILD_CONFIG=Release     \033[0m - Balanced build: -g -O1 (default, debuggable + fast)"
+	@echo -e "\033[0;33mBUILD_CONFIG=Debug       \033[0m - Debug build: -g3 -O0 (maximum symbols, no optimization)"
 	@echo ""
 	@echo -e "\033[0;36m--- OPTIMIZATION OVERRIDE (Release only) ---\033[0m"
-	@echo -e "\033[0;33mmake OPT_LEVEL=1         \033[0m - Release with -O1 optimization (default)."
-	@echo -e "\033[0;33mmake OPT_LEVEL=2         \033[0m - Release with -O2 optimization (recommended for production)."
-	@echo -e "\033[0;33mmake OPT_LEVEL=3         \033[0m - Release with -O3 optimization (maximum speed)."
+	@echo -e "\033[0;33mmake OPT_LEVEL=1         \033[0m - Release with -O1 optimization (default)"
+	@echo -e "\033[0;33mmake OPT_LEVEL=2         \033[0m - Release with -O2 optimization (production recommended)"
+	@echo -e "\033[0;33mmake OPT_LEVEL=3         \033[0m - Release with -O3 optimization (maximum speed)"
 	@echo ""
 	@echo -e "\033[0;36m--- DIRECTORY MANAGEMENT ---\033[0m"
 	@echo -e "\033[0;33mmake build_dir           \033[0m - Test directory creation (DRY_RUN=1 default, no action)."

@@ -57,9 +57,6 @@ void EVIC_Initialize( void )
 
     /* Set up priority and subpriority of enabled interrupts */
     IPC1SET = 0x10000000U | 0x0U;  /* OUTPUT_COMPARE_1:  Priority 4 / Subpriority 0 */
-    IPC4SET = 0x1000U | 0x0U;  /* OUTPUT_COMPARE_3:  Priority 4 / Subpriority 0 */
-    IPC5SET = 0x100000U | 0x0U;  /* OUTPUT_COMPARE_4:  Priority 4 / Subpriority 0 */
-    IPC6SET = 0x10000000U | 0x0U;  /* OUTPUT_COMPARE_5:  Priority 4 / Subpriority 0 */
     IPC39SET = 0x400U | 0x0U;  /* UART3_FAULT:  Priority 1 / Subpriority 0 */
     IPC39SET = 0x140000U | 0x0U;  /* UART3_RX:  Priority 5 / Subpriority 0 */
     IPC39SET = 0xc000000U | 0x0U;  /* UART3_TX:  Priority 3 / Subpriority 0 */

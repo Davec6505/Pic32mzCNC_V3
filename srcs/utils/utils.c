@@ -1,4 +1,6 @@
 #include "utils.h"
+#include "common.h"
+#include "utils/uart_utils.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -23,33 +25,44 @@ uint32_t UTILS_TokenizeGcodeLine(const char* str, TokenArray* token_array)
     uint32_t str_len = UTILS_SafeStrlen(str, 256);
     uint32_t i = 0;
     
+    // Skip leading whitespace only
+    while (i < str_len && (str[i] == ' ' || str[i] == '\t')) {
+        i++;
+    }
+    
+    DEBUG_PRINT_GCODE("[TOKENIZER] Input: '%s' (len=%lu)\r\n", str, str_len);
+    
     while (i < str_len && token_array->count < MAX_TOKENS) {
-        // Skip whitespace and separators
-        while (i < str_len && (str[i] == ' ' || str[i] == '\t' || str[i] == ';')) {
-            i++;
-        }
-        
-        if (i >= str_len) break;
-        
         // Check for comment - ignore rest of line
-        if (str[i] == '(' || str[i] == '#') {
+        if (str[i] == '(' || str[i] == '#' || str[i] == ';') {
             break;
         }
         
         uint32_t token_start = i;
         uint32_t token_end = find_token_end(str, token_start, str_len);
         
+        DEBUG_PRINT_GCODE("[TOKENIZER] Token %lu: start=%lu, end=%lu\r\n", 
+                         token_array->count, token_start, token_end);
+        
         // Extract token if valid length
         uint32_t token_len = token_end - token_start;
         if (token_len > 0 && token_len < MAX_TOKEN_LENGTH) {
             memcpy(token_array->tokens[token_array->count], &str[token_start], token_len);
             token_array->tokens[token_array->count][token_len] = '\0';
+            DEBUG_PRINT_GCODE("[TOKENIZER] Extracted: '%s'\r\n", 
+                             token_array->tokens[token_array->count]);
             token_array->count++;
         }
         
         i = token_end;
+        
+        // Skip trailing spaces after this token (for next G/M command)
+        while (i < str_len && (str[i] == ' ' || str[i] == '\t')) {
+            i++;
+        }
     }
     
+    DEBUG_PRINT_GCODE("[TOKENIZER] Total tokens: %lu\r\n", token_array->count);
     return token_array->count;
 }
 
@@ -64,23 +77,46 @@ static uint32_t find_token_end(const char* str, uint32_t start, uint32_t max_len
     char start_char = str[start];
     uint32_t end = start + 1;
     
+    DEBUG_PRINT_GCODE("[find_token_end] start=%lu, start_char='%c' (0x%02X), max_len=%lu\r\n", 
+                     start, start_char, (unsigned char)start_char, max_len);
+    
     if (start_char == 'G' || start_char == 'M') {
         // ✅ G/M command: consume ALL parameters until next G/M command or line end
         // Example: "G1X10Y10F1000" → stays together as one token
         // Example: "G90G1X10" → splits into "G90" and "G1X10"
-        while (end < max_len) {
-            char c = str[end];
-            // ✅ Stop ONLY at next G/M command (start of new command)
-            if (c == 'G' || c == 'M') {
-                break;
-            }
-            // Stop at line terminators or comments
-            if (c == '\n' || c == '\r' || c == '\0' || c == '(' || c == '#' || c == ';' || c == ' ' || c == '\t') {
-                break;
-            }
-            // ✅ Everything else (X, Y, Z, A, F, S, T, P, I, J, R, etc.) stays with this G/M command
+        
+        // First, consume the G/M code number (digits after G/M)
+        while (end < max_len && str[end] >= '0' && str[end] <= '9') {
+            DEBUG_PRINT_GCODE("[find_token_end] Digit loop: str[%lu]='%c'\r\n", end, str[end]);
             end++;
         }
+        
+        DEBUG_PRINT_GCODE("[find_token_end] After digits: end=%lu\r\n", end);
+        
+        // Now consume ALL parameters (X, Y, Z, F, S, etc.) until next G/M or line end
+        while (end < max_len) {
+            char c = str[end];
+            
+            DEBUG_PRINT_GCODE("[find_token_end] Param loop: str[%lu]='%c' (0x%02X)\r\n", 
+                             end, (c >= 32 && c < 127) ? c : '?', (unsigned char)c);
+            
+            // Stop at next G/M command (start of new command)
+            if (c == 'G' || c == 'M') {
+                DEBUG_PRINT_GCODE("[find_token_end] Stop: next G/M\r\n");
+                break;
+            }
+            
+            // Stop at line terminators or comments
+            if (c == '\n' || c == '\r' || c == '\0' || c == '(' || c == '#' || c == ';') {
+                DEBUG_PRINT_GCODE("[find_token_end] Stop: line terminator\r\n");
+                break;
+            }
+            
+            // ✅ Keep going - consume spaces, parameters, everything
+            end++;
+        }
+        
+        DEBUG_PRINT_GCODE("[find_token_end] Final end=%lu\r\n", end);
     }
     else if (start_char == 'F' || start_char == 'S' || start_char == 'T' || start_char == 'P') {
         // Standalone parameter command: read numeric value only
