@@ -1,17 +1,20 @@
 /*******************************************************************************
-  UART2 PLIB
+  Data Type definition of Timer PLIB
 
   Company:
     Microchip Technology Inc.
 
   File Name:
-    plib_uart2.h
+    plib_tmr6.h
 
   Summary:
-    UART2 PLIB Header File
+    Data Type definition of the Timer Peripheral Interface Plib.
 
   Description:
-    None
+    This file defines the Data Types for the Timer Plib.
+
+  Remarks:
+    None.
 
 *******************************************************************************/
 
@@ -38,14 +41,14 @@
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
 
-#ifndef PLIB_UART2_H
-#define PLIB_UART2_H
+#ifndef PLIB_TMR6_H
+#define PLIB_TMR6_H
 
 #include <stddef.h>
-#include <stdbool.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include "device.h"
-#include "plib_uart_common.h"
+#include "plib_tmr_common.h"
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility
@@ -57,60 +60,41 @@
 
 // *****************************************************************************
 // *****************************************************************************
-// Section: Interface
+// Section: Data Types
 // *****************************************************************************
 // *****************************************************************************
 
-#define UART2_FrequencyGet()    (uint32_t)(50000000UL)
+// *****************************************************************************
+// *****************************************************************************
+// Section: Interface Routines
+// *****************************************************************************
+// *****************************************************************************
 
-/****************************** UART2 API *********************************/
 
-void UART2_Initialize( void );
+// *****************************************************************************
+void TMR6_Initialize(void);
 
-bool UART2_SerialSetup( UART_SERIAL_SETUP *setup, uint32_t srcClkFreq );
+void TMR6_Start(void);
 
-UART_ERROR UART2_ErrorGet( void );
+void TMR6_Stop(void);
 
-bool UART2_AutoBaudQuery( void );
+void TMR6_PeriodSet(uint16_t period);
 
-void UART2_AutoBaudSet( bool enable );
+uint16_t TMR6_PeriodGet(void);
 
-size_t UART2_Write(uint8_t* pWrBuffer, const size_t size );
+uint16_t TMR6_CounterGet(void);
 
-size_t UART2_WriteCountGet(void);
+uint32_t TMR6_FrequencyGet(void);
 
-size_t UART2_WriteFreeBufferCountGet(void);
 
-size_t UART2_WriteBufferSizeGet(void);
+bool TMR6_PeriodHasExpired(void);
 
-bool UART2_TransmitComplete(void);
-
-bool UART2_WriteNotificationEnable(bool isEnabled, bool isPersistent);
-
-void UART2_WriteThresholdSet(uint32_t nBytesThreshold);
-
-void UART2_WriteCallbackRegister( UART_RING_BUFFER_CALLBACK callback, uintptr_t context);
-
-size_t UART2_Read(uint8_t* pRdBuffer, const size_t size);
-
-size_t UART2_ReadCountGet(void);
-
-size_t UART2_ReadFreeBufferCountGet(void);
-
-size_t UART2_ReadBufferSizeGet(void);
-
-bool UART2_ReadNotificationEnable(bool isEnabled, bool isPersistent);
-
-void UART2_ReadThresholdSet(uint32_t nBytesThreshold);
-
-void UART2_ReadCallbackRegister( UART_RING_BUFFER_CALLBACK callback, uintptr_t context);
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility
 
     }
-
 #endif
 // DOM-IGNORE-END
 
-#endif // PLIB_UART2_H
+#endif /* PLIB_TMR6_H */

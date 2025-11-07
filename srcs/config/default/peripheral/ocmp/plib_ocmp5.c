@@ -62,8 +62,8 @@ void OCMP5_Initialize (void)
 
     OC5CON = 0x25;
 
-    OC5R = 200;
-    OC5RS = 400;
+    OC5R = 0;
+    OC5RS = 0;
 
     IEC0SET = _IEC0_OC5IE_MASK;
 }

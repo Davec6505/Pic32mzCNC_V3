@@ -3,11 +3,10 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "../data_structures.h"  // ✅ E_AXIS defined here (parent directory)
-#include "peripheral/gpio/plib_gpio.h"
+#include "data_structures.h"  // ✅ E_AXIS defined here (parent directory)
+#include "plib_gpio.h"
 
-// ✅ Number of axes (must match E_AXIS enum in data_structures.h)
-#define AXIS_COUNT 4
+
 
 // ✅ GPIO Pin Arrays - Indexed by E_AXIS enum
 // Uses Harmony GPIO_PIN constants with GPIO_PinSet/GPIO_PinClear functions

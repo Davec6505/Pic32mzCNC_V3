@@ -56,13 +56,10 @@
 // Section: Handler Routines
 // *****************************************************************************
 // *****************************************************************************
-void OUTPUT_COMPARE_2_InterruptHandler( void );
-void OUTPUT_COMPARE_3_InterruptHandler( void );
-void OUTPUT_COMPARE_4_InterruptHandler( void );
-void OUTPUT_COMPARE_5_InterruptHandler( void );
-void UART2_FAULT_InterruptHandler( void );
-void UART2_RX_InterruptHandler( void );
-void UART2_TX_InterruptHandler( void );
+void OUTPUT_COMPARE_1_InterruptHandler( void );
+void UART3_FAULT_InterruptHandler( void );
+void UART3_RX_InterruptHandler( void );
+void UART3_TX_InterruptHandler( void );
 void NVM_InterruptHandler( void );
 
 

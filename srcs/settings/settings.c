@@ -1,6 +1,6 @@
 #include "settings.h"
 #include "peripheral/nvm/plib_nvm.h"
-#include "peripheral/uart/plib_uart2.h"
+#include "peripheral/uart/plib_uart3.h"
 #include "peripheral/coretimer/plib_coretimer.h"  // ✅ For CORETIMER_DelayMs/Us
 #include "definitions.h"
 #include <string.h>
@@ -119,18 +119,23 @@ bool SETTINGS_LoadFromFlash(GRBL_Settings* settings)
     // ✅ PURE HARMONY PATTERN: Read into cache-aligned buffer
     NVM_Read(writeData, sizeof(writeData), SETTINGS_READ_ADDRESS);
     
-    // Copy from cache-aligned buffer to settings structure
-    memcpy(settings, writeData, sizeof(GRBL_Settings));
+    // ✅ CRITICAL: Validate BEFORE copying to settings (don't corrupt defaults!)
+    GRBL_Settings temp_settings;
+    memcpy(&temp_settings, writeData, sizeof(GRBL_Settings));
     
-    // Validate signature and checksum
-    if (settings->signature != SETTINGS_SIGNATURE) {
-        return false;  // Flash empty or invalid
+    // Validate signature first
+    if (temp_settings.signature != SETTINGS_SIGNATURE) {
+        return false;  // Flash empty or invalid - keep current settings (defaults)
     }
     
-    uint32_t calculated_crc = SETTINGS_CalculateCRC32(settings);
-    if (calculated_crc != settings->checksum) {
-        return false;
+    // Validate checksum
+    uint32_t calculated_crc = SETTINGS_CalculateCRC32(&temp_settings);
+    if (calculated_crc != temp_settings.checksum) {
+        return false;  // Checksum mismatch - keep current settings (defaults)
     }
+    
+    // ✅ Only copy if validation passed
+    memcpy(settings, &temp_settings, sizeof(GRBL_Settings));
     
     return true;
 }
@@ -324,97 +329,97 @@ void SETTINGS_PrintAll(const GRBL_Settings* settings)
     // Format: $<param>=<value> (lowercase 'ok' per GRBL protocol)
     // ✅ Use %u for uint32_t on XC32 compiler
     sprintf(buffer, "$0=%u\r\n", (unsigned int)settings->step_pulse_time);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$1=%u\r\n", (unsigned int)settings->step_idle_delay);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$2=%u\r\n", settings->step_pulse_invert);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$3=%u\r\n", settings->step_direction_invert);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$4=%u\r\n", settings->step_enable_invert);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$5=%u\r\n", settings->limit_pins_invert);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$12=%.3f\r\n", settings->mm_per_arc_segment);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$100=%.3f\r\n", settings->steps_per_mm_x);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$101=%.3f\r\n", settings->steps_per_mm_y);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$102=%.3f\r\n", settings->steps_per_mm_z);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$103=%.3f\r\n", settings->steps_per_mm_a);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$110=%.3f\r\n", settings->max_rate_x);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$111=%.3f\r\n", settings->max_rate_y);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$112=%.3f\r\n", settings->max_rate_z);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$113=%.3f\r\n", settings->max_rate_a);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$120=%.3f\r\n", settings->acceleration_x);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$121=%.3f\r\n", settings->acceleration_y);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$122=%.3f\r\n", settings->acceleration_z);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$123=%.3f\r\n", settings->acceleration_a);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$130=%.3f\r\n", settings->max_travel_x);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$131=%.3f\r\n", settings->max_travel_y);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$132=%.3f\r\n", settings->max_travel_z);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$30=%.3f\r\n", settings->spindle_max_rpm);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$31=%.3f\r\n", settings->spindle_min_rpm);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$22=%u\r\n", settings->homing_enable);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$23=%u\r\n", settings->homing_dir_mask);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$24=%.3f\r\n", settings->homing_feed_rate);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$25=%.3f\r\n", settings->homing_seek_rate);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
     
     sprintf(buffer, "$26=%u\r\n", (unsigned int)settings->homing_debounce);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
-    
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
+
     sprintf(buffer, "$27=%.3f\r\n", settings->homing_pull_off);
-    UART2_Write((uint8_t*)buffer, strlen(buffer));
-    
+    UART3_Write((uint8_t*)buffer, strlen(buffer));
+
     // ✅ GRBL protocol uses lowercase "ok"
-    UART2_Write((uint8_t*)"ok\r\n", 4);
+    UART3_Write((uint8_t*)"ok\r\n", 4);
 }
 
 /* Print build info (GRBL $I command) */
@@ -424,8 +429,8 @@ void SETTINGS_PrintBuildInfo(void)
         "[VER:1.1h.20251102 PIC32MZ CNC Controller]\r\n"
         "[OPT:VHM,35,1024,4]\r\n"  // V=variable spindle, H=homing, M=mist, 35=buffer size, 1024=rx buffer, 4=axis count
         "ok\r\n";
-    
-    UART2_Write((uint8_t*)build_info, strlen(build_info));
+
+    UART3_Write((uint8_t*)build_info, strlen(build_info));
 }
 
 /* Get pointer to current settings */

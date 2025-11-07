@@ -122,16 +122,6 @@
 #define SW1_GetLatch()          ((LATC >> 3) & 0x1U)
 #define SW1_PIN                  GPIO_PIN_RC3
 
-/*** Macros for Amin pin ***/
-#define Amin_Set()               (LATGSET = (1U<<6))
-#define Amin_Clear()             (LATGCLR = (1U<<6))
-#define Amin_Toggle()            (LATGINV= (1U<<6))
-#define Amin_OutputEnable()      (TRISGCLR = (1U<<6))
-#define Amin_InputEnable()       (TRISGSET = (1U<<6))
-#define Amin_Get()               ((PORTG >> 6) & 0x1U)
-#define Amin_GetLatch()          ((LATG >> 6) & 0x1U)
-#define Amin_PIN                  GPIO_PIN_RG6
-
 /*** Macros for DirZ pin ***/
 #define DirZ_Set()               (LATGSET = (1U<<9))
 #define DirZ_Clear()             (LATGCLR = (1U<<9))
@@ -142,15 +132,15 @@
 #define DirZ_GetLatch()          ((LATG >> 9) & 0x1U)
 #define DirZ_PIN                  GPIO_PIN_RG9
 
-/*** Macros for Amax pin ***/
-#define Amax_Set()               (LATBSET = (1U<<1))
-#define Amax_Clear()             (LATBCLR = (1U<<1))
-#define Amax_Toggle()            (LATBINV= (1U<<1))
-#define Amax_OutputEnable()      (TRISBCLR = (1U<<1))
-#define Amax_InputEnable()       (TRISBSET = (1U<<1))
-#define Amax_Get()               ((PORTB >> 1) & 0x1U)
-#define Amax_GetLatch()          ((LATB >> 1) & 0x1U)
-#define Amax_PIN                  GPIO_PIN_RB1
+/*** Macros for A_Max pin ***/
+#define A_Max_Set()               (LATBSET = (1U<<1))
+#define A_Max_Clear()             (LATBCLR = (1U<<1))
+#define A_Max_Toggle()            (LATBINV= (1U<<1))
+#define A_Max_OutputEnable()      (TRISBCLR = (1U<<1))
+#define A_Max_InputEnable()       (TRISBSET = (1U<<1))
+#define A_Max_Get()               ((PORTB >> 1) & 0x1U)
+#define A_Max_GetLatch()          ((LATB >> 1) & 0x1U)
+#define A_Max_PIN                  GPIO_PIN_RB1
 
 /*** Macros for SW2 pin ***/
 #define SW2_Set()               (LATBSET = (1U<<0))
@@ -172,95 +162,140 @@
 #define LED2_GetLatch()          ((LATA >> 9) & 0x1U)
 #define LED2_PIN                  GPIO_PIN_RA9
 
-/*** Macros for Xmin pin ***/
-#define Xmin_Set()               (LATASET = (1U<<4))
-#define Xmin_Clear()             (LATACLR = (1U<<4))
-#define Xmin_Toggle()            (LATAINV= (1U<<4))
-#define Xmin_OutputEnable()      (TRISACLR = (1U<<4))
-#define Xmin_InputEnable()       (TRISASET = (1U<<4))
-#define Xmin_Get()               ((PORTA >> 4) & 0x1U)
-#define Xmin_GetLatch()          ((LATA >> 4) & 0x1U)
-#define Xmin_PIN                  GPIO_PIN_RA4
+/*** Macros for Coolant pin ***/
+#define Coolant_Set()               (LATBSET = (1U<<15))
+#define Coolant_Clear()             (LATBCLR = (1U<<15))
+#define Coolant_Toggle()            (LATBINV= (1U<<15))
+#define Coolant_OutputEnable()      (TRISBCLR = (1U<<15))
+#define Coolant_InputEnable()       (TRISBSET = (1U<<15))
+#define Coolant_Get()               ((PORTB >> 15) & 0x1U)
+#define Coolant_GetLatch()          ((LATB >> 15) & 0x1U)
+#define Coolant_PIN                  GPIO_PIN_RB15
 
-/*** Macros for Ymin pin ***/
-#define Ymin_Set()               (LATDSET = (1U<<0))
-#define Ymin_Clear()             (LATDCLR = (1U<<0))
-#define Ymin_Toggle()            (LATDINV= (1U<<0))
-#define Ymin_OutputEnable()      (TRISDCLR = (1U<<0))
-#define Ymin_InputEnable()       (TRISDSET = (1U<<0))
-#define Ymin_Get()               ((PORTD >> 0) & 0x1U)
-#define Ymin_GetLatch()          ((LATD >> 0) & 0x1U)
-#define Ymin_PIN                  GPIO_PIN_RD0
+/*** Macros for X_Min pin ***/
+#define X_Min_Set()               (LATASET = (1U<<4))
+#define X_Min_Clear()             (LATACLR = (1U<<4))
+#define X_Min_Toggle()            (LATAINV= (1U<<4))
+#define X_Min_OutputEnable()      (TRISACLR = (1U<<4))
+#define X_Min_InputEnable()       (TRISASET = (1U<<4))
+#define X_Min_Get()               ((PORTA >> 4) & 0x1U)
+#define X_Min_GetLatch()          ((LATA >> 4) & 0x1U)
+#define X_Min_PIN                  GPIO_PIN_RA4
 
-/*** Macros for DirA pin ***/
-#define DirA_Set()               (LATDSET = (1U<<12))
-#define DirA_Clear()             (LATDCLR = (1U<<12))
-#define DirA_Toggle()            (LATDINV= (1U<<12))
-#define DirA_OutputEnable()      (TRISDCLR = (1U<<12))
-#define DirA_InputEnable()       (TRISDSET = (1U<<12))
-#define DirA_Get()               ((PORTD >> 12) & 0x1U)
-#define DirA_GetLatch()          ((LATD >> 12) & 0x1U)
-#define DirA_PIN                  GPIO_PIN_RD12
+/*** Macros for Y_Min pin ***/
+#define Y_Min_Set()               (LATDSET = (1U<<0))
+#define Y_Min_Clear()             (LATDCLR = (1U<<0))
+#define Y_Min_Toggle()            (LATDINV= (1U<<0))
+#define Y_Min_OutputEnable()      (TRISDCLR = (1U<<0))
+#define Y_Min_InputEnable()       (TRISDSET = (1U<<0))
+#define Y_Min_Get()               ((PORTD >> 0) & 0x1U)
+#define Y_Min_GetLatch()          ((LATD >> 0) & 0x1U)
+#define Y_Min_PIN                  GPIO_PIN_RD0
 
-/*** Macros for Zmin pin ***/
-#define Zmin_Set()               (LATDSET = (1U<<13))
-#define Zmin_Clear()             (LATDCLR = (1U<<13))
-#define Zmin_Toggle()            (LATDINV= (1U<<13))
-#define Zmin_OutputEnable()      (TRISDCLR = (1U<<13))
-#define Zmin_InputEnable()       (TRISDSET = (1U<<13))
-#define Zmin_Get()               ((PORTD >> 13) & 0x1U)
-#define Zmin_GetLatch()          ((LATD >> 13) & 0x1U)
-#define Zmin_PIN                  GPIO_PIN_RD13
+/*** Macros for Z_Min pin ***/
+#define Z_Min_Set()               (LATDSET = (1U<<13))
+#define Z_Min_Clear()             (LATDCLR = (1U<<13))
+#define Z_Min_Toggle()            (LATDINV= (1U<<13))
+#define Z_Min_OutputEnable()      (TRISDCLR = (1U<<13))
+#define Z_Min_InputEnable()       (TRISDSET = (1U<<13))
+#define Z_Min_Get()               ((PORTD >> 13) & 0x1U)
+#define Z_Min_GetLatch()          ((LATD >> 13) & 0x1U)
+#define Z_Min_PIN                  GPIO_PIN_RD13
 
 /*** Macros for StepX pin ***/
+#define StepX_Set()               (LATDSET = (1U<<4))
+#define StepX_Clear()             (LATDCLR = (1U<<4))
+#define StepX_Toggle()            (LATDINV= (1U<<4))
+#define StepX_OutputEnable()      (TRISDCLR = (1U<<4))
+#define StepX_InputEnable()       (TRISDSET = (1U<<4))
 #define StepX_Get()               ((PORTD >> 4) & 0x1U)
 #define StepX_GetLatch()          ((LATD >> 4) & 0x1U)
 #define StepX_PIN                  GPIO_PIN_RD4
 
+/*** Macros for master_control pin ***/
+#define master_control_Get()               ((PORTD >> 5) & 0x1U)
+#define master_control_GetLatch()          ((LATD >> 5) & 0x1U)
+#define master_control_PIN                  GPIO_PIN_RD5
+
 /*** Macros for StepY pin ***/
-#define StepY_Get()               ((PORTD >> 5) & 0x1U)
-#define StepY_GetLatch()          ((LATD >> 5) & 0x1U)
-#define StepY_PIN                  GPIO_PIN_RD5
+#define StepY_Set()               (LATFSET = (1U<<0))
+#define StepY_Clear()             (LATFCLR = (1U<<0))
+#define StepY_Toggle()            (LATFINV= (1U<<0))
+#define StepY_OutputEnable()      (TRISFCLR = (1U<<0))
+#define StepY_InputEnable()       (TRISFSET = (1U<<0))
+#define StepY_Get()               ((PORTF >> 0) & 0x1U)
+#define StepY_GetLatch()          ((LATF >> 0) & 0x1U)
+#define StepY_PIN                  GPIO_PIN_RF0
 
 /*** Macros for StepZ pin ***/
-#define StepZ_Get()               ((PORTF >> 0) & 0x1U)
-#define StepZ_GetLatch()          ((LATF >> 0) & 0x1U)
-#define StepZ_PIN                  GPIO_PIN_RF0
+#define StepZ_Set()               (LATFSET = (1U<<1))
+#define StepZ_Clear()             (LATFCLR = (1U<<1))
+#define StepZ_Toggle()            (LATFINV= (1U<<1))
+#define StepZ_OutputEnable()      (TRISFCLR = (1U<<1))
+#define StepZ_InputEnable()       (TRISFSET = (1U<<1))
+#define StepZ_Get()               ((PORTF >> 1) & 0x1U)
+#define StepZ_GetLatch()          ((LATF >> 1) & 0x1U)
+#define StepZ_PIN                  GPIO_PIN_RF1
 
 /*** Macros for StepA pin ***/
-#define StepA_Get()               ((PORTF >> 1) & 0x1U)
-#define StepA_GetLatch()          ((LATF >> 1) & 0x1U)
-#define StepA_PIN                  GPIO_PIN_RF1
+#define StepA_Set()               (LATGSET = (1U<<1))
+#define StepA_Clear()             (LATGCLR = (1U<<1))
+#define StepA_Toggle()            (LATGINV= (1U<<1))
+#define StepA_OutputEnable()      (TRISGCLR = (1U<<1))
+#define StepA_InputEnable()       (TRISGSET = (1U<<1))
+#define StepA_Get()               ((PORTG >> 1) & 0x1U)
+#define StepA_GetLatch()          ((LATG >> 1) & 0x1U)
+#define StepA_PIN                  GPIO_PIN_RG1
 
-/*** Macros for Xmax pin ***/
-#define Xmax_Set()               (LATASET = (1U<<7))
-#define Xmax_Clear()             (LATACLR = (1U<<7))
-#define Xmax_Toggle()            (LATAINV= (1U<<7))
-#define Xmax_OutputEnable()      (TRISACLR = (1U<<7))
-#define Xmax_InputEnable()       (TRISASET = (1U<<7))
-#define Xmax_Get()               ((PORTA >> 7) & 0x1U)
-#define Xmax_GetLatch()          ((LATA >> 7) & 0x1U)
-#define Xmax_PIN                  GPIO_PIN_RA7
+/*** Macros for A_Min pin ***/
+#define A_Min_Set()               (LATASET = (1U<<6))
+#define A_Min_Clear()             (LATACLR = (1U<<6))
+#define A_Min_Toggle()            (LATAINV= (1U<<6))
+#define A_Min_OutputEnable()      (TRISACLR = (1U<<6))
+#define A_Min_InputEnable()       (TRISASET = (1U<<6))
+#define A_Min_Get()               ((PORTA >> 6) & 0x1U)
+#define A_Min_GetLatch()          ((LATA >> 6) & 0x1U)
+#define A_Min_PIN                  GPIO_PIN_RA6
 
-/*** Macros for Ymax pin ***/
-#define Ymax_Set()               (LATESET = (1U<<0))
-#define Ymax_Clear()             (LATECLR = (1U<<0))
-#define Ymax_Toggle()            (LATEINV= (1U<<0))
-#define Ymax_OutputEnable()      (TRISECLR = (1U<<0))
-#define Ymax_InputEnable()       (TRISESET = (1U<<0))
-#define Ymax_Get()               ((PORTE >> 0) & 0x1U)
-#define Ymax_GetLatch()          ((LATE >> 0) & 0x1U)
-#define Ymax_PIN                  GPIO_PIN_RE0
+/*** Macros for X_Max pin ***/
+#define X_Max_Set()               (LATASET = (1U<<7))
+#define X_Max_Clear()             (LATACLR = (1U<<7))
+#define X_Max_Toggle()            (LATAINV= (1U<<7))
+#define X_Max_OutputEnable()      (TRISACLR = (1U<<7))
+#define X_Max_InputEnable()       (TRISASET = (1U<<7))
+#define X_Max_Get()               ((PORTA >> 7) & 0x1U)
+#define X_Max_GetLatch()          ((LATA >> 7) & 0x1U)
+#define X_Max_PIN                  GPIO_PIN_RA7
 
-/*** Macros for Zmax pin ***/
-#define Zmax_Set()               (LATESET = (1U<<1))
-#define Zmax_Clear()             (LATECLR = (1U<<1))
-#define Zmax_Toggle()            (LATEINV= (1U<<1))
-#define Zmax_OutputEnable()      (TRISECLR = (1U<<1))
-#define Zmax_InputEnable()       (TRISESET = (1U<<1))
-#define Zmax_Get()               ((PORTE >> 1) & 0x1U)
-#define Zmax_GetLatch()          ((LATE >> 1) & 0x1U)
-#define Zmax_PIN                  GPIO_PIN_RE1
+/*** Macros for Y_Max pin ***/
+#define Y_Max_Set()               (LATESET = (1U<<0))
+#define Y_Max_Clear()             (LATECLR = (1U<<0))
+#define Y_Max_Toggle()            (LATEINV= (1U<<0))
+#define Y_Max_OutputEnable()      (TRISECLR = (1U<<0))
+#define Y_Max_InputEnable()       (TRISESET = (1U<<0))
+#define Y_Max_Get()               ((PORTE >> 0) & 0x1U)
+#define Y_Max_GetLatch()          ((LATE >> 0) & 0x1U)
+#define Y_Max_PIN                  GPIO_PIN_RE0
+
+/*** Macros for Z_Max pin ***/
+#define Z_Max_Set()               (LATESET = (1U<<1))
+#define Z_Max_Clear()             (LATECLR = (1U<<1))
+#define Z_Max_Toggle()            (LATEINV= (1U<<1))
+#define Z_Max_OutputEnable()      (TRISECLR = (1U<<1))
+#define Z_Max_InputEnable()       (TRISESET = (1U<<1))
+#define Z_Max_Get()               ((PORTE >> 1) & 0x1U)
+#define Z_Max_GetLatch()          ((LATE >> 1) & 0x1U)
+#define Z_Max_PIN                  GPIO_PIN_RE1
+
+/*** Macros for DirA pin ***/
+#define DirA_Set()               (LATGSET = (1U<<12))
+#define DirA_Clear()             (LATGCLR = (1U<<12))
+#define DirA_Toggle()            (LATGINV= (1U<<12))
+#define DirA_OutputEnable()      (TRISGCLR = (1U<<12))
+#define DirA_InputEnable()       (TRISGSET = (1U<<12))
+#define DirA_Get()               ((PORTG >> 12) & 0x1U)
+#define DirA_GetLatch()          ((LATG >> 12) & 0x1U)
+#define DirA_PIN                  GPIO_PIN_RG12
 
 /*** Macros for DirY pin ***/
 #define DirY_Set()               (LATESET = (1U<<2))
@@ -271,6 +306,11 @@
 #define DirY_Get()               ((PORTE >> 2) & 0x1U)
 #define DirY_GetLatch()          ((LATE >> 2) & 0x1U)
 #define DirY_PIN                  GPIO_PIN_RE2
+
+/*** Macros for Spindle pin ***/
+#define Spindle_Get()               ((PORTE >> 3) & 0x1U)
+#define Spindle_GetLatch()          ((LATE >> 3) & 0x1U)
+#define Spindle_PIN                  GPIO_PIN_RE3
 
 /*** Macros for DirX pin ***/
 #define DirX_Set()               (LATESET = (1U<<4))

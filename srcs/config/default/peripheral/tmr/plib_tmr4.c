@@ -1,20 +1,23 @@
 /*******************************************************************************
-  Output Compare OCMP3 Peripheral Library (PLIB)
+  TMR Peripheral Library Interface Source File
 
-  Company:
+  Company
     Microchip Technology Inc.
 
-  File Name:
-    plib_ocmp3.c
+  File Name
+    plib_tmr4.c
 
-  Summary:
-    OCMP3 Source File
+  Summary
+    TMR4 peripheral library source file.
 
-  Description:
-    None
+  Description
+    This file implements the interface to the TMR peripheral library.  This
+    library provides access to and control of the associated peripheral
+    instance.
 
 *******************************************************************************/
 
+// DOM-IGNORE-BEGIN
 /*******************************************************************************
 * Copyright (C) 2019 Microchip Technology Inc. and its subsidiaries.
 *
@@ -37,85 +40,84 @@
 * ANY WAY RELATED TO THIS SOFTWARE WILL NOT EXCEED THE AMOUNT OF FEES, IF ANY,
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
-#include "plib_ocmp3.h"
+// DOM-IGNORE-END
+
+
+// *****************************************************************************
+// *****************************************************************************
+// Section: Included Files
+// *****************************************************************************
+// *****************************************************************************
+
+#include "device.h"
+#include "plib_tmr4.h"
 #include "interrupts.h"
 
-// *****************************************************************************
-
-// *****************************************************************************
-// Section: OCMP3 Implementation
-// *****************************************************************************
-// *****************************************************************************
-
-// *****************************************************************************
 
 
-static volatile OCMP_OBJECT ocmp3Obj;
 
-void OCMP3_Initialize (void)
+void TMR4_Initialize(void)
 {
-    /*Setup OC3CON        */
-    /*OCM         = 5        */
-    /*OCTSEL       = 0        */
-    /*OC32         = 1        */
-    /*SIDL         = false    */
+    /* Disable Timer */
+    T4CONCLR = _T4CON_ON_MASK;
 
-    OC3CON = 0x25;
+    /*
+    SIDL = 0
+    TCKPS =2
+    T32   = 0
+    TCS = 0
+    */
+    T4CONSET = 0x20;
 
-    OC3R = 0;
-    OC3RS = 0;
+    /* Clear counter */
+    TMR4 = 0x0;
 
-    IEC0SET = _IEC0_OC3IE_MASK;
-}
+    /*Set period */
+    PR4 = 24999U;
 
-void OCMP3_Enable (void)
-{
-    OC3CONSET = _OC3CON_ON_MASK;
-}
 
-void OCMP3_Disable (void)
-{
-    OC3CONCLR = _OC3CON_ON_MASK;
 }
 
 
-void OCMP3_CompareValueSet (uint32_t value)
+void TMR4_Start(void)
 {
-    OC3R = value;
-}
-
-uint32_t OCMP3_CompareValueGet (void)
-{
-    return OC3R;
-}
-
-void OCMP3_CompareSecondaryValueSet (uint32_t value)
-{
-    OC3RS = value;
-}
-
-uint32_t OCMP3_CompareSecondaryValueGet (void)
-{
-    return OC3RS;
+    T4CONSET = _T4CON_ON_MASK;
 }
 
 
-void OCMP3_CallbackRegister(OCMP_CALLBACK callback, uintptr_t context)
+void TMR4_Stop (void)
 {
-    ocmp3Obj.callback = callback;
-
-    ocmp3Obj.context = context;
+    T4CONCLR = _T4CON_ON_MASK;
 }
 
-void __attribute__((used)) OUTPUT_COMPARE_3_InterruptHandler (void)
+void TMR4_PeriodSet(uint16_t period)
 {
-    /* Additional local variable to prevent MISRA C violations (Rule 13.x) */
-    uintptr_t context = ocmp3Obj.context;
-    IFS0CLR = _IFS0_OC3IF_MASK;    //Clear IRQ flag
-
-    if( (ocmp3Obj.callback != NULL))
-    {
-        ocmp3Obj.callback(context);
-    }
+    PR4  = period;
 }
 
+uint16_t TMR4_PeriodGet(void)
+{
+    return (uint16_t)PR4;
+}
+
+uint16_t TMR4_CounterGet(void)
+{
+    return (uint16_t)(TMR4);
+}
+
+
+uint32_t TMR4_FrequencyGet(void)
+{
+    return (12500000);
+}
+
+
+
+bool TMR4_PeriodHasExpired(void)
+{
+    bool status;
+        status = (IFS0bits.T4IF != 0U);
+        IFS0CLR = _IFS0_T4IF_MASK;
+
+    return status;
+}

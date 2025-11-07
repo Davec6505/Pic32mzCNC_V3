@@ -1,20 +1,17 @@
 /*******************************************************************************
-  Data Type definition of Timer PLIB
+  Output Compare OCMP8 Peripheral Library (PLIB)
 
   Company:
     Microchip Technology Inc.
 
   File Name:
-    plib_tmr2.h
+    plib_ocmp8.c
 
   Summary:
-    Data Type definition of the Timer Peripheral Interface Plib.
+    OCMP8 Source File
 
   Description:
-    This file defines the Data Types for the Timer Plib.
-
-  Remarks:
-    None.
+    None
 
 *******************************************************************************/
 
@@ -40,64 +37,65 @@
 * ANY WAY RELATED TO THIS SOFTWARE WILL NOT EXCEED THE AMOUNT OF FEES, IF ANY,
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
-
-#ifndef PLIB_TMR2_H
-#define PLIB_TMR2_H
-
-#include <stddef.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include "device.h"
-#include "plib_tmr_common.h"
-
-// DOM-IGNORE-BEGIN
-#ifdef __cplusplus  // Provide C++ Compatibility
-
-    extern "C" {
-
-#endif
-// DOM-IGNORE-END
+#include "plib_ocmp8.h"
+#include "interrupts.h"
 
 // *****************************************************************************
+
 // *****************************************************************************
-// Section: Data Types
+// Section: OCMP8 Implementation
 // *****************************************************************************
 // *****************************************************************************
 
 // *****************************************************************************
-// *****************************************************************************
-// Section: Interface Routines
-// *****************************************************************************
-// *****************************************************************************
 
 
-// *****************************************************************************
-void TMR2_Initialize(void);
+void OCMP8_Initialize (void)
+{
+    /*Setup OC8CON        */
+    /*OCM         = 6        */
+    /*OCTSEL       = 0        */
+    /*OC32         = 0        */
+    /*SIDL         = false    */
 
-void TMR2_Start(void);
+    OC8CON = 0x6;
 
-void TMR2_Stop(void);
+    /* unlock system for configuration */
+    SYSKEY = 0x00000000;
+    SYSKEY = 0xAA996655;
+    SYSKEY = 0x556699AA;
+    CFGCON |= 0x00010000U;
+    /* Lock system since done with configuration */
+    SYSKEY = 0x33333333;
+    OC8R = 2000;
+    OC8RS = 2000;
 
-void TMR2_PeriodSet(uint16_t period);
+}
 
-uint16_t TMR2_PeriodGet(void);
+void OCMP8_Enable (void)
+{
+    OC8CONSET = _OC8CON_ON_MASK;
+}
 
-uint16_t TMR2_CounterGet(void);
-
-uint32_t TMR2_FrequencyGet(void);
-
-void TMR2_InterruptEnable(void);
-
-void TMR2_InterruptDisable(void);
-
-void TMR2_CallbackRegister( TMR_CALLBACK callback_fn, uintptr_t context );
+void OCMP8_Disable (void)
+{
+    OC8CONCLR = _OC8CON_ON_MASK;
+}
 
 
-// DOM-IGNORE-BEGIN
-#ifdef __cplusplus  // Provide C++ Compatibility
 
-    }
-#endif
-// DOM-IGNORE-END
+uint16_t OCMP8_CompareValueGet (void)
+{
+    return (uint16_t)OC8R;
+}
 
-#endif /* PLIB_TMR2_H */
+void OCMP8_CompareSecondaryValueSet (uint16_t value)
+{
+    OC8RS = value;
+}
+
+uint16_t OCMP8_CompareSecondaryValueGet (void)
+{
+    return (uint16_t)OC8RS;
+}
+

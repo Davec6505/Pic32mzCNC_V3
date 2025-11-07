@@ -3,12 +3,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "../data_structures.h"  // ✅ E_AXIS + APP_DATA defined here (parent directory)
-#include "../config/default/peripheral/ocmp/plib_ocmp5.h"   //X Axis pulse
-#include "../config/default/peripheral/ocmp/plib_ocmp2.h"   //Y Axis pulse
-#include "../config/default/peripheral/ocmp/plib_ocmp3.h"   //Z Axis pulse
-#include "../config/default/peripheral/ocmp/plib_ocmp4.h"   //A Axis pulse
-
+#include "common.h"
+#include "data_structures.h"  // APP_DATA, MotionSegment defined here
 
 typedef struct {
     uint32_t x_steps, y_steps, z_steps, a_steps;
@@ -16,15 +12,15 @@ typedef struct {
     float steps_per_deg_a;
 } StepperPosition;
 
-void STEPPER_Initialize(APP_DATA* appData);                // ✅ Initialize with APP_DATA reference
-void STEPPER_SetStepInterval(uint32_t interval);
-void STEPPER_ScheduleStep(E_AXIS axis, uint32_t offset);  // Schedule pulse at absolute TMR2 time
-void STEPPER_DisableAxis(E_AXIS axis);                    // Stop pulse generation
-void STEPPER_DisableAll(void);                            // Emergency stop - disable all axes
-StepperPosition* STEPPER_GetPosition(void);               // Get current position counters
+// ============================================================================
+// Public API
+// ============================================================================
 
-// ✅ NEW: Direction control (called by motion controller before scheduling pulses)
+void STEPPER_Initialize(APP_DATA* appData);
+void STEPPER_LoadSegment(MotionSegment* segment);         // Load new segment for execution
+void STEPPER_SetStepRate(uint32_t rate_ticks);            // Update PR2 for velocity profiling
 void STEPPER_SetDirection(E_AXIS axis, bool forward);     // Set direction for axis
-
+void STEPPER_DisableAll(void);                            // Emergency stop
+StepperPosition* STEPPER_GetPosition(void);               // Get current position
 
 #endif /* STEPPER_H */

@@ -62,8 +62,8 @@ void OCMP4_Initialize (void)
 
     OC4CON = 0x25;
 
-    OC4R = 200;
-    OC4RS = 400;
+    OC4R = 0;
+    OC4RS = 0;
 
     IEC0SET = _IEC0_OC4IE_MASK;
 }

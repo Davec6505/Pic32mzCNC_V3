@@ -121,7 +121,6 @@ void OCMP5_CompareValueSet (uint32_t value);
 uint32_t OCMP5_CompareValueGet (void);
 
 uint32_t OCMP5_CompareSecondaryValueGet (void);
-
 void OCMP5_CompareSecondaryValueSet (uint32_t value);
 
 // *****************************************************************************

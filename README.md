@@ -135,12 +135,30 @@ void OC1Handler(void) {                 // X-axis dominant
 
 2. **Build the project:**
    ```bash
-   make          # Incremental build
-   make all      # Clean + full build
-   make clean    # Clean build artifacts
+   make                    # Full rebuild (clean + build, Release -O1) [DEFAULT]
+   make build              # Incremental build (fast - only changed files)
+   make BUILD_CONFIG=Debug # Full Debug rebuild (-g3 -O0, full symbols)
+   make clean              # Clean current BUILD_CONFIG outputs
+   make clean_all          # Clean both Debug and Release
+   make help               # Show all build options
    ```
 
-3. **Flash firmware to PIC32MZ:**
+3. **Build with debug output (compile-time, zero overhead):**
+   ```bash
+   # Enable motion debug output
+   make DEBUG_FLAGS="DEBUG_MOTION"
+   
+   # Enable multiple subsystems
+   make DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE DEBUG_SEGMENT"
+   
+   # Available flags: DEBUG_MOTION, DEBUG_GCODE, DEBUG_STEPPER, 
+   #                  DEBUG_SEGMENT, DEBUG_UART, DEBUG_APP
+   
+   # Note: Debug code is COMPLETELY REMOVED in release builds (zero overhead)
+   # See docs/DEBUG_SYSTEM_TUTORIAL.md for complete documentation
+   ```
+
+4. **Flash firmware to PIC32MZ:**
    ```bash
    # Use MikroE bootloader or MPLAB X IPE
    # Firmware: bins/Release/CS23.hex
@@ -169,6 +187,7 @@ G3 X10 Y10 I-5 J0  ; Counter-clockwise arc back to (10,10)
 
 ### **Documentation**
 - **README.md** (this file) - Comprehensive project overview
+- **docs/DEBUG_SYSTEM_TUTORIAL.md** - Professional compile-time debug system guide
 - **docs/TODO.md** - Detailed implementation checklist with estimates
 - **docs/plantuml/** - Architecture diagrams:
   - `01_system_overview.puml` - High-level system architecture

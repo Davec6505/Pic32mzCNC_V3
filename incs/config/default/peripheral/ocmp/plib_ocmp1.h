@@ -116,12 +116,12 @@ void OCMP1_Enable (void);
 void OCMP1_Disable (void);
 
 
-void OCMP1_CompareValueSet (uint32_t value);
+void OCMP1_CompareValueSet (uint16_t value);
 
-uint32_t OCMP1_CompareValueGet (void);
+uint16_t OCMP1_CompareValueGet (void);
 
-uint32_t OCMP1_CompareSecondaryValueGet (void);
-void OCMP1_CompareSecondaryValueSet (uint32_t value);
+uint16_t OCMP1_CompareSecondaryValueGet (void);
+void OCMP1_CompareSecondaryValueSet (uint16_t value);
 
 // *****************************************************************************
 /* Function:

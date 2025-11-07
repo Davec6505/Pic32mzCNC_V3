@@ -7,8 +7,8 @@
 #include <math.h>
 
 // Timer configuration for step interval calculations
-#define TIMER_TICKS_PER_SECOND 12500000UL  // 12.5MHz timer frequency
-#define TIMER_TICKS_PER_MICROSECOND 12.5f  // 12.5 ticks per microsecond
+// Timer frequency now queried dynamically (TMR4 in 16-bit mode)
+#define TIMER_TICKS_PER_SECOND_DYNAMIC() (TMR4_FrequencyGet())
 
 // Single instance of work coordinates managed by kinematics (physics module)
 static WorkCoordinateSystem work_coordinates;
@@ -72,41 +72,47 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     CoordinatePoint machine_start = KINEMATICS_WorkToMachine(start);
     CoordinatePoint machine_end = KINEMATICS_WorkToMachine(end);
     
-    // Calculate distance in mm using FPU
-    float dx_mm = fabsf(machine_end.x - machine_start.x);
-    float dy_mm = fabsf(machine_end.y - machine_start.y);
-    float dz_mm = fabsf(machine_end.z - machine_start.z);
-    float da_mm = fabsf(machine_end.a - machine_start.a);
+    // Calculate distance in mm using FPU (PRESERVE SIGN for direction!)
+    float dx_mm = machine_end.x - machine_start.x;  // ✅ Signed - positive=forward, negative=reverse
+    float dy_mm = machine_end.y - machine_start.y;
+    float dz_mm = machine_end.z - machine_start.z;
+    float da_mm = machine_end.a - machine_start.a;
     
-    // Convert mm to steps using existing steps_per_mm from settings
+    // Convert mm to steps using existing steps_per_mm from settings (PRESERVE SIGN!)
     segment_buffer->delta_x = (int32_t)(dx_mm * stepper->steps_per_mm_x);
     segment_buffer->delta_y = (int32_t)(dy_mm * stepper->steps_per_mm_y);
     segment_buffer->delta_z = (int32_t)(dz_mm * stepper->steps_per_mm_z);
     segment_buffer->delta_a = (int32_t)(da_mm * stepper->steps_per_deg_a);
     
-    // Determine dominant axis (highest step count) - dynamic dominant axis tracking
-    int32_t max_delta = segment_buffer->delta_x;
+    // Determine dominant axis (highest ABSOLUTE step count) - dynamic dominant axis tracking
+    int32_t max_delta = abs(segment_buffer->delta_x);  // ✅ Use abs() for comparison
     segment_buffer->dominant_axis = AXIS_X;
     E_AXIS limiting_axis = AXIS_X;
     
-    if(segment_buffer->delta_y > max_delta) {
-        max_delta = segment_buffer->delta_y;
+    if(abs(segment_buffer->delta_y) > max_delta) {
+        max_delta = abs(segment_buffer->delta_y);
         segment_buffer->dominant_axis = AXIS_Y;
         limiting_axis = AXIS_Y;
     }
-    if(segment_buffer->delta_z > max_delta) {
-        max_delta = segment_buffer->delta_z;
+    if(abs(segment_buffer->delta_z) > max_delta) {
+        max_delta = abs(segment_buffer->delta_z);
         segment_buffer->dominant_axis = AXIS_Z;
         limiting_axis = AXIS_Z;
     }
-    if(segment_buffer->delta_a > max_delta) {
-        max_delta = segment_buffer->delta_a;
+    if(abs(segment_buffer->delta_a) > max_delta) {
+        max_delta = abs(segment_buffer->delta_a);
         segment_buffer->dominant_axis = AXIS_A;
         limiting_axis = AXIS_A;
     }
     
     // Convert feedrate from mm/min to mm/sec
     float feedrate_mm_sec = feedrate / 60.0f;
+    // Guard: if no feed specified (0 or negative), fall back to a safe default
+    // This prevents divide-by-zero when computing nominal_rate and ensures motion proceeds after reset.
+    if (feedrate_mm_sec <= 0.0f) {
+        // Use a conservative default of 600 mm/min (10 mm/sec)
+        feedrate_mm_sec = 600.0f / 60.0f;
+    }
     
     // Get max_rate and acceleration for limiting axis (reuse existing settings)
     float max_rate_mm_min = 0.0f;
@@ -141,8 +147,8 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         feedrate_mm_sec = max_rate_mm_sec;
     }
     
-    // Timer frequency (reuse constant - no duplication)
-    const float TIMER_FREQ = 12500000.0f;  // 12.5 MHz from copilot-instructions.md
+    // Timer frequency (TMR4 in 16-bit mode)
+    const float TIMER_FREQ = (float)TMR4_FrequencyGet();
     
     // Get steps_per_mm for dominant axis (reuse existing variable)
     float steps_per_mm_dominant = stepper->steps_per_mm_x;
@@ -157,6 +163,10 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // Calculate nominal step interval (cruise speed)
     // steps_per_sec = feedrate_mm_sec * steps_per_mm
     float steps_per_sec = feedrate_mm_sec * steps_per_mm_dominant;
+    if (steps_per_sec < 1.0f) {
+        // Ensure at least 1 step/sec to avoid INF/NaN conversions
+        steps_per_sec = 1.0f;
+    }
     segment_buffer->nominal_rate = (uint32_t)(TIMER_FREQ / steps_per_sec);
     
     // Calculate acceleration profile (GRBL-style trapezoidal)
@@ -180,6 +190,15 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     float min_steps_per_sec = 500.0f;  // Configurable minimum
     segment_buffer->initial_rate = (uint32_t)(TIMER_FREQ / min_steps_per_sec);
     segment_buffer->final_rate = segment_buffer->initial_rate;
+
+    // Jerk smoothing: if trapezoidal profiling is effectively disabled (we currently
+    // run constant velocity in motion.c), clamp the initial rate to nominal so the
+    // first step does not arrive much earlier than subsequent steps.
+    if (segment_buffer->initial_rate < segment_buffer->nominal_rate) {
+        // initial_rate is a shorter interval (faster). For uniform timing we use nominal.
+        segment_buffer->initial_rate = segment_buffer->nominal_rate;
+        segment_buffer->final_rate   = segment_buffer->nominal_rate;
+    }
     
     // Rate delta per step (for integer ISR math)
     if(accel_steps > 0) {

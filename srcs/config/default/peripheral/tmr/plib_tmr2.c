@@ -54,6 +54,7 @@
 #include "interrupts.h"
 
 
+static volatile TMR_TIMER_OBJECT tmr2Obj;
 
 
 void TMR2_Initialize(void)
@@ -64,17 +65,19 @@ void TMR2_Initialize(void)
     /*
     SIDL = 0
     TCKPS =2
-    T32   = 1
+    T32   = 0
     TCS = 0
     */
-    T2CONSET = 0x28;
+    T2CONSET = 0x20;
 
     /* Clear counter */
     TMR2 = 0x0;
 
     /*Set period */
-    PR2 = 124U;
+    PR2 = 25011U;
 
+    /* Enable TMR Interrupt */
+    IEC0SET = _IEC0_T2IE_MASK;
 
 }
 
@@ -90,19 +93,19 @@ void TMR2_Stop (void)
     T2CONCLR = _T2CON_ON_MASK;
 }
 
-void TMR2_PeriodSet(uint32_t period)
+void TMR2_PeriodSet(uint16_t period)
 {
     PR2  = period;
 }
 
-uint32_t TMR2_PeriodGet(void)
+uint16_t TMR2_PeriodGet(void)
 {
-    return PR2;
+    return (uint16_t)PR2;
 }
 
-uint32_t TMR2_CounterGet(void)
+uint16_t TMR2_CounterGet(void)
 {
-    return (TMR2);
+    return (uint16_t)(TMR2);
 }
 
 
@@ -112,12 +115,35 @@ uint32_t TMR2_FrequencyGet(void)
 }
 
 
-
-bool TMR2_PeriodHasExpired(void)
+void __attribute__((used)) TIMER_2_InterruptHandler (void)
 {
-    bool status;
-        status = (IFS0bits.T3IF != 0U);
-        IFS0CLR = _IFS0_T3IF_MASK;
+    uint32_t status  = 0U;
+    status = IFS0bits.T2IF;
+    IFS0CLR = _IFS0_T2IF_MASK;
 
-    return status;
+    if((tmr2Obj.callback_fn != NULL))
+    {
+        uintptr_t context = tmr2Obj.context;
+        tmr2Obj.callback_fn(status, context);
+    }
+}
+
+
+void TMR2_InterruptEnable(void)
+{
+    IEC0SET = _IEC0_T2IE_MASK;
+}
+
+
+void TMR2_InterruptDisable(void)
+{
+    IEC0CLR = _IEC0_T2IE_MASK;
+}
+
+
+void TMR2_CallbackRegister( TMR_CALLBACK callback_fn, uintptr_t context )
+{
+    /* Save callback_fn and context in local memory */
+    tmr2Obj.callback_fn = callback_fn;
+    tmr2Obj.context = context;
 }

@@ -3,35 +3,235 @@
 ## Project Overview
 This is a CNC motion control system for PIC32MZ microcontrollers using hardware timers and Bresenham interpolation for precise multi-axis stepper motor control.
 
-## 🚀 Current Implementation Status (November 4, 2025)
-- ✅ **Professional event-driven G-code system** with clean architecture
-- ✅ **Event queue implementation** respecting APP_DATA abstraction layer
-- ✅ **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T
-- ✅ **Core architecture implemented** with absolute compare mode
-- ✅ **Single instance pattern in appData** for clean separation  
-- ✅ **Proper tokenization** - G/M commands keep all parameters (LinuxCNC/GRBL compatible)
-- ✅ **Multi-command line support** - "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
-- ✅ **Modal parameter support** - Standalone F, S, T commands (GRBL v1.1 compliant)
-- ✅ **16-command circular buffer** with flow control and overflow protection
-- ✅ **Harmony state machine pattern** - proper APP_Tasks architecture
-- ✅ **Non-blocking event processing** - one event per iteration
-- ✅ **Kinematics module complete** with physics calculations and velocity profiling
-- ✅ **Stepper module complete** with hardware abstraction and emergency stop
-- ✅ **Persistent GRBL settings** with NVM flash storage (29 parameters including arc)
-- ✅ **Delayed flash initialization** - read after peripherals ready (APP_LOAD_SETTINGS state)
-- ✅ **Unified data structures** - no circular dependencies, clean module separation
-- ✅ **LED blink rate stable** - no slowdown with complex commands
-- ✅ **Hardware FPU enabled** - Single-precision floating point for motion planning
-- ✅ **Trapezoidal velocity profiling IMPLEMENTED** - KINEMATICS_LinearMove with full physics
-- ✅ **Emergency stop system complete** - APP_ALARM state with hard/soft limit checking
-- ✅ **Position tracking and modal state** - Work coordinates with G90/G91 support
-- ✅ **Safety system complete** - STEPPER_DisableAll(), MOTION_UTILS_CheckHardLimits()
-- ✅ **256 microstepping validated** - ISR budget analysis shows 42% headroom at 512kHz
-- ✅ **Single ISR architecture designed** - GRBL pattern, no multi-ISR complexity
-- ✅ **PRIORITY PHASE SYSTEM IMPLEMENTED** - Hybrid ISR/main loop architecture (best of both worlds!)
-- ✅ **INCREMENTAL ARC INTERPOLATION COMPLETE** - Non-blocking G2/G3 with FPU acceleration
-- ✅ **Motion phase system operational** - VELOCITY/BRESENHAM/SCHEDULE/COMPLETE phases
-- ✅ **Project compiles successfully** with XC32 compiler
+## 🚀 Current Implementation Status (November 7, 2025)
+### ✅ COMPLETED FEATURES
+- **Professional event-driven G-code system** with clean architecture
+- **Event queue implementation** respecting APP_DATA abstraction layer
+- **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T
+- **Core architecture implemented** with absolute compare mode
+- **Single instance pattern in appData** for clean separation  
+- **Proper tokenization** - G/M commands keep all parameters (LinuxCNC/GRBL compatible)
+- **Multi-command line support** - "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
+- **Modal parameter support** - Standalone F, S, T commands (GRBL v1.1 compliant)
+- **16-command circular buffer** with flow control and overflow protection
+- **Harmony state machine pattern** - proper APP_Tasks architecture
+- **Non-blocking event processing** - one event per iteration
+- **Kinematics module complete** with physics calculations and velocity profiling
+- **Stepper module complete** with hardware abstraction and emergency stop
+- **Persistent GRBL settings** with NVM flash storage (29 parameters including arc)
+- **Delayed flash initialization** - read after peripherals ready (APP_LOAD_SETTINGS state)
+- **Unified data structures** - no circular dependencies, clean module separation
+- **Hardware FPU enabled** - Single-precision floating point for motion planning
+- **Trapezoidal velocity profiling IMPLEMENTED** - KINEMATICS_LinearMove with full physics
+- **Emergency stop system complete** - APP_ALARM state with hard/soft limit checking
+- **Position tracking and modal state** - Work coordinates with G90/G91 support
+- **Safety system complete** - STEPPER_DisableAll(), MOTION_UTILS_CheckHardLimits()
+- **256 microstepping validated** - ISR budget analysis shows 42% headroom at 512kHz
+- **Single ISR architecture designed** - GRBL pattern, no multi-ISR complexity
+- **PRIORITY PHASE SYSTEM IMPLEMENTED** - Hybrid ISR/main loop architecture (best of both worlds!)
+- **INCREMENTAL ARC INTERPOLATION COMPLETE** - Non-blocking G2/G3 with FPU acceleration
+- **Motion phase system operational** - VELOCITY/BRESENHAM/SCHEDULE/COMPLETE phases
+- **Project compiles successfully** with XC32 compiler
+- **UART3 fully functional** - TX and RX working perfectly, status queries respond
+- **Non-blocking UART utilities module** - uart_utils.c/h with callback-based output
+- **Professional compile-time debug system** - Zero runtime overhead, multiple subsystems (November 7, 2025)
+- **Clean build system** - make/make all defaults to Release, make build for incremental (November 7, 2025)
+
+### 🔧 COMPILE-TIME DEBUG SYSTEM (November 7, 2025)
+**Module:** `incs/common.h`, `srcs/Makefile`, `docs/DEBUG_SYSTEM_TUTORIAL.md`
+
+**Purpose:** Professional debug infrastructure with ZERO runtime overhead. Debug code is completely removed by compiler in release builds via preprocessor macros.
+
+**Key Benefits:**
+- ✅ **Zero runtime overhead** - Debug code eliminated in release builds
+- ✅ **Multiple subsystems** - Enable/disable by subsystem (motion, gcode, stepper, etc.)
+- ✅ **Clean syntax** - Looks like regular printf, works everywhere
+- ✅ **No runtime checks** - Pure compile-time conditional compilation
+- ✅ **ISR-safe** - Can use DEBUG_EXEC_XXX for LED toggles in interrupts
+
+**Available Debug Flags:**
+- `DEBUG_MOTION` - Motion planning and segment execution
+- `DEBUG_GCODE` - G-code parsing and event processing
+- `DEBUG_STEPPER` - Low-level stepper ISR and pulse generation
+- `DEBUG_SEGMENT` - Segment loading and queue management
+- `DEBUG_UART` - UART communication
+- `DEBUG_APP` - Application state machine
+
+**Build Usage:**
+```bash
+# Single subsystem
+make DEBUG_FLAGS="DEBUG_MOTION"
+
+# Multiple subsystems
+make DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE DEBUG_SEGMENT"
+
+# Release build (no debug, default)
+make
+```
+
+**Code Usage:**
+```c
+// Include required headers
+#include "common.h"
+#include "utils/uart_utils.h"  // For DEBUG_PRINT_XXX macros
+#include "../config/default/peripheral/gpio/plib_gpio.h"  // For LED toggles
+
+// Debug print (compiles to UART_Printf in debug, nothing in release)
+DEBUG_PRINT_MOTION("[MOTION] Loading segment: steps=%lu\r\n", steps);
+
+// Debug execute (compiles to code in debug, nothing in release)
+DEBUG_EXEC_SEGMENT(LED1_Set());  // Visual indicator
+
+// In release builds, both lines above compile to ((void)0) - zero overhead
+```
+
+**Documentation:** See `docs/DEBUG_SYSTEM_TUTORIAL.md` for complete guide with examples, best practices, and troubleshooting.
+
+### 🔧 NON-BLOCKING UART UTILITIES (November 6, 2025)
+**Module:** `srcs/utils/uart_utils.c`, `incs/utils/uart_utils.h`
+
+**Purpose:** Centralized non-blocking UART communication for debug output and GRBL protocol responses, preventing real-time motion interference.
+
+**Implementation:**
+- **Callback-based architecture**: UART3_WriteCallbackRegister() with persistent notifications
+- **Global flag**: `volatile bool uart3TxReady` tracks TX buffer state
+- **Event handler**: `UART_EVENT_WRITE_THRESHOLD_REACHED` sets flag when buffer ready
+- **Non-blocking printf**: `UART_Printf()` checks flag before sending, drops messages if busy
+- **Protocol helpers**: `UART_SendOK()`, `UART_IsReady()`
+
+**Key Functions:**
+```c
+void UART_Initialize(void);           // Setup callback and notifications
+bool UART_Printf(const char* fmt, ...); // Non-blocking formatted output
+void UART_SendOK(void);               // Send "OK\r\n" response
+bool UART_IsReady(void);              // Check TX ready state
+```
+
+**Initialization Pattern:**
+```c
+// In APP_Initialize() - called once at startup
+UART_Initialize();  // Registers callback and enables notifications
+```
+
+**Usage Pattern:**
+```c
+// Non-blocking debug output (safe for ISR and main loop)
+if (UART_Printf("[DEBUG] Value: %d\r\n", value)) {
+    // Message sent successfully
+} else {
+    // TX busy, message dropped (no blocking)
+}
+
+// Protocol response
+UART_SendOK();  // Sends "OK\r\n" when ready
+```
+
+**Benefits:**
+- ✅ **No blocking** - Real-time motion never waits for UART
+- ✅ **ISR-safe** - Can be called from interrupts (messages drop if busy)
+- ✅ **Centralized** - Single module for all UART communication
+- ✅ **Persistent callbacks** - No need to re-register after each write
+- ✅ **Rate-limited** - Natural flow control via uart3TxReady flag
+
+**Files Updated:**
+- `srcs/app.c` - Added `#include "utils/uart_utils.h"`, calls UART_Initialize()
+- `srcs/gcode/gcode_parser.c` - Uses UART_SendOK() for protocol responses
+- `srcs/motion/motion.c` - Uses UART_Printf() for debug output
+- `srcs/motion/stepper.c` - Uses UART_Printf() for debug output, LED2_Toggle() for visual confirmation
+
+### 🔧 VISUAL MOTION DEBUG (November 6, 2025)
+**Added:** `LED2_Toggle()` in `STEPPER_ScheduleStep()` (srcs/motion/stepper.c line ~125)
+
+**Purpose:** Visual confirmation that motion scheduling is executing
+
+**Behavior:**
+- **Rapid blink (many Hz)** → `STEPPER_ScheduleStep()` IS being called → Motion system working
+- **Slow blink (~1Hz heartbeat)** → Function NOT being called → Phase system or segment loading issue
+
+**Usage:**
+```gcode
+G92 X0 Y0 Z0    # Set work origin
+G1 X1 F100      # Move 1mm in X axis
+```
+
+**Observe LED2:**
+- If rapid blink: Motion hardware OK, check if motors actually moving
+- If slow blink: Motion segments not loading or phase system stuck
+
+### 🔧 ACTIVE DEBUGGING SESSION (November 5-6, 2025)
+**Problem:** G-code commands are accepted (OK response) but position never updates. Motion does not execute.
+
+**Root Cause Found:** Commands are being queued but `GCODE_GetNextEvent()` is not successfully converting them to events that reach the motion system.
+
+**Debug Progress Chain:**
+1. ✅ **UART3 communication working** - Banner prints, status queries respond correctly
+2. ✅ **G-code parser receiving commands** - "OK" responses confirm reception
+3. ✅ **Tokenization working** - `[GCODE] Extract called, length=X`, `[GCODE] Tokens=X`
+4. ✅ **Commands being queued** - `[GCODE] Queued: G1X10F100` confirms queue population
+5. ✅ **GCODE_GetNextEvent() being called** - Function executes in APP_IDLE event loop
+6. ✅ **Non-blocking UART implemented** - uart_utils module prevents motion blocking
+7. ✅ **LED2 visual debug added** - Will show if STEPPER_ScheduleStep() executes
+8. ❌ **CRITICAL ISSUE IDENTIFIED:** `parse_command_to_event()` is being called but events are NOT reaching APP_Tasks event processing
+9. ❌ **No motion segments generated** - `[MOTION] Loading segment:` never prints
+10. ❌ **Position stays 0.000** - Motion system never executes
+
+**Debug Output Added (Currently in Code):**
+- `srcs/gcode/gcode_parser.c`:
+  - Line ~141: `[GCODE] Extract called, length=X` - Confirms buffer extraction
+  - Line ~151: `[GCODE] Tokens=X` - Shows tokenization count
+  - Line ~167: `[GCODE] Queued: <cmd>` - Shows what entered queue
+  - Line ~217-228: `[GCODE] GetNextEvent:` and `parse_command_to_event returned:` (DISABLED - too verbose, floods UART)
+- `srcs/app.c`:
+  - Line ~269: `[APP] Event received: type=X` - Would show if event retrieved (NEVER PRINTS!)
+  - Line ~322: `[APP] G1 Event: X Y Z F` - Would show linear move details (NEVER PRINTS!)
+  - Line ~329: `[APP] Segment queued: count=X` - Would show segment added (NEVER PRINTS!)
+- `srcs/motion/motion.c`:
+  - Line ~237: `[MOTION] Loading segment: queueCount=X` - Would show segment load attempt (NEVER PRINTS!)
+  - Line ~260: `[MOTION] Segment loaded: initial_rate=X` - Would show timing parameters (NEVER PRINTS!)
+- `srcs/motion/stepper.c`:
+  - Line ~125: `LED2_Toggle()` - Visual confirmation if STEPPER_ScheduleStep() called
+  - Line ~132: `[STEPPER] Axis X: now=X, offset=X, pulse_start=X` - Would show step scheduling (NEVER PRINTS!)
+
+**Observed Behavior:**
+```
+G92X0Y0Z0
+[GCODE] Extract called, length=10
+[GCODE] Tokens=2
+[GCODE] Queued: G92X0Y0Z0
+OK
+
+G1X10F100
+[GCODE] Extract called, length=10
+[GCODE] Tokens=2
+[GCODE] Queued: G1X10F100
+OK
+
+?
+<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000|FS:0,0>
+```
+
+**Key Finding:** NO `[APP] Event received:` messages appear, meaning `GCODE_GetNextEvent()` returns false even though commands are in queue.
+
+**Next Steps for Testing:**
+1. **Flash firmware with LED2_Toggle()** - Visual confirmation of motion execution
+2. **Test simple motion**: `G92 X0`, then `G1 X1 F100`
+3. **Observe LED2 behavior**:
+   - Rapid blink = `STEPPER_ScheduleStep()` executing → Check motor drivers
+   - Slow blink = Function not called → Phase system or event parsing issue
+4. **Enable selective debug** - Only G1/G92 events, not control characters
+5. **Check parse_command_to_event() return value** - Is it returning false for valid G-code?
+
+**Critical Hypothesis:** `parse_command_to_event()` is likely returning **false** for valid G-code commands (G92, G1), preventing events from being created. The `?` status query floods output when debug enabled, suggesting it's being parsed repeatedly without being consumed.
+
+**Modified Files (November 5-6 debug session):**
+- `srcs/utils/uart_utils.c` - Created non-blocking UART utilities module
+- `incs/utils/uart_utils.h` - UART utilities header with function prototypes
+- `srcs/motion/motion.c` - Added debug output (lines 237, 260), updated to use uart_utils
+- `srcs/motion/stepper.c` - Added LED2_Toggle() (line ~125), debug output (line 132), uses uart_utils
+- `srcs/app.c` - Added debug output (lines 269, 322, 329), calls UART_Initialize(), uses uart_utils
+- `srcs/gcode/gcode_parser.c` - Uses UART_SendOK() for protocol responses
+- `srcs/Makefile` - Added directory creation before linking, clean target removes all build artifacts
+- `srcs/gcode/gcode_parser.c` - Added debug output (lines 141, 151, 167, 217-228), added UART3 include
 
 **See README.md TODO section for remaining implementation tasks (homing, spindle/coolant, advanced features)**
 
@@ -243,40 +443,6 @@ void __ISR(_TIMER_2_VECTOR, IPL1SOFT) TMR2Handler(void) {
 
 ### Professional G-Code Event System ✅
 - **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
-- **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91 commands
-- **Abstraction layer respect**: No APP_DATA exposure, maintains clean boundaries
-- **Multi-command tokenization**: "G90G1X10Y10F1000S200M3" → individual events
-- **Zero memory allocation**: Deterministic processing for real-time systems
-- **Utils module**: Professional string parsing with robust tokenization
-- **Flow control**: 16-command circular buffer with "OK" withholding
-- **Real-time characters**: Bypass tokenization for immediate '?!~^X' processing
-- **GRBL compliance**: Full v1.1 protocol support with proper status reporting
-
-### GRBL v1.1 Protocol Compliance
-- **One "OK" per G-code line**: Send acknowledgment only after complete line is received and queued
-- **Line-oriented buffering**: Accumulate bytes until `\n` or `\r` terminator before processing
-- **Static variable pattern**: Use `static bool has_line_terminator` to persist state across polled function calls
-  - Allows state to accumulate during byte reception
-  - **CRITICAL**: Reset to `false` after processing to prevent stale state
-- **Early exit pattern**: Check `!has_line_terminator` and break immediately to prevent premature processing
-- **Control characters bypass buffering**: `?!~^X` process immediately without waiting for terminator
-- **Flow control**: Withhold "OK" when command queue is full (GRBL behavior)
-- **Real-time commands never get "OK"**: 
-  - `?` → Status report only
-  - `!` → Feed hold, silent
-  - `~` → Resume, silent
-  - `^X` → Reset + banner only
-- **Empty lines ignored**: Whitespace-only input gets no response
-- **Echo disabled**: GRBL doesn't echo commands by default
-
-### Single Instance Pattern in appData ✅
-- **All major data structures** centralized in APP_DATA struct
-- **No static module data** - clean separation of concerns  
-- **Pass by reference** through function calls for explicit ownership
-- **Work coordinates protected** by private static in kinematics module
-
-### Professional G-Code Event System ✅
-- **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
 - **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T commands
 - **Proper tokenization**: G/M commands consume ALL parameters until next G/M
   - Example: `G90G1X10Y10F1000` → Tokens: `"G90"`, `"G1X10Y10F1000"`
@@ -376,7 +542,7 @@ case GCODE_STATE_IDLE:
                 break;
             }
         }
-        
+
         // Check first byte for control characters (bypass line buffering)
         bool control_char_found = false;
         for(uint8_t i = 0; i < sizeof(GRBL_CONTROL_CHARS); i++){
@@ -757,7 +923,7 @@ uint8_t modalPlane;                // Modal plane state (G17=0, G18=1, G19=2)
 - **Parameters**:
   - `X Y Z`: End point coordinates (absolute or relative based on G90/G91)
   - `I J K`: Center offset from **start point** (always incremental)
-  - Example: `G2 X10 Y0 I5 J0` → Arc from current pos to (10,0), center at (current.x+5, current.y+0)
+  - Example: `G2 X10 Y0 I5 J0` → Arc from current pos to (10,0), center at (5,0), radius=5mm
 
 **Arc Calculations (implemented in app.c lines 487-574):**
 1. **Center point**: `center.x = start.x + centerX`, `center.y = start.y + centerY`
@@ -921,42 +1087,30 @@ G2 X10 Y0 I5 J0   ; CW arc from (0,0) to (10,0), center at (5,0), radius=5mm
 - **Pre-allocate buffer** in caller (APP_DATA or stack)
 - **Error checking**: Verify radius matches at start and end
 
-## Remaining Implementation Tasks
+## 🔧 BUILD SYSTEM STATUS (November 6, 2025)
 
-**See README.md TODO section for detailed implementation checklists:**
-- Homing system (GPIO, G28, $H cycle, settings $22-$27)
-- Spindle & coolant control (PWM, M3/M5/M7/M9, settings $30-$31)
-- TMR2 rollover monitoring (controlled reset pattern)
-- G17/G18/G19 plane selection (arc interpolation in XZ/YZ)
-- Advanced G-code features (G54-G59, real-time overrides, parking)
-- Look-ahead motion planning (junction deviation, velocity optimization)
+### Current State
+- ✅ **Build works** - `make all` defaults to Release, project compiles successfully
+- ✅ **Clean works** - `make clean` removes all build artifacts
+- ✅ **Directory structure finalized** - Separate Debug/Release folders for bins, objs, libs, other
 
-## Development Workflow
-1. Build: `make` or `make all` (clean + build)
-2. Flash: MikroE bootloader
-3. Clean: `make clean`
+### Directory Structure (Final)
+```
+bins/Debug/     - Debug executables (.hex files)
+bins/Release/   - Release executables (.hex files)
+objs/Debug/     - Debug object files (.o)
+objs/Release/   - Release object files (.o)
+libs/Debug/     - Debug libraries (.a)
+libs/Release/   - Release libraries (.a)
+other/Debug/    - Debug map files and XML
+other/Release/  - Release map files and XML
+```
 
-## When Suggesting Code
-- Always use absolute timer values for OCx registers
-- Never suggest stopping TMR2 during motion
-- Keep ISR implementations minimal
-- Use state machines for complex logic, not interrupts
-- Respect the dominant/subordinate axis architecture
-- Consider dynamic axis swapping capability
-- **For arcs**: Use FPU, verify radius, generate all segments atomically
+### Build Commands
+```bash
+make all                    # Build Release (default)
+make BUILD_CONFIG=Debug     # Build Debug
+make clean                  # Clean current BUILD_CONFIG artifacts
+```
 
-## Questions to Ask
-When uncertain about implementation details:
-- "Is this the dominant or subordinate axis?"
-- "Should this logic run in ISR or state machine?"
-- "Are we using absolute or relative timer values?"
-- "Does this arc need radius verification?"
-- "How many segments will this arc generate?"
-- "Does this require scheduling ahead of TMR2?"
-
-## Questions to Ask
-When uncertain about implementation details:
-- "Is this the dominant or subordinate axis?"
-- "Should this logic run in ISR or state machine?"
-- "Are we using absolute or relative timer values?"
-- "Does this require scheduling ahead of TMR2?"
+**No further Makefile changes planned** - current structure works well and follows standard practices.

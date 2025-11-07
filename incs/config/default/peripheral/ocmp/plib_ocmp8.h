@@ -1,20 +1,17 @@
 /*******************************************************************************
-  Data Type definition of Timer PLIB
+  Output Compare (OCMP) Peripheral Library Interface Header File
 
   Company:
     Microchip Technology Inc.
 
   File Name:
-    plib_tmr2.h
+    plib_ocmp8.h
 
   Summary:
-    Data Type definition of the Timer Peripheral Interface Plib.
+    OCMP PLIB Header File
 
   Description:
-    This file defines the Data Types for the Timer Plib.
-
-  Remarks:
-    None.
+    None
 
 *******************************************************************************/
 
@@ -41,63 +38,95 @@
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
 
-#ifndef PLIB_TMR2_H
-#define PLIB_TMR2_H
+#ifndef PLIB_OCMP8_H
+#define PLIB_OCMP8_H
 
 #include <stddef.h>
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include "device.h"
-#include "plib_tmr_common.h"
+#include "plib_ocmp_common.h"
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility
-
     extern "C" {
-
 #endif
 // DOM-IGNORE-END
 
-// *****************************************************************************
-// *****************************************************************************
-// Section: Data Types
-// *****************************************************************************
-// *****************************************************************************
 
 // *****************************************************************************
-// *****************************************************************************
-// Section: Interface Routines
+// Section: Interface
 // *****************************************************************************
 // *****************************************************************************
 
+/*************************** OCMP8 API ****************************************/
+// *****************************************************************************
+/* Function:
+   void OCMP8_Initialize (void)
+
+  Summary:
+    Initialization function OCMP8 peripheral
+
+  Description:
+    This function initializes the OCMP8 peripheral with user input
+	from the configurator.
+
+  Parameters:
+    void
+
+  Returns:
+    void
+*/
+void OCMP8_Initialize (void);
 
 // *****************************************************************************
-void TMR2_Initialize(void);
+/* Function:
+   void OCMP8_Enable (void)
 
-void TMR2_Start(void);
+  Summary:
+    Enable function OCMP8 peripheral
 
-void TMR2_Stop(void);
+  Description:
+    This function enables the OCMP8 peripheral
 
-void TMR2_PeriodSet(uint16_t period);
+  Parameters:
+    void
 
-uint16_t TMR2_PeriodGet(void);
+  Returns:
+    void
+*/
+void OCMP8_Enable (void);
 
-uint16_t TMR2_CounterGet(void);
+// *****************************************************************************
+/* Function:
+   void OCMP8_Disable (void)
 
-uint32_t TMR2_FrequencyGet(void);
+  Summary:
+    Disable function OCMP8 peripheral
 
-void TMR2_InterruptEnable(void);
+  Description:
+    This function disables the OCMP8 peripheral.
 
-void TMR2_InterruptDisable(void);
+  Parameters:
+    void
 
-void TMR2_CallbackRegister( TMR_CALLBACK callback_fn, uintptr_t context );
+  Returns:
+    void
+*/
+void OCMP8_Disable (void);
+
+
+
+uint16_t OCMP8_CompareValueGet (void);
+
+uint16_t OCMP8_CompareSecondaryValueGet (void);
+void OCMP8_CompareSecondaryValueSet (uint16_t value);
 
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility
-
     }
 #endif
-// DOM-IGNORE-END
 
-#endif /* PLIB_TMR2_H */
+// DOM-IGNORE-END
+#endif // PLIB_OCMP8_H

@@ -57,13 +57,20 @@ void OCMP1_Initialize (void)
     /*Setup OC1CON        */
     /*OCM         = 5        */
     /*OCTSEL       = 0        */
-    /*OC32         = 1        */
+    /*OC32         = 0        */
     /*SIDL         = false    */
 
-    OC1CON = 0x25;
+    OC1CON = 0x5;
 
-    OC1R = 200;
-    OC1RS = 400;
+    /* unlock system for configuration */
+    SYSKEY = 0x00000000;
+    SYSKEY = 0xAA996655;
+    SYSKEY = 0x556699AA;
+    CFGCON |= 0x00010000U;
+    /* Lock system since done with configuration */
+    SYSKEY = 0x33333333;
+    OC1R = 1080;
+    OC1RS = 20;
 
     IEC0SET = _IEC0_OC1IE_MASK;
 }
@@ -79,26 +86,25 @@ void OCMP1_Disable (void)
 }
 
 
-void OCMP1_CompareValueSet (uint32_t value)
+void OCMP1_CompareValueSet (uint16_t value)
 {
     OC1R = value;
 }
 
-uint32_t OCMP1_CompareValueGet (void)
+uint16_t OCMP1_CompareValueGet (void)
 {
-    return OC1R;
+    return (uint16_t)OC1R;
 }
 
-void OCMP1_CompareSecondaryValueSet (uint32_t value)
+void OCMP1_CompareSecondaryValueSet (uint16_t value)
 {
     OC1RS = value;
 }
 
-uint32_t OCMP1_CompareSecondaryValueGet (void)
+uint16_t OCMP1_CompareSecondaryValueGet (void)
 {
-    return OC1RS;
+    return (uint16_t)OC1RS;
 }
-
 
 void OCMP1_CallbackRegister(OCMP_CALLBACK callback, uintptr_t context)
 {
