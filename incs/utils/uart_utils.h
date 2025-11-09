@@ -16,6 +16,9 @@
 #ifndef UART_UTILS_H
 #define UART_UTILS_H
 
+#include "app.h"
+#include "gcode_parser.h"
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -102,6 +105,19 @@ bool UART_SendAlarm(uint8_t alarm_code);
  * @return true if sent, false if TX busy
  */
 bool UART_SendMessage(const char* msg);
+
+
+/**
+ * * @brief Print GRBL command help messages
+ * 
+ */
+void UART_PrintHelp(void);
+
+/**
+ * * @brief Perform a soft reset of the UART (clear buffers, reset state)
+ * 
+ */
+void UART_SoftReset(APP_DATA* appData,GCODE_CommandQueue* cmd);
 
 #ifdef __cplusplus
 }

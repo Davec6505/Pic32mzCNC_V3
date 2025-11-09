@@ -551,74 +551,45 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             
         case GCODE_EVENT_SET_WORK_OFFSET:
         {
-            // G92 - Set work coordinate offset so current machine position = specified work position
-            // Formula: offset = MPos - desired_WPos
-            // Example: If MPos=(29.975, 7.500) and we want WPos=(0,0), then offset=(29.975, 7.500)
-            // Note: Only updates axes that are specified (non-NaN values)
-            
+            // G10 L2/L20 or G92 - Set work coordinate system offset
             StepperPosition* pos = STEPPER_GetPosition();
+            CNC_Settings* settings = SETTINGS_GetCurrent();
             WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
             
-            // Get current machine position
-            float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
-            float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
-            float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
+            float mpos_x = (float)pos->x_steps / settings->steps_per_mm_x;
+            float mpos_y = (float)pos->y_steps / settings->steps_per_mm_y;
+            float mpos_z = (float)pos->z_steps / settings->steps_per_mm_z;
             
-            // Calculate new offsets (only for specified axes)
-            float offset_x = wcs->offset.x;  // Keep existing
-            float offset_y = wcs->offset.y;  // Keep existing
-            float offset_z = wcs->offset.z;  // Keep existing
-            
-            // Update work position and offset for each specified axis
-            if (!isnan(event->data.setWorkOffset.x)) {
-                offset_x = mpos_x - event->data.setWorkOffset.x;
-                appData->currentX = event->data.setWorkOffset.x;
-            }
-            if (!isnan(event->data.setWorkOffset.y)) {
-                offset_y = mpos_y - event->data.setWorkOffset.y;
-                appData->currentY = event->data.setWorkOffset.y;
-            }
-            if (!isnan(event->data.setWorkOffset.z)) {
-                offset_z = mpos_z - event->data.setWorkOffset.z;
-                appData->currentZ = event->data.setWorkOffset.z;
-            }
-            if (!isnan(event->data.setWorkOffset.a)) {
-                appData->currentA = event->data.setWorkOffset.a;
+            // Set work offset: work_offset = machine_pos - desired_work_pos
+            if (!isnan(event->data.workOffset.x)) {
+                wcs->offset.x = mpos_x - event->data.workOffset.x;
+                appData->currentX = event->data.workOffset.x;
             }
             
-            // Set the work coordinate offset
-            KINEMATICS_SetWorkCoordinates(offset_x, offset_y, offset_z);
+            if (!isnan(event->data.workOffset.y)) {
+                wcs->offset.y = mpos_y - event->data.workOffset.y;
+                appData->currentY = event->data.workOffset.y;
+            }
+            
+            if (!isnan(event->data.workOffset.z)) {
+                wcs->offset.z = mpos_z - event->data.workOffset.z;
+                appData->currentZ = event->data.workOffset.z;
+            }
             
             return true;
         }
-            
-        case GCODE_EVENT_SET_FEEDRATE:
-            appData->modalFeedrate = event->data.setFeedrate.feedrate;
-            return true;
-            
-        case GCODE_EVENT_SET_SPINDLE_SPEED:
-            appData->modalSpindleRPM = event->data.setSpindleSpeed.rpm;
-            return true;
-            
-        case GCODE_EVENT_SET_TOOL:
-            appData->modalToolNumber = event->data.setTool.toolNumber;
-            // TODO: Tool change logic
-            return true;
-            
+        
         case GCODE_EVENT_DWELL:
-            // TODO: Implement dwell
-            return true;
-            
         case GCODE_EVENT_COOLANT_ON:
-            // TODO: Coolant control
-            return true;
-            
         case GCODE_EVENT_COOLANT_OFF:
-            // TODO: Coolant control
-            return true;
-            
+        case GCODE_EVENT_SET_FEEDRATE:
+        case GCODE_EVENT_SET_SPINDLE_SPEED:
+        case GCODE_EVENT_SET_TOOL:
         case GCODE_EVENT_NONE:
         default:
-            return true;  // Ignore unknown events
+            // Not yet implemented or no action needed
+            return true;
     }
+    
+    return true;
 }

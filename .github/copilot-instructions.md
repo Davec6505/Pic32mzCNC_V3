@@ -1,3 +1,22 @@
+<SYSTEM>
+You are an AI programming assistant that is specialized in applying code changes to an existing document.
+Follow Microsoft content policies.
+Avoid content that violates copyrights.
+If you are asked to generate content that is harmful, hateful, racist, sexist, lewd, violent, or completely irrelevant to software engineering, only respond with "Sorry, I can't assist with that."
+Keep your answers short and impersonal.
+The user has a code block that represents a suggestion for a code change and a instructions file opened in a code editor.
+Rewrite the existing document to fully incorporate the code changes in the provided code block.
+For the response, always follow these instructions:
+1. Analyse the code block and the existing document to decide if the code block should replace existing code or should be inserted.
+2. If necessary, break up the code block in multiple parts and insert each part at the appropriate location.
+3. Preserve whitespace and newlines right after the parts of the file that you modify.
+4. The final result must be syntactically valid, properly formatted, and correctly indented. It should not contain any ...existing code... comments.
+5. Finally, provide the fully rewritten file. You must output the complete file.
+</SYSTEM>
+
+
+I have the following code open in the editor, starting from line 1 to line 1233.
+````instructions
 # GitHub Copilot Instructions for Pic32mzCNC_V3
 
 ## Project Overview
@@ -354,6 +373,40 @@ OK
 
 ### 🔧 ACTIVE DEBUGGING SESSION - UGS CONNECTION (November 7, 2025)
 **Problem:** UGS connects, sends commands (`?`, `$I`, `$$`), but immediately disconnects. Putty works correctly, confirming firmware responds.
+
+**CRITICAL FIX FOUND (November 9, 2025):**
+- **Root Cause:** MCC regeneration reverts UART3 TX buffer size from 1024 to 256 bytes
+- **Symptom:** `$$` command response (~400-500 bytes) overflows 256-byte TX buffer
+- **Result:** UGS times out waiting for complete settings response, disconnects
+
+**⚠️ CRITICAL: After ANY MCC regeneration, ALWAYS verify UART3 buffer sizes!**
+
+**File:** `srcs/config/default/peripheral/uart/plib_uart3.c`
+
+**Required Buffer Sizes:**
+```c
+// Line ~56-57
+#define UART3_READ_BUFFER_SIZE      (512U)   // ✅ Must be 512
+#define UART3_WRITE_BUFFER_SIZE     (1024U)  // ✅ Must be 1024 (NOT 256!)
+```
+
+**Verification Steps After MCC Regeneration:**
+1. Open `srcs/config/default/peripheral/uart/plib_uart3.c`
+2. Check lines 56-57 for buffer size defines
+3. Verify: `UART3_READ_BUFFER_SIZE = 512U`
+4. Verify: `UART3_WRITE_BUFFER_SIZE = 1024U`
+5. If incorrect, manually edit and rebuild
+
+**Why These Sizes:**
+- **RX Buffer (512 bytes):** Handles burst G-code commands from UGS/streaming
+- **TX Buffer (1024 bytes):** Required for `$$` settings dump (~400-500 bytes)
+- **MCC Default (256 bytes TX):** Too small for GRBL settings response
+
+**Symptoms of Wrong Buffer Size:**
+- ✅ `?` (status query) works (~100 bytes)
+- ✅ `$I` (build info) works (~80 bytes)
+- ❌ `$$` (settings) fails - response truncated
+- ❌ UGS disconnects immediately after `$$` command
 
 **UGS Connection Sequence Observed:**
 ```
@@ -1230,3 +1283,4 @@ make clean                  # Clean current BUILD_CONFIG artifacts
 ```
 
 **No further Makefile changes planned** - current structure works well and follows standard practices.
+```

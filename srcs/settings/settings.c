@@ -338,6 +338,17 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$4=%u\r\n", settings->step_enable_invert);
     len += sprintf(&settings_buffer[len], "$5=%u\r\n", settings->limit_pins_invert);
     len += sprintf(&settings_buffer[len], "$12=%.3f\r\n", settings->mm_per_arc_segment);
+
+        
+    len += sprintf(&settings_buffer[len], "$22=%u\r\n", settings->homing_enable);
+    len += sprintf(&settings_buffer[len], "$23=%u\r\n", settings->homing_dir_mask);
+    len += sprintf(&settings_buffer[len], "$24=%.3f\r\n", settings->homing_feed_rate);
+    len += sprintf(&settings_buffer[len], "$25=%.3f\r\n", settings->homing_seek_rate);
+    len += sprintf(&settings_buffer[len], "$26=%u\r\n", (unsigned int)settings->homing_debounce);
+    len += sprintf(&settings_buffer[len], "$27=%.3f\r\n", settings->homing_pull_off);
+
+    len += sprintf(&settings_buffer[len], "$30=%.3f\r\n", settings->spindle_max_rpm);
+    len += sprintf(&settings_buffer[len], "$31=%.3f\r\n", settings->spindle_min_rpm);
     
     len += sprintf(&settings_buffer[len], "$100=%.3f\r\n", settings->steps_per_mm_x);
     len += sprintf(&settings_buffer[len], "$101=%.3f\r\n", settings->steps_per_mm_y);
@@ -358,15 +369,8 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$131=%.3f\r\n", settings->max_travel_y);
     len += sprintf(&settings_buffer[len], "$132=%.3f\r\n", settings->max_travel_z);
     
-    len += sprintf(&settings_buffer[len], "$30=%.3f\r\n", settings->spindle_max_rpm);
-    len += sprintf(&settings_buffer[len], "$31=%.3f\r\n", settings->spindle_min_rpm);
-    
-    len += sprintf(&settings_buffer[len], "$22=%u\r\n", settings->homing_enable);
-    len += sprintf(&settings_buffer[len], "$23=%u\r\n", settings->homing_dir_mask);
-    len += sprintf(&settings_buffer[len], "$24=%.3f\r\n", settings->homing_feed_rate);
-    len += sprintf(&settings_buffer[len], "$25=%.3f\r\n", settings->homing_seek_rate);
-    len += sprintf(&settings_buffer[len], "$26=%u\r\n", (unsigned int)settings->homing_debounce);
-    len += sprintf(&settings_buffer[len], "$27=%.3f\r\n", settings->homing_pull_off);
+
+
 
     // ✅ GRBL protocol: blank line + ok
     len += sprintf(&settings_buffer[len], "\r\nok\r\n");
@@ -379,9 +383,9 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
 /* Print build info (GRBL $I command) */
 void SETTINGS_PrintBuildInfo(void)
 {
-    // ✅ GRBL v1.1 exact format - MUST have space after colons!
-    // Format: [VER: version] [OPT: options,blockbuffersize,rxbuffersize,axiscount]
-    const char build_info[] = "[VER: 1.1h.20251102:]\r\n[OPT: VHM,35,1024,4]\r\nok\r\n";
+    // ✅ GRBL v1.1 format - UGS expects specific format!
+    // Format: [VER:version] [OPT:options,blockbuffersize,rxbuffersize]
+    const char build_info[] = "[VER:1.1h.20251102]\r\n[OPT:VHM,35,1024,4]\r\nok\r\n";
     
     // ✅ Write to PLIB TX ring buffer - ISR transmits in background
     UART3_Write((uint8_t*)build_info, sizeof(build_info) - 1);  // -1 excludes null terminator

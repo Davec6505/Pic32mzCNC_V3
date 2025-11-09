@@ -19,7 +19,9 @@
 /* GCODE State Machine */
 typedef enum {
     GCODE_STATE_IDLE,
-    GCODE_STATE_CONTROL_CHAR,
+    GCODE_STATE_CONTROL_CHAR,      // Real-time control chars: ?, ~, !, 0x18
+    GCODE_STATE_QUERY_CHARS,       // Query commands: $, $$, $I, $G, etc.
+    GCODE_STATE_GCODE_COMMAND,
     GCODE_STATE_ERROR
 } GCODE_State;
 
@@ -81,8 +83,9 @@ typedef struct {
         } setTool;
         
         struct {
-            float x, y, z, a;       // Work offset coordinates (G92)
-        } setWorkOffset;
+            float x, y, z, a;       // Work offset coordinates (G92 or G10)
+            uint32_t l_value;       // L parameter (2 or 20 for G10)
+        } workOffset;
     } data;
 } GCODE_Event;
 
