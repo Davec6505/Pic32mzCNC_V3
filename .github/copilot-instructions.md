@@ -1,72 +1,56 @@
-<SYSTEM>
-You are an AI programming assistant that is specialized in applying code changes to an existing document.
-Follow Microsoft content policies.
-Avoid content that violates copyrights.
-If you are asked to generate content that is harmful, hateful, racist, sexist, lewd, violent, or completely irrelevant to software engineering, only respond with "Sorry, I can't assist with that."
-Keep your answers short and impersonal.
-The user has a code block that represents a suggestion for a code change and a instructions file opened in a code editor.
-Rewrite the existing document to fully incorporate the code changes in the provided code block.
-For the response, always follow these instructions:
-1. Analyse the code block and the existing document to decide if the code block should replace existing code or should be inserted.
-2. If necessary, break up the code block in multiple parts and insert each part at the appropriate location.
-3. Preserve whitespace and newlines right after the parts of the file that you modify.
-4. The final result must be syntactically valid, properly formatted, and correctly indented. It should not contain any ...existing code... comments.
-5. Finally, provide the fully rewritten file. You must output the complete file.
-</SYSTEM>
-
-
-I have the following code open in the editor, starting from line 1 to line 1233.
-````instructions
 # GitHub Copilot Instructions for Pic32mzCNC_V3
 
 ## Project Overview
 This is a CNC motion control system for PIC32MZ microcontrollers using hardware timers and Bresenham interpolation for precise multi-axis stepper motor control.
+
 ##    Always run make from root directory VI
 To ensure proper build configuration and output paths, always execute `make` commands from the root directory of the Pic32mzCNC_V3 project. This guarantees that all relative paths and build settings are correctly applied. makefile incs target is dynamic, it knows the paths no need to add absolute file references, all paths are relative to the root directory.
-## 🚀 Current Implementation Status (November 7, 2025)
+
+## 🚀 Current Implementation Status (November 9, 2025)
 ### ✅ COMPLETED FEATURES
-- **Professional event-driven G-code system** with clean architecture
-- **Event queue implementation** respecting APP_DATA abstraction layer
-- **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T
-- **Core architecture implemented** with period-based timer (TMR4/PR4)
-- **Single instance pattern in appData** for clean separation  
-- **Proper tokenization** - G/M commands keep all parameters (LinuxCNC/GRBL compatible)
-- **Multi-command line support** - "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
-- **Modal parameter support** - Standalone F, S, T commands (GRBL v1.1 compliant)
-- **16-command circular buffer** with flow control and overflow protection
-- **Harmony state machine pattern** - proper APP_Tasks architecture
-- **Non-blocking event processing** - one event per iteration
-- **Kinematics module complete** with physics calculations and velocity profiling
-- **Stepper module complete** with hardware abstraction and emergency stop
-- **Persistent GRBL settings** with NVM flash storage (29 parameters including arc)
-- **Delayed flash initialization** - read after peripherals ready (APP_LOAD_SETTINGS state)
-- **Unified data structures** - no circular dependencies, clean module separation
-- **Hardware FPU enabled** - Single-precision floating point for motion planning
-- **Trapezoidal velocity profiling IMPLEMENTED** - KINEMATICS_LinearMove with full physics
-- **Emergency stop system complete** - APP_ALARM state with hard/soft limit checking
-- **Position tracking and modal state** - Work coordinates with G90/G91 support
-- **Safety system complete** - STEPPER_DisableAll(), MOTION_UTILS_CheckHardLimits()
-- **256 microstepping validated** - ISR budget analysis shows 42% headroom at 512kHz
-- **Single ISR architecture designed** - GRBL pattern, no multi-ISR complexity
-- **PRIORITY PHASE SYSTEM IMPLEMENTED** - Hybrid ISR/main loop architecture (best of both worlds!)
-- **INCREMENTAL ARC INTERPOLATION COMPLETE** - Non-blocking G2/G3 with FPU acceleration
-- **Motion phase system operational** - VELOCITY/BRESENHAM/SCHEDULE/COMPLETE phases
-- **Project compiles successfully** with XC32 compiler
-- **UART3 fully functional** - TX and RX working perfectly, status queries respond
-- **Non-blocking UART utilities module** - uart_utils.c/h with callback-based output
-- **Professional compile-time debug system** - Zero runtime overhead, multiple subsystems (November 7, 2025)
-- **Clean build system** - make/make all defaults to Release, make build for incremental (November 7, 2025)
-- **ATOMIC INLINE GPIO FUNCTIONS** - Zero-overhead ISR with `__attribute__((always_inline))` (November 8, 2025)
-- **FUNCTION POINTER ARCHITECTURE** - Array-based axis control with GPIO_Control structs (November 8, 2025)
-- **ISR STACK OPTIMIZATION** - Eliminated 32 bytes/call local arrays with static pointers (November 8, 2025)
-- **PRE-CALCULATED DOMINANT AXIS** - Stored in MotionSegment, zero ISR overhead (November 8, 2025)
+- Professional event-driven G-code system with clean architecture
+- Event queue implementation respecting APP_DATA abstraction layer
+- Comprehensive G-code support: G0/G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T, G10 L20
+- Core architecture implemented with period-based timer (TMR4/PR4)
+- Single instance pattern in appData for clean separation
+- Proper tokenization with combined modal splitting
+  - Examples: "G21G90" → ["G21", "G90"], "G90G0Z5" → ["G90", "G0Z5"]
+- Multi-command line support - "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
+- Modal parameter support - Standalone F, S, T commands (GRBL v1.1 compliant)
+- 16-command circular buffer with flow control and overflow protection ("ok" withholding)
+- Harmony state machine pattern - proper APP_Tasks architecture
+- Non-blocking event processing - one event per iteration
+- Kinematics module complete with physics calculations and velocity profiling
+- Stepper module complete with hardware abstraction and emergency stop
+- Persistent GRBL settings with NVM flash storage (29 parameters including arc)
+- Delayed flash initialization - read after peripherals ready (APP_LOAD_SETTINGS state)
+- Unified data structures - no circular dependencies, clean module separation
+- Hardware FPU enabled - Single-precision floating point for motion planning
+- Trapezoidal velocity profiling IMPLEMENTED - KINEMATICS_LinearMove with full physics
+- Emergency stop system complete - APP_ALARM state with hard/soft limit checking
+- Position tracking and modal state - Work coordinates with G90/G91 support
+- Safety system complete - STEPPER_DisableAll(), MOTION_UTILS_CheckHardLimits()
+- 256 microstepping validated - ISR budget analysis shows 42% headroom at 512kHz
+- Single ISR architecture designed - GRBL pattern, no multi-ISR complexity
+- PRIORITY PHASE SYSTEM IMPLEMENTED - Hybrid ISR/main loop architecture (best of both worlds!)
+- INCREMENTAL ARC INTERPOLATION COMPLETE - Non-blocking G2/G3 with FPU acceleration
+- Motion phase system operational - VELOCITY/BRESENHAM/SCHEDULE/COMPLETE phases
+- Project compiles successfully with XC32 compiler
+- UART3 fully functional - TX and RX working, status queries respond
+- Non-blocking UART utilities module - central helpers (UART_SendOK, UART_Printf)
+- Professional compile-time debug system - Zero runtime overhead, multiple subsystems (November 7, 2025)
+- Clean build system - make/make all defaults to Release, make build for incremental (November 7, 2025)
+- ATOMIC INLINE GPIO FUNCTIONS - Zero-overhead ISR with `__attribute__((always_inline))` (November 8, 2025)
+- FUNCTION POINTER ARCHITECTURE - Array-based axis control with GPIO_Control structs (November 8, 2025)
+- ISR STACK OPTIMIZATION - Eliminated 32 bytes/call local arrays with static pointers (November 8, 2025)
+- PRE-CALCULATED DOMINANT AXIS - Stored in MotionSegment, zero ISR overhead (November 8, 2025)
 
 ### 🔧 ATOMIC INLINE GPIO ARCHITECTURE (November 8, 2025)
-**Module:** `incs/utils/utils.h`, `srcs/utils/utils.c`, `srcs/motion/stepper.c`
+Module: `incs/utils/utils.h`, `srcs/utils/utils.c`, `srcs/motion/stepper.c`
 
-**Purpose:** Maximum ISR performance using PIC32 atomic SET/CLR/INV registers with always-inline functions.
+Purpose: Maximum ISR performance using PIC32 atomic SET/CLR/INV registers with always-inline functions.
 
-**Key Architecture:**
+Key Architecture:
 ```c
 // AxisConfig structure (one per axis)
 typedef struct {
@@ -94,7 +78,7 @@ typedef struct {
 } GPIO_Atomic;
 ```
 
-**Always-Inline Helpers (Zero Overhead!):**
+Always-Inline Helpers (Zero Overhead!):
 ```c
 static inline void __attribute__((always_inline)) AXIS_StepSet(E_AXIS axis) {
     *g_axis_config[axis].step_atomic.set_reg = g_axis_config[axis].step_atomic.mask;
@@ -102,7 +86,7 @@ static inline void __attribute__((always_inline)) AXIS_StepSet(E_AXIS axis) {
 // Compiles to single instruction: sw $t1, 0($t0)
 ```
 
-**ISR Usage:**
+ISR Usage:
 ```c
 void OCP1_ISR(uintptr_t context) {
     AXIS_StepSet(dominant_axis);  // Single instruction atomic GPIO
@@ -115,32 +99,32 @@ void OCP1_ISR(uintptr_t context) {
 }
 ```
 
-**Performance Benefits:**
-- ✅ Single instruction GPIO writes (LATxSET atomic hardware)
-- ✅ Zero function call overhead (always_inline attribute)
-- ✅ No stack usage for GPIO operations
-- ✅ Compiler-optimized to raw register access
-- ✅ Maintains clean, readable code structure
+Performance Benefits:
+- Single instruction GPIO writes (LATxSET atomic hardware)
+- Zero function call overhead (always_inline attribute)
+- No stack usage for GPIO operations
+- Compiler-optimized to raw register access
+- Maintains clean, readable code structure
 
-**Available Inline Functions:**
+Available Inline Functions:
 - `AXIS_StepSet(axis)` / `AXIS_StepClear(axis)`
 - `AXIS_DirSet(axis)` / `AXIS_DirClear(axis)`
 - `AXIS_EnableSet(axis)` / `AXIS_EnableClear(axis)`
 - `AXIS_IncrementSteps(axis)` / `AXIS_DecrementSteps(axis)`
 
 ### 🔧 COMPILE-TIME DEBUG SYSTEM (November 7, 2025)
-**Module:** `incs/common.h`, `srcs/Makefile`, `docs/DEBUG_SYSTEM_TUTORIAL.md`
+Module: `incs/common.h`, `srcs/Makefile`, `docs/DEBUG_SYSTEM_TUTORIAL.md`
 
-**Purpose:** Professional debug infrastructure with ZERO runtime overhead. Debug code is completely removed by compiler in release builds via preprocessor macros.
+Purpose: Professional debug infrastructure with ZERO runtime overhead. Debug code is completely removed by compiler in release builds via preprocessor macros.
 
-**Key Benefits:**
-- ✅ **Zero runtime overhead** - Debug code eliminated in release builds
-- ✅ **Multiple subsystems** - Enable/disable by subsystem (motion, gcode, stepper, etc.)
-- ✅ **Clean syntax** - Looks like regular printf, works everywhere
-- ✅ **No runtime checks** - Pure compile-time conditional compilation
-- ✅ **ISR-safe** - Can use DEBUG_EXEC_XXX for LED toggles in interrupts
+Key Benefits:
+- Zero runtime overhead - Debug code eliminated in release builds
+- Multiple subsystems - Enable/disable by subsystem (motion, gcode, stepper, etc.)
+- Clean syntax - Looks like regular printf, works everywhere
+- No runtime checks - Pure compile-time conditional compilation
+- ISR-safe - Can use DEBUG_EXEC_XXX for LED toggles in interrupts
 
-**Available Debug Flags:**
+Available Debug Flags:
 - `DEBUG_MOTION` - Motion planning and segment execution
 - `DEBUG_GCODE` - G-code parsing and event processing
 - `DEBUG_STEPPER` - Low-level stepper ISR and pulse generation
@@ -148,7 +132,7 @@ void OCP1_ISR(uintptr_t context) {
 - `DEBUG_UART` - UART communication
 - `DEBUG_APP` - Application state machine
 
-**Build Usage:**
+Build Usage:
 ```powershell
 # ⚠️ CRITICAL: ALWAYS run make from repository root directory
 # NEVER cd into srcs before running make!
@@ -167,7 +151,7 @@ make BUILD_CONFIG=Release
 make clean  # Cleans current BUILD_CONFIG (Debug or Release)
 ```
 
-**Code Usage:**
+Code Usage:
 ```c
 // Include required headers
 #include "common.h"
@@ -183,12 +167,12 @@ DEBUG_EXEC_SEGMENT(LED1_Set());  // Visual indicator
 // In release builds, both lines above compile to ((void)0) - zero overhead
 ```
 
-**Documentation:** See `docs/DEBUG_SYSTEM_TUTORIAL.md` for complete guide with examples, best practices, and troubleshooting.
+Documentation: See `docs/DEBUG_SYSTEM_TUTORIAL.md` for complete guide with examples, best practices, and troubleshooting.
 
 ### ⚠️ CRITICAL DEBUG WORKFLOW (November 7, 2025)
-**ALWAYS use the compile-time debug system instead of manual UART writes!**
+ALWAYS use the compile-time debug system instead of manual UART writes!
 
-❌ **WRONG - Manual Debug (DO NOT DO THIS):**
+Wrong - Manual Debug (DO NOT DO THIS):
 ```c
 // BAD: Manual UART writes that clutter code
 char debug_buf[64];
@@ -196,14 +180,14 @@ snprintf(debug_buf, sizeof(debug_buf), "[DEBUG] Value: %d\r\n", value);
 UART3_Write((uint8_t*)debug_buf, strlen(debug_buf));
 ```
 
-✅ **CORRECT - Use Debug Macros:**
+Correct - Use Debug Macros:
 ```c
 // GOOD: Clean debug macros that compile to nothing in release
 DEBUG_PRINT_GCODE("[GCODE] Value: %d\r\n", value);
 ```
 
-**Debugging Protocol Issues (e.g., UGS connection):**
-1. **Add debug macros** to the relevant code section:
+Debugging Protocol Issues (e.g., UGS connection):
+1. Add debug macros to the relevant code section:
    ```c
    DEBUG_PRINT_GCODE("[GCODE $] Buffer: nBytesRead=%u\r\n", (unsigned)nBytesRead);
    DEBUG_EXEC_GCODE({
@@ -214,294 +198,196 @@ DEBUG_PRINT_GCODE("[GCODE] Value: %d\r\n", value);
        UART_Printf("\r\n");
    });
    ```
-
-2. **Build with debug flag:**
+2. Build with debug flag:
    ```bash
    make clean && make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_GCODE"
    ```
-
-3. **Flash and test** - debug output appears in terminal
-
-4. **Release build** - debug code removed automatically:
+3. Flash and test - debug output appears in terminal
+4. Release build - debug code removed automatically:
    ```bash
    make clean && make BUILD_CONFIG=Release
    # or simply:
    make clean && make
    ```
 
-**Why This Matters:**
+Why This Matters:
 - Manual debug code gets forgotten and left in production
 - Debug macros are self-documenting (flag name shows what's being debugged)
 - Zero performance impact in release builds
 - Easy to enable/disable without code changes
 
-### 🔧 NON-BLOCKING UART UTILITIES (November 6, 2025)
-**Module:** `srcs/utils/uart_utils.c`, `incs/utils/uart_utils.h`
+### 🔧 NON-BLOCKING UART UTILITIES (November 6-9, 2025)
+Module: `srcs/utils/uart_utils.c`, `incs/utils/uart_utils.h`
 
-**Purpose:** Centralized non-blocking UART communication for debug output and GRBL protocol responses, preventing real-time motion interference.
+Purpose: Centralized non-blocking UART communication for debug output and GRBL protocol responses, preventing real-time motion interference.
 
-**Implementation:**
-- **Callback-based architecture**: UART3_WriteCallbackRegister() with persistent notifications
-- **Global flag**: `volatile bool uart3TxReady` tracks TX buffer state
-- **Event handler**: `UART_EVENT_WRITE_THRESHOLD_REACHED` sets flag when buffer ready
-- **Non-blocking printf**: `UART_Printf()` checks flag before sending, drops messages if busy
-- **Protocol helpers**: `UART_SendOK()`, `UART_IsReady()`
+Implementation:
+- Uses Harmony PLIB UART3 ring buffers
+- Fire-and-forget helpers: `UART_Write()`, `UART_Printf()`, `UART_SendOK()`
 
-**Key Functions:**
+Key Functions:
 ```c
-void UART_Initialize(void);           // Setup callback and notifications
+void UART_Initialize(void);           // Setup
 bool UART_Printf(const char* fmt, ...); // Non-blocking formatted output
-void UART_SendOK(void);               // Send "OK\r\n" response
-bool UART_IsReady(void);              // Check TX ready state
+bool UART_Write(const uint8_t* msg, size_t len);
+bool UART_SendOK(void);               // Send "ok\r\n"
+bool UART_IsReady(void);
 ```
 
-**Initialization Pattern:**
+Initialization Pattern:
 ```c
 // In APP_Initialize() - called once at startup
-UART_Initialize();  // Registers callback and enables notifications
+UART_Initialize();
 ```
 
-**Usage Pattern:**
-```c
-// Non-blocking debug output (safe for ISR and main loop)
-if (UART_Printf("[DEBUG] Value: %d\r\n", value)) {
-    // Message sent successfully
-} else {
-    // TX busy, message dropped (no blocking)
-}
-
-// Protocol response
-UART_SendOK();  // Sends "OK\r\n" when ready
-```
-
-**Benefits:**
-- ✅ **No blocking** - Real-time motion never waits for UART
-- ✅ **ISR-safe** - Can be called from interrupts (messages drop if busy)
-- ✅ **Centralized** - Single module for all UART communication
-- ✅ **Persistent callbacks** - No need to re-register after each write
-- ✅ **Rate-limited** - Natural flow control via uart3TxReady flag
-
-**Files Updated:**
-- `srcs/app.c` - Added `#include "utils/uart_utils.h"`, calls UART_Initialize()
-- `srcs/gcode/gcode_parser.c` - Uses UART_SendOK() for protocol responses
-- `srcs/motion/motion.c` - Uses UART_Printf() for debug output
-- `srcs/motion/stepper.c` - Uses UART_Printf() for debug output, LED2_Toggle() for visual confirmation
+Benefits:
+- No blocking - Real-time motion never waits for UART
+- ISR-safe - Can be called from interrupts (drops if buffers full)
+- Centralized - Single module for all UART communication
+- Correct TX buffer sizing prevents disconnects on $$
 
 ### 🔧 VISUAL MOTION DEBUG (November 6, 2025)
-**Added:** `LED2_Toggle()` in `STEPPER_ScheduleStep()` (srcs/motion/stepper.c line ~125)
+Added: `LED2_Toggle()` in `STEPPER_ScheduleStep()` (srcs/motion/stepper.c line ~125)
 
-**Purpose:** Visual confirmation that motion scheduling is executing
+Purpose: Visual confirmation that motion scheduling is executing
 
-**Behavior:**
-- **Rapid blink (many Hz)** → `STEPPER_ScheduleStep()` IS being called → Motion system working
-- **Slow blink (~1Hz heartbeat)** → Function NOT being called → Phase system or segment loading issue
+Behavior:
+- Rapid blink (many Hz) → `STEPPER_ScheduleStep()` IS being called → Motion system working
+- Slow blink (~1Hz heartbeat) → Function NOT being called → Phase system or segment loading issue
 
-**Usage:**
+Usage:
 ```gcode
-G92 X0 Y0 Z0    # Set work origin
-G1 X1 F100      # Move 1mm in X axis
+G1 X1 F100      ; Move 1mm in X axis
 ```
 
-**Observe LED2:**
+Observe LED2:
 - If rapid blink: Motion hardware OK, check if motors actually moving
 - If slow blink: Motion segments not loading or phase system stuck
 
 ### 🔧 ACTIVE DEBUGGING SESSION (November 5-6, 2025)
-**Problem:** G-code commands are accepted (OK response) but position never updates. Motion does not execute.
+Problem: G-code commands are accepted (ok response) but position never updates. Motion does not execute.
 
-**Root Cause Found:** Commands are being queued but `GCODE_GetNextEvent()` is not successfully converting them to events that reach the motion system.
+Root Cause Found: Commands were being queued but not parsed into events that reached the motion system.
 
-**Debug Progress Chain:**
-1. ✅ **UART3 communication working** - Banner prints, status queries respond correctly
-2. ✅ **G-code parser receiving commands** - "OK" responses confirm reception
-3. ✅ **Tokenization working** - `[GCODE] Extract called, length=X`, `[GCODE] Tokens=X`
-4. ✅ **Commands being queued** - `[GCODE] Queued: G1X10F100` confirms queue population
-5. ✅ **GCODE_GetNextEvent() being called** - Function executes in APP_IDLE event loop
-6. ✅ **Non-blocking UART implemented** - uart_utils module prevents motion blocking
-7. ✅ **LED2 visual debug added** - Will show if STEPPER_ScheduleStep() executes
-8. ❌ **CRITICAL ISSUE IDENTIFIED:** `parse_command_to_event()` is being called but events are NOT reaching APP_Tasks event processing
-9. ❌ **No motion segments generated** - `[MOTION] Loading segment:` never prints
-10. ❌ **Position stays 0.000** - Motion system never executes
+Debug Progress Chain:
+1. UART3 communication working - Banner prints, status queries respond correctly
+2. G-code parser receiving commands - "ok" responses confirm reception
+3. Tokenization working - Extract/Tokenize traces present
+4. Commands being queued - "Queued: ..." traces confirm queue population
+5. GCODE_GetNextEvent() being called - Function executes in APP_IDLE event loop
+6. Non-blocking UART implemented - uart_utils module prevents motion blocking
+7. LED2 visual debug added - Shows if STEPPER_ScheduleStep() executes
+8. CRITICAL ISSUE IDENTIFIED: parse_command_to_event() returned false for some commands
+9. No motion segments generated in that scenario
+10. Position stayed 0.000 - Motion system never executed
 
-**Debug Output Added (Currently in Code):**
-- `srcs/gcode/gcode_parser.c`:
-  - Line ~141: `[GCODE] Extract called, length=X` - Confirms buffer extraction
-  - Line ~151: `[GCODE] Tokens=X` - Shows tokenization count
-  - Line ~167: `[GCODE] Queued: <cmd>` - Shows what entered queue
-  - Line ~217-228: `[GCODE] GetNextEvent:` and `parse_command_to_event returned:` (DISABLED - too verbose, floods UART)
-- `srcs/app.c`:
-  - Line ~269: `[APP] Event received: type=X` - Would show if event retrieved (NEVER PRINTS!)
-  - Line ~322: `[APP] G1 Event: X Y Z F` - Would show linear move details (NEVER PRINTS!)
-  - Line ~329: `[APP] Segment queued: count=X` - Would show segment added (NEVER PRINTS!)
-- `srcs/motion/motion.c`:
-  - Line ~237: `[MOTION] Loading segment: queueCount=X` - Would show segment load attempt (NEVER PRINTS!)
-  - Line ~260: `[MOTION] Segment loaded: initial_rate=X` - Would show timing parameters (NEVER PRINTS!)
-- `srcs/motion/stepper.c`:
-  - Line ~125: `LED2_Toggle()` - Visual confirmation if STEPPER_ScheduleStep() called
-  - Line ~132: `[STEPPER] Axis X: now=X, offset=X, pulse_start=X` - Would show step scheduling (NEVER PRINTS!)
+Next Steps for Testing:
+- Flash firmware with LED2_Toggle() - Visual confirmation of motion execution
+- Test simple motion: `G1 X1 F100`
+- Observe LED2 behavior:
+  - Rapid blink = `STEPPER_ScheduleStep()` executing → Check motor drivers
+  - Slow blink = Function not called → Phase system or event parsing issue
+- Enable selective debug - Only G0/G1 events, not control characters
 
-**Observed Behavior:**
-```
-G92X0Y0Z0
-[GCODE] Extract called, length=10
-[GCODE] Tokens=2
-[GCODE] Queued: G92X0Y0Z0
-OK
+### 🔧 ACTIVE DEBUGGING SESSION - UGS CONNECTION (November 7-9, 2025)
+Problem: UGS connects, sends commands (`?`, `$I`, `$$`), but may disconnect if TX buffer is too small. Putty works correctly, confirming firmware responds.
 
-G1X10F100
-[GCODE] Extract called, length=10
-[GCODE] Tokens=2
-[GCODE] Queued: G1X10F100
-OK
+CRITICAL FIX:
+- Root Cause: MCC regeneration can revert UART3 TX buffer size from 1024 to 256 bytes
+- Symptom: `$$` command response (~400-500 bytes) overflows 256-byte TX buffer
+- Result: UGS times out waiting for complete settings response, disconnects
 
-?
-<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000|FS:0,0>
-```
+⚠️ After ANY MCC regeneration, ALWAYS verify UART3 buffer sizes!
 
-**Key Finding:** NO `[APP] Event received:` messages appear, meaning `GCODE_GetNextEvent()` returns false even though commands are in queue.
+File: `srcs/config/default/peripheral/uart/plib_uart3.c`
 
-**Next Steps for Testing:**
-1. **Flash firmware with LED2_Toggle()** - Visual confirmation of motion execution
-2. **Test simple motion**: `G92 X0`, then `G1 X1 F100`
-3. **Observe LED2 behavior**:
-   - Rapid blink = `STEPPER_ScheduleStep()` executing → Check motor drivers
-   - Slow blink = Function not called → Phase system or event parsing issue
-4. **Enable selective debug** - Only G1/G92 events, not control characters
-5. **Check parse_command_to_event() return value** - Is it returning false for valid G-code?
-
-**Critical Hypothesis:** `parse_command_to_event()` is likely returning **false** for valid G-code commands (G92, G1), preventing events from being created. The `?` status query floods output when debug enabled, suggesting it's being parsed repeatedly without being consumed.
-
-### 🔧 ACTIVE DEBUGGING SESSION - UGS CONNECTION (November 7, 2025)
-**Problem:** UGS connects, sends commands (`?`, `$I`, `$$`), but immediately disconnects. Putty works correctly, confirming firmware responds.
-
-**CRITICAL FIX FOUND (November 9, 2025):**
-- **Root Cause:** MCC regeneration reverts UART3 TX buffer size from 1024 to 256 bytes
-- **Symptom:** `$$` command response (~400-500 bytes) overflows 256-byte TX buffer
-- **Result:** UGS times out waiting for complete settings response, disconnects
-
-**⚠️ CRITICAL: After ANY MCC regeneration, ALWAYS verify UART3 buffer sizes!**
-
-**File:** `srcs/config/default/peripheral/uart/plib_uart3.c`
-
-**Required Buffer Sizes:**
+Required Buffer Sizes:
 ```c
-// Line ~56-57
-#define UART3_READ_BUFFER_SIZE      (512U)   // ✅ Must be 512
-#define UART3_WRITE_BUFFER_SIZE     (1024U)  // ✅ Must be 1024 (NOT 256!)
+#define UART3_READ_BUFFER_SIZE      (512U)   // Must be 512
+#define UART3_WRITE_BUFFER_SIZE     (1024U)  // Must be 1024 (NOT 256!)
 ```
 
-**Verification Steps After MCC Regeneration:**
-1. Open `srcs/config/default/peripheral/uart/plib_uart3.c`
-2. Check lines 56-57 for buffer size defines
-3. Verify: `UART3_READ_BUFFER_SIZE = 512U`
-4. Verify: `UART3_WRITE_BUFFER_SIZE = 1024U`
-5. If incorrect, manually edit and rebuild
+Symptoms of Wrong Buffer Size:
+- `?` (status query) works (~100 bytes)
+- `$I` (build info) works (~80 bytes)
+- `$$` (settings) fails - response truncated
+- Sender disconnects immediately after `$$` command
 
-**Why These Sizes:**
-- **RX Buffer (512 bytes):** Handles burst G-code commands from UGS/streaming
-- **TX Buffer (1024 bytes):** Required for `$$` settings dump (~400-500 bytes)
-- **MCC Default (256 bytes TX):** Too small for GRBL settings response
+GRBL Protocol Requirements:
+- `$I` response format requires spaces after colons:
+  - `[VER: 1.1h.20251102]\r\n`
+  - `[OPT: VHM,35,1024,4]\r\n`
+- Banner on soft reset must be GRBL-compatible:
+  - `Grbl 1.1h ['$' for help]\r\n`
 
-**Symptoms of Wrong Buffer Size:**
-- ✅ `?` (status query) works (~100 bytes)
-- ✅ `$I` (build info) works (~80 bytes)
-- ❌ `$$` (settings) fails - response truncated
-- ❌ UGS disconnects immediately after `$$` command
+Fixes Applied:
+- Added spaces after colons in `SETTINGS_PrintBuildInfo()`
+- Ensured soft reset prints GRBL-like banner text for sender compatibility
 
-**UGS Connection Sequence Observed:**
-```
-*** Connecting to jserialcomm://COM4:115200
-*** Fetching device status
->>> ?
-*** Fetching device version
->>> $I
-<Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000|FS:0,0>
-*** Fetching device settings
->>> $$
-*** Connection closed
-```
+## GRBL Real-Time Controls and Protocol Integration
 
-**Key Findings:**
-1. ✅ UGS sends `?` (status query) - firmware responds correctly
-2. ❌ UGS sends `$I` (build info) - **NO RESPONSE SEEN**
-3. ❌ UGS sends `$$` (settings) - **CONNECTION CLOSES**
+### Real-Time Characters
+- `?` Status report only. No "ok" response. Includes:
+  - Machine position (MPos), Work position (WPos), Feed/Spindle (FS)
+  - Optional flags:
+    - `|Cm:1` when in check mode (`$C`)
+    - `|FH:1` when feed hold is active (`!`)
+- `!` Feed hold:
+  - Immediately halts motion pipeline, disables steppers (`STEPPER_DisableAll()`)
+  - Sets internal `feedHoldActive = true`
+- `~` Cycle start / Resume:
+  - Clears `feedHoldActive`, prepares motion pipeline to resume
+  - No textual response (real-time)
+- `Ctrl+X (0x18)` Soft reset:
+  - Centralized reset via `UART_SoftReset(APP_DATA*, GCODE_CommandQueue*)`
+  - Clears motion queue, G-code queue, modal states
+  - Flushes UART RX buffer
+  - Prints GRBL-compatible banner: `Grbl 1.1h ['$' for help]\r\n`
+  - Literal string "0x18" is also accepted for manual testing
 
-**Root Cause Analysis:**
-- **Putty works** → Firmware CAN respond to `$I` command
-- **UGS fails** → Firmware NOT responding when UGS sends it
-- **Hypothesis:** Byte-by-byte reception or timing difference between UGS and Putty
+### System Commands ($)
+Handled in GCODE_STATE_QUERY_CHARS:
+- `$` help: `[HLP:$$ $# $G $I $N $C $X $F $RST= $SLP]` + ok
+- `$$` prints all settings (ensure TX buffer is 1024 bytes), no ok appended by handler
+- `$I` build info with spaces after colons, no ok appended by handler
+- `$#` work coordinate offsets (G54..G59), probe, etc.
+- `$G` modal state report (G0, G54, plane, units, distance mode, etc.)
+- `$C` toggles check mode (no motion, `|Cm:1` in status)
+- `$X` clears alarm
+- `$Nn=` sets startup lines (N0/N1 persisted strings)
+- `$RST=*|$|#` reset defaults, settings, or WCS offsets
+- `$<number>` read setting, `$<number>=<value>` write setting
+- `$SLP` not supported → `error:2`
 
-**GRBL Protocol Requirements (from UGS source code):**
-- `$I` response format: `[VER: 1.1h.20251102:]\r\n[OPT: VHM,35,1024,4]\r\nok\r\n`
-- **CRITICAL:** Space after colons required! `[VER: ]` not `[VER:]`
-- **CRITICAL:** Space after colons required! `[OPT: ]` not `[OPT:]`
+### G10 L20 Work Offset Setting
+- Supports `G10 L20` with `P0` (current WCS) or `P1` (G54)
+- Parameters X/Y/Z set desired WCS work position at current machine position:
+  - WCS offset computed as `offset = MPos - desired_WPos`
+- A-axis parameter accepted but not applied (no A in current WCS struct)
 
-**Fixes Applied:**
-1. ✅ Added spaces after colons in `SETTINGS_PrintBuildInfo()` (settings.c line ~427)
-2. ✅ Added DEBUG_GCODE macros to `case '$':` handler in gcode_parser.c
-
-**Debug Macros Added (November 7, 2025):**
-```c
-// In gcode_parser.c case '$': handler
-DEBUG_PRINT_GCODE("[GCODE $] Entered $ handler: nBytesRead=%u\r\n", (unsigned)nBytesRead);
-DEBUG_EXEC_GCODE({
-    UART_Printf("[GCODE $] Buffer hex: ");
-    for(uint32_t i = 0; i < nBytesRead && i < 10; i++) {
-        UART_Printf("%02X ", rxBuffer[i]);
-    }
-    UART_Printf("\r\n");
-});
-DEBUG_PRINT_GCODE("[GCODE $] has_terminator=%d\r\n", has_terminator);
-DEBUG_PRINT_GCODE("[GCODE $] bytes_available=%u\r\n", (unsigned)bytes_available);
-DEBUG_PRINT_GCODE("[GCODE $] Complete command received: '%c%c' (0x%02X 0x%02X)\r\n", ...);
-DEBUG_PRINT_GCODE("[GCODE $] Matched $I command, calling SETTINGS_PrintBuildInfo\r\n");
-```
-
-**Next Steps:**
-1. Build with `make clean && make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_GCODE"`
-2. Flash firmware
-3. Connect with UGS and observe debug output
-4. Check if `$I` command is being received and parsed correctly
-5. Verify spaces in response format match GRBL spec
-
-**Files Modified:**
-- `srcs/settings/settings.c` - Fixed `$I` response format with spaces
-- `srcs/gcode/gcode_parser.c` - Added DEBUG_GCODE macros for $ handler
-- `.github/copilot-instructions.md` - Documented debug workflow (this file)
-
-**Critical Hypothesis:** `parse_command_to_event()` is likely returning **false** for valid G-code commands (G92, G1), preventing events from being created. The `?` status query floods output when debug enabled, suggesting it's being parsed repeatedly without being consumed.
-
-### 🔧 OLD DEBUGGING SESSION - MOTION NOT EXECUTING (November 5-6, 2025)
-
-**Modified Files (November 5-6 debug session):**
-- `srcs/utils/uart_utils.c` - Created non-blocking UART utilities module
-- `incs/utils/uart_utils.h` - UART utilities header with function prototypes
-- `srcs/motion/motion.c` - Added debug output (lines 237, 260), updated to use uart_utils
-- `srcs/motion/stepper.c` - Added LED2_Toggle() (line ~125), debug output (line 132), uses uart_utils
-- `srcs/app.c` - Added debug output (lines 269, 322, 329), calls UART_Initialize(), uses uart_utils
-- `srcs/gcode/gcode_parser.c` - Uses UART_SendOK() for protocol responses
-- `srcs/Makefile` - Added directory creation before linking, clean target removes all build artifacts
-- `srcs/gcode/gcode_parser.c` - Added debug output (lines 141, 151, 167, 217-228), added UART3 include
-
-**See README.md TODO section for remaining implementation tasks (homing, spindle/coolant, advanced features)**
+### Combined Modal Token Splitting (Parser)
+- Tokens like `G21G90` or `G90G0Z5` are split and queued as separate commands in order
+- Parameters belong to the final modal in the combined token
+  - Example: `G90G1X10` → ["G90", "G1X10"]
+  - Example: `G21G90 G0Z5` → Tokens: "G21", "G90", "G0Z5"
 
 ## Core Architecture Principles
 
-### Priority-Based Phase System (NEW - CRITICAL!)
-**The "Best of Both Worlds" Hybrid Architecture**
+### Priority-Based Phase System (CRITICAL)
+The "Best of Both Worlds" Hybrid Architecture
 
-**Problem Solved:**
+Problem Solved:
 - G-code processing could block motion timing (arc generation takes time)
-- UART polled 512,000x/sec (wasteful CPU usage, only need 100x/sec)
+- UART should be polled at a reasonable rate, not every ISR tick
 - Need ISR precision but main loop flexibility
 
-**Solution: Priority Phase System**
-- **ISR sets flag** when dominant axis fires → wakes main loop
-- **Main loop processes phases** in priority order (0 = highest)
-- **G-code only runs when IDLE** → prevents blocking
-- **Rate-limited UART** → polled every 10ms (not every μs)
+Solution: Priority Phase System
+- ISR sets flag when dominant axis fires → wakes main loop
+- Main loop processes phases in priority order (0 = highest)
+- G-code only runs when IDLE → prevents blocking
+- Rate-limited UART → polled periodically in IDLE
 
-**Phase Priorities:**
+Phase Priorities:
 ```c
 typedef enum {
     MOTION_PHASE_IDLE = 255,      // Lowest - safe for G-code processing
@@ -512,7 +398,7 @@ typedef enum {
 } MotionPhase;
 ```
 
-**ISR Behavior (stepper.c):**
+ISR Behavior (stepper.c):
 ```c
 void OCP5_ISR(uintptr_t context) {
     // X Axis - count steps
@@ -522,109 +408,102 @@ void OCP5_ISR(uintptr_t context) {
         stepper_pos.x_steps--;
     }
     
-    // ✅ CRITICAL: Signal main loop if X is dominant axis
+    // Signal main loop if X is dominant axis
     if (app_data_ref != NULL && app_data_ref->dominantAxis == AXIS_X) {
         app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;  // Wake main loop
     }
 }
 ```
 
-**Main Loop Processing (app.c):**
+Main Loop Processing (app.c):
 ```c
 case APP_IDLE:
     switch(appData.motionPhase) {
         case MOTION_PHASE_VELOCITY:
             // Update currentStepInterval (accel/cruise/decel)
             appData.motionPhase = MOTION_PHASE_BRESENHAM;
-            // Fall through to next phase (no break)
+            // Fall through
             
         case MOTION_PHASE_BRESENHAM:
             // Accumulate error terms, determine subordinate steps
             appData.motionPhase = MOTION_PHASE_SCHEDULE;
-            // Fall through to next phase
+            // Fall through
             
         case MOTION_PHASE_SCHEDULE:
             // Write OCxR/OCxRS with absolute values
             appData.motionPhase = MOTION_PHASE_COMPLETE;
-            // Fall through to next phase
+            // Fall through
             
         case MOTION_PHASE_COMPLETE:
             // Check segment done, load next from queue
             appData.motionPhase = MOTION_PHASE_IDLE;
-            break;  // Exit phase processing
+            break;
             
         case MOTION_PHASE_IDLE:
             // Safe for G-code processing
             break;
     }
-    
-    // ✅ Rate-limited UART (only when IDLE)
+
+    // Rate-limited UART/G-code (only when IDLE)
     if(appData.motionPhase == MOTION_PHASE_IDLE) {
-        if(uartPollCounter >= 1250) {  // ~10ms
-            GCODE_Tasks(&appData.gcodeCommandQueue);
-            uartPollCounter = 0;
-        }
+        GCODE_Tasks(&appData.gcodeCommandQueue);
     }
 ```
 
-**Benefits:**
-- ✅ **ISR precision** - dominant axis timing rock-solid
-- ✅ **Main loop flexibility** - complex calculations without ISR bloat
-- ✅ **Guaranteed execution order** - phases process in sequence
-- ✅ **Non-blocking G-code** - motion always gets priority
-- ✅ **CPU efficiency** - UART polled 100x/sec vs 512,000x/sec
-- ✅ **Dynamic axis swapping** - ISR knows which axis is master
+Benefits:
+- ISR precision - dominant axis timing rock-solid
+- Main loop flexibility - complex calculations without ISR bloat
+- Guaranteed execution order - phases process in sequence
+- Non-blocking G-code - motion always gets priority
+- CPU efficiency - UART handled in IDLE, not per-step
 
 ### Timer Architecture (Period-Based, TMR4/PR4)
-- **TMR4 rolls over at PR4 value** - not free-running
-- OC1 uses **relative compare values** against the rolling timer
+- TMR4 rolls over at PR4 value - not free-running
+- OC1 uses relative compare values against the rolling timer
 - `PR4` sets the period (step interval + pulse width + margin)
 - `OC1R` sets when pulse starts (step_interval)
 - `OC1RS` sets when pulse ends (step_interval + pulse_width)
 - Example: For 1ms steps with 3µs pulse: `OC1R = 12500`, `OC1RS = 12537`, `PR4 = 12539`
-- **Hardware Configuration:**
+- Hardware Configuration:
   - PBCLK3 = 50MHz (peripheral bus clock)
   - Prescaler = 1:4 (TCKPS = 2)
   - Timer Frequency = 12.5MHz (50MHz / 4)
-  - Timer Resolution = **80ns per tick** (1 / 12.5MHz)
-- **No timer rollover issues** - TMR4 automatically resets to 0 at PR4, OCx values remain valid
-- **Step timing** controlled entirely by OC1 ISR scheduling next pulse
+  - Timer Resolution = 80ns per tick
+- No timer rollover issues - TMR4 automatically resets to 0 at PR4, OCx values remain valid
+- Step timing controlled entirely by OC1 ISR scheduling next pulse
 
 ### Dynamic Dominant Axis Tracking
-- **Dominant axis** (highest step count) drives the step timing
+- Dominant axis (highest step count) drives the step timing
 - Dominant axis determines step_interval for OC1/PR4
-- **Subordinate axes** step on-demand when Bresenham requires a step
-- **Dominant axis can swap** mid-motion by recalculating Bresenham state
+- Subordinate axes step on-demand when Bresenham requires a step
+- Dominant axis can swap mid-motion by recalculating Bresenham state
 
-### Bresenham Integration  
-- Bresenham algorithm runs in **OC1 ISR** for precise timing
+### Bresenham Integration
+- Bresenham algorithm runs in OC1 ISR for precise timing
 - ISR: Generate step pulse, run Bresenham, schedule next step
 - Error term updates happen in ISR each step
 - Subordinate axis pulse generation based on error accumulation
 
-### Single Instance Pattern in appData ✅
-- **All major data structures** centralized in APP_DATA struct
-- **No static module data** - clean separation of concerns  
-- **Pass by reference** through function calls for explicit ownership
-- **Work coordinates protected** by private static in kinematics module
+### Single Instance Pattern in appData
+- All major data structures centralized in APP_DATA struct
+- No static module data - clean separation of concerns
+- Pass by reference through function calls for explicit ownership
+- Work coordinates protected by private static in kinematics module
 
-### Professional G-Code Event System ✅
-- **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
-- **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T commands
-- **Proper tokenization**: G/M commands consume ALL parameters until next G/M
-  - Example: `G90G1X10Y10F1000` → Tokens: `"G90"`, `"G1X10Y10F1000"`
-  - Example: `G1X10F1000` → Token: `"G1X10F1000"` (stays together)
-- **Modal parameter support**: Standalone F, S, T commands (LinuxCNC/GRBL compatible)
-  - `F1500` → Changes feedrate without motion
-  - `S2000` → Changes spindle speed
-  - `T1` → Tool change
-- **Abstraction layer respect**: No APP_DATA exposure, maintains clean boundaries
-- **Zero memory allocation**: Deterministic processing for real-time systems
-- **Utils module**: Professional string parsing with robust tokenization
-- **Flow control**: 16-command circular buffer with "OK" withholding
-- **Real-time characters**: Bypass tokenization for immediate '?!~^X' processing
-- **GRBL compliance**: Full v1.1 protocol support with proper status reporting
-- **Non-blocking design**: One event processed per APP_Tasks() iteration
+### Professional G-Code Event System
+- Event-driven architecture: Clean `GCODE_GetNextEvent()` interface
+- Comprehensive G-code support: G0/G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T, G10 L20
+- Proper tokenization with combined-modal splitting:
+  - Example: `G90G1X10Y10F1000` → Tokens: "G90", "G1X10Y10F1000"
+  - Example: `G21G90 G0Z5` → Tokens: "G21", "G90", "G0Z5"
+- Modal parameter support: Standalone F, S, T commands (LinuxCNC/GRBL compatible)
+- Abstraction layer respect: No APP_DATA exposure, maintains clean boundaries
+- Zero memory allocation: Deterministic processing for real-time systems
+- Utils module: Professional string parsing with robust tokenization
+- Flow control: 16-command circular buffer with "ok" withholding
+- Real-time characters: Immediate handling for '?!~^X' (and literal "0x18")
+- GRBL compliance: v1.1 protocol support with proper status reporting
+- Non-blocking design: One event processed per APP_Tasks() iteration
 
 ## Code Style Guidelines
 
@@ -646,14 +525,14 @@ void __ISR(_OC1_VECTOR, IPL5SOFT) OC1Handler(void) {
     steps_completed++;
     
     // Run Bresenham for subordinate axes
-    // ... (Bresenham code in ISR)
+    // ...
 }
 ```
 
 ### Compare Register Updates
 ```c
 // CORRECT - Period-based timing
-uint32_t step_interval = 12500;  // Timer ticks for this step
+uint32_t step_interval = 12500;   // Timer ticks for this step
 uint32_t pulse_width = 37;        // 3µs pulse width
 OC1R = step_interval;             // Pulse starts at interval
 OC1RS = step_interval + pulse_width;  // Pulse ends
@@ -680,6 +559,7 @@ if (error_y >= delta_x) {
 // To stop pulse generation (end of segment):
 TMR4_Stop();  // Stops all motion
 ```
+```c
 // To stop pulse generation on any axis (for safety/sanity):
 // Set OCxR = OCxRS (equal values prevent compare match pulse)
 OC2R = OC2RS;  // Y axis stops generating pulses
@@ -691,111 +571,109 @@ OC3R = OC3RS;  // Z axis stops generating pulses
 // - Motion completion or emergency stop scenarios
 ```
 
-### G-Code Line Buffering Pattern
+### G-Code Line Buffering Pattern (UART3)
 ```c
 case GCODE_STATE_IDLE:
-    nBytesAvailable = UART2_ReadCountGet();
+    nBytesAvailable = UART3_ReadCountGet();
 
     if(nBytesAvailable > 0){
-        // ✅ Accumulate bytes until complete line
+        // Accumulate bytes until complete line
         uint32_t space_available = sizeof(rxBuffer) - nBytesRead - 1;
         uint32_t bytes_to_read = (nBytesAvailable < space_available) ? nBytesAvailable : space_available;
         
         if (bytes_to_read > 0) {
-            uint32_t new_bytes = UART2_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
+            uint32_t new_bytes = UART3_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
             nBytesRead += new_bytes;
+            rxBuffer[nBytesRead] = '\0';
         }
-        
-        // ✅ CRITICAL: Static variable persists across GCODE_Tasks() calls
-        // Allows line terminator state to accumulate during byte reception
-        static bool has_line_terminator = false;
-        for(uint32_t i = 0; i < nBytesRead; i++) {
-            if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r') {
-                has_line_terminator = true;
-                break;
-            }
-        }
+    }
 
-        // Check first byte for control characters (bypass line buffering)
-        bool control_char_found = false;
-        for(uint8_t i = 0; i < sizeof(GRBL_CONTROL_CHARS); i++){
-            if(rxBuffer[0] == GRBL_CONTROL_CHARS[i]){
-                control_char_found = true;
-                gcodeData.state = GCODE_STATE_CONTROL_CHAR;   
-                break;          
-            }
-        }
+    if (nBytesRead == 0) break;
 
-        // ✅ CRITICAL: Early exit if no line terminator found yet
-        // Prevents premature processing during byte accumulation
-        if(!has_line_terminator){
-            break;
-        }
-
-        // ✅ Check for actual G-code content (not just whitespace)
-        bool has_gcode = false;
-        for(uint32_t i = 0; i < nBytesRead; i++) {
-            if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' && 
-                rxBuffer[i] != ' ' && rxBuffer[i] != '\t' && rxBuffer[i] != 0) {
-                has_gcode = true;
-                break;
-            }
-        }
-
-        // Process complete line based on content
-        if(control_char_found){              
-            // Fall through to GCODE_STATE_CONTROL_CHAR immediately
-        
-        } else if(has_line_terminator && has_gcode){
-            // ✅ Complete G-code line with actual content - process it
-            cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
-        
-            // ✅ Send ONE "OK" per complete G-code line (GRBL v1.1 protocol)
-            UART2_Write((uint8_t*)"OK\r\n", 4);
-            
-            // Clear buffer and reset static flag for next line
-            nBytesRead = 0; 
-            memset(rxBuffer, 0, sizeof(rxBuffer));
-            gcodeData.state = GCODE_STATE_IDLE;
-            has_line_terminator = false;  // ✅ CRITICAL: Reset static variable
-            break;
-            
-        } else if(has_line_terminator && !has_gcode){
-            // ✅ Line terminator but no G-code (empty line or whitespace only)
-            // Clear buffer, don't send "OK", stay in IDLE
-            nBytesRead = 0; 
-            memset(rxBuffer, 0, sizeof(rxBuffer));
-            gcodeData.state = GCODE_STATE_IDLE;
-            has_line_terminator = false;  // ✅ CRITICAL: Reset static variable
-            break;
-        }
-    } else {
-        gcodeData.state = GCODE_STATE_IDLE;
+    // Literal "0x18" typed by user → soft reset
+    if (nBytesRead >= 4 && rxBuffer[0]=='0' && rxBuffer[1]=='x' && rxBuffer[2]=='1' && rxBuffer[3]=='8') {
+        GCODE_HandleSoftReset(cmdQueue);
         break;
     }
-    // ✅ Fall through to GCODE_STATE_CONTROL_CHAR only when control_char_found = true
+
+    // Real-time control characters bypass line buffering
+    if (is_control_char(rxBuffer[0])) {
+        gcodeData.state = GCODE_STATE_CONTROL_CHAR;
+        break;
+    }
+
+    // Require a line terminator before processing
+    bool has_terminator = false;
+    uint32_t terminator_pos = 0;
+    for (uint32_t i=0; i<nBytesRead; i++){
+        if (rxBuffer[i] == '\n' || rxBuffer[i] == '\r') { has_terminator = true; terminator_pos = i; break; }
+    }
+    if (!has_terminator) break;
+
+    // NUL-terminate at first terminator
+    rxBuffer[terminator_pos] = '\0';
+
+    // Route by first char
+    if (rxBuffer[0] == '$') {
+        gcodeData.state = GCODE_STATE_QUERY_CHARS;
+        break;
+    } else if (rxBuffer[0]=='G'||rxBuffer[0]=='g'||
+               rxBuffer[0]=='M'||rxBuffer[0]=='m'||
+               rxBuffer[0]=='F'||rxBuffer[0]=='f'||
+               rxBuffer[0]=='T'||rxBuffer[0]=='t'||
+               rxBuffer[0]=='S'||rxBuffer[0]=='s') {
+        gcodeData.state = GCODE_STATE_GCODE_COMMAND;
+        break;
+    }
+
+    // Generic content: extract, queue, and flow-control ok
+    if (terminator_pos > 0) {
+        cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
+        if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD))
+            UART_SendOK();
+        else
+            okPending = true;
+    }
+
+    // Compact remaining bytes (consume all trailing CR/LF)
+    uint32_t skip_pos = terminator_pos + 1;
+    while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
+        skip_pos++;
+    uint32_t remaining_bytes = nBytesRead - skip_pos;
+    if (remaining_bytes > 0) {
+        memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
+        nBytesRead = remaining_bytes;
+        rxBuffer[nBytesRead] = '\0';
+    } else {
+        nBytesRead = 0;
+        memset(rxBuffer, 0, sizeof(rxBuffer));
+    }
+
+    if (okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
+        UART_SendOK();
+        okPending = false;
+    }
+    break;
 
 case GCODE_STATE_CONTROL_CHAR:
     switch(rxBuffer[0]) {
-        case '?':  // Status query - NO "OK" response
-            // Send status report only
+        case '?':  // Status report
+            // Send "<...>" status only, no "ok"
             break;
-        case '~':  // Cycle start/resume - NO response (real-time)
+        case '~':  // Cycle start/resume
+            // Clear feed hold, resume motion, no "ok"
             break;
-        case '!':  // Feed hold - NO response (real-time)
+        case '!':  // Feed hold
+            // Disable steppers immediately, no "ok"
             break;
-        case 0x18: // Soft reset (Ctrl+X) - startup banner ONLY
-            UART2_Write((uint8_t*)GRBL_FIRMWARE_VERSION, sizeof(GRBL_FIRMWARE_VERSION));
+        case 0x18: // Soft reset (Ctrl+X)
+            GCODE_HandleSoftReset(cmdQueue);  // Banner only
             break;
         default:
-            // Unknown control char - silently ignore (GRBL behavior)
             break;
     }
-    
-    // Clear buffer and return to idle
-    nBytesRead = 0;
-    memset(rxBuffer, 0, sizeof(rxBuffer));
-    gcodeData.state = GCODE_STATE_IDLE;
+    // Consume one byte and return to idle
+    // ...
     break;
 ```
 
@@ -809,25 +687,32 @@ while (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
             // Convert to motion segment using kinematics
             MotionSegment segment;
             KINEMATICS_LinearMove(currentPos, targetPos, 
-                                event.data.linearMove.feedrate, &segment);
-            
-            // Add to motion queue through YOUR abstraction layer
+                                  event.data.linearMove.feedrate, &segment);
+            // Add to motion queue through abstraction layer
             if (appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
-                memcpy(&appData.motionQueue[appData.motionQueueHead], 
-                       &segment, sizeof(MotionSegment));
+                appData.motionQueue[appData.motionQueueHead] = segment;
                 appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
                 appData.motionQueueCount++;
             }
             break;
-            
-        case GCODE_EVENT_SPINDLE_ON:
-            // Handle spindle control through your interfaces
-            SPINDLE_SetSpeed(event.data.spindle.rpm);
-            break;
-            
+
         case GCODE_EVENT_ARC_MOVE:
-            // Handle arc interpolation
-            // Use event.data.arcMove for center, target, direction
+            // Handle arc interpolation using incremental generator
+            break;
+
+        case GCODE_EVENT_SET_FEEDRATE:
+        case GCODE_EVENT_SET_SPINDLE_SPEED:
+        case GCODE_EVENT_SET_ABSOLUTE:
+        case GCODE_EVENT_SET_RELATIVE:
+        case GCODE_EVENT_SPINDLE_ON:
+        case GCODE_EVENT_SPINDLE_OFF:
+        case GCODE_EVENT_COOLANT_ON:
+        case GCODE_EVENT_COOLANT_OFF:
+        case GCODE_EVENT_DWELL:
+            // Update modal state or peripherals
+            break;
+
+        default:
             break;
     }
 }
@@ -836,18 +721,18 @@ while (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
 ## Important Constraints
 
 ### Never Do
-- ❌ Use absolute timer reads for scheduling (use period-based intervals)
-- ❌ Set PR4 smaller than OC1RS (pulse won't complete)
-- ❌ Use blocking delays in main loop (let APP_Tasks run freely)
-- ❌ Modify OC1R/OC1RS outside of ISR during active motion
+- Use absolute timer reads for scheduling (use period-based intervals)
+- Set PR4 smaller than OC1RS (pulse won't complete)
+- Use blocking delays in main loop (let APP_Tasks run freely)
+- Modify OC1R/OC1RS outside of ISR during active motion
 
 ### Always Do
-- ✅ Use period-based timing: `OC1R = step_interval; PR4 = step_interval + pulse_width + margin`
-- ✅ Clear interrupt flags immediately at ISR entry
-- ✅ Keep ISRs minimal and fast
-- ✅ Run Bresenham logic in OC1 ISR for precise timing
-- ✅ Schedule subordinate axes only when required
-- ✅ **Set OCxR = OCxRS to disable pulse generation** (prevents spurious pulses)
+- Use period-based timing: `OC1R = step_interval; PR4 = step_interval + pulse_width + margin`
+- Clear interrupt flags immediately at ISR entry
+- Keep ISRs minimal and fast
+- Run Bresenham logic in OC1 ISR for precise timing
+- Schedule subordinate axes only when required
+- Set OCxR = OCxRS to disable pulse generation (prevents spurious pulses)
 
 ## Data Structures
 
@@ -883,27 +768,27 @@ When implementing velocity profiling in the future:
 - Pre-compute interval values or use real-time calculation
 - Update dominant axis OCx scheduling with variable intervals
 
-**Note:** Velocity profiling is not yet implemented but should be designed with the period-based timer architecture in mind.
+Note: Velocity profiling is not yet implemented but should be designed with the period-based timer architecture in mind.
 
 ## Hardware Details
-- **Microcontroller:** PIC32MZ2048EFH100
-- **System Clock:** 200MHz
-- **Peripheral Bus Clock (PBCLK3):** 50MHz
-- **Compiler:** XC32
-- **Build System:** Make
-- **Bootloader:** MikroE USB HID Bootloader (39KB, starts at 0x9D1F4000)
-- **Hardware FPU:** Single-precision floating point unit enabled
+- Microcontroller: PIC32MZ2048EFH100
+- System Clock: 200MHz
+- Peripheral Bus Clock (PBCLK3): 50MHz
+- Compiler: XC32
+- Build System: Make
+- Bootloader: MikroE USB HID Bootloader (39KB, starts at 0x9D1F4000)
+- Hardware FPU: Single-precision floating point unit enabled
   - Compiler flags: `-mhard-float -msingle-float -mfp64`
   - Optimizations: `-ffast-math -fno-math-errno`
   - Use FPU for planning (KINEMATICS), integer math for ISR
-- **Timer Configuration:**
+- Timer Configuration:
   - TMR4 16-bit timer (period-based, rolls over at PR4)
   - Prescaler: 1:4 (TCKPS = 2)
   - Timer Frequency: 12.5MHz
-  - **Timer Resolution: 80ns per tick**
+  - Timer Resolution: 80ns per tick
   - TMR5 16-bit timer for step pulse width (one-shot mode)
-- **Output Compare Modules:** OC1 (X), OC2 (Y), OC3 (Z), OC4 (A)
-- **Microstepping Support:** Designed for up to 256 microstepping
+- Output Compare Modules: OC1 (X), OC2 (Y), OC3 (Z), OC4 (A)
+- Microstepping Support: Designed for up to 256 microstepping
   - Worst case: 512kHz step rate (256 microsteps × high speed)
   - ISR budget: ~390 CPU cycles @ 512kHz (225 cycles used)
   - Per-step timing: ~24 timer ticks minimum
@@ -918,38 +803,38 @@ Physical Address    Virtual (KSEG1)     Size        Purpose
 0x1FC00000          0xBFC00000          12KB        Boot Flash (Config Words)
 ```
 
-**Critical Memory Rules:**
-- ✅ **Settings NVM:** `0xBD1F0000` (KSEG1 virtual for both reads and writes)
-- ✅ **Page-aligned:** 16KB boundaries (0x4000)
-- ✅ **Row-aligned:** 2048-byte boundaries (0x800)
-- ✅ **Safe margin:** 64KB (0x10000) before bootloader at 0xBD1F4000
-- ❌ **Never write to:** 0x9D1F4000 / 0xBD1F4000 (bootloader region)
-- ❌ **Never write to:** 0xBFC00000 (boot flash config)
+Critical Memory Rules:
+- Settings NVM: `0xBD1F0000` (KSEG1 virtual for both reads and writes)
+- Page-aligned: 16KB boundaries (0x4000)
+- Row-aligned: 2048-byte boundaries (0x800)
+- Safe margin: 64KB (0x10000) before bootloader at 0xBD1F4000
+- Never write to: 0x9D1F4000 / 0xBD1F4000 (bootloader region)
+- Never write to: 0xBFC00000 (boot flash config)
 
-**Address Space (MIPS Architecture):**
-- **Physical (0x1D...):** Internal flash controller addressing
-- **Virtual KSEG1 (0xBD...):** Uncached - REQUIRED for NVM operations (reads and writes)
-- **Virtual KSEG0 (0x9D...):** Cached - used for code execution
+Address Space (MIPS Architecture):
+- Physical (0x1D...): Internal flash controller addressing
+- Virtual KSEG1 (0xBD...): Uncached - REQUIRED for NVM operations (reads and writes)
+- Virtual KSEG0 (0x9D...): Cached - used for code execution
 
-**NVM Operations (Harmony Pattern):**
-- Use **KSEG1 (0xBD...)** addresses for all NVM operations
+NVM Operations (Harmony Pattern):
+- Use KSEG1 (0xBD...) addresses for all NVM operations
 - Harmony NVM drivers handle address conversion internally
 - Flash page size: 16KB (must erase entire page before writing)
 - Flash row size: 2048 bytes (512 words) - unit of RowWrite operations
-- **Cache-aligned buffers REQUIRED:** Use `CACHE_ALIGN` attribute
-- **Callback pattern:** Register handler, wait on `xferDone` flag
-- **RowWrite preferred:** One operation vs 41 WordWrite operations for settings
+- Cache-aligned buffers REQUIRED: Use `CACHE_ALIGN` attribute
+- Callback pattern: Register handler, wait on `xferDone` flag
+- RowWrite preferred: One operation vs many WordWrite operations
 
 ## File Organization
 - `srcs/main.c` - Entry point, main loop calls APP_Tasks()
 - `srcs/app.c` - Application state machine (single instance pattern)
-- `srcs/gcode/gcode_parser.c` - G-code parsing & GRBL protocol ✅
-- `srcs/gcode/utils.c` - Professional string tokenization utilities ✅
-- `srcs/motion/stepper.c` - Hardware abstraction layer ✅  
-- `srcs/motion/motion.c` - Master motion controller ✅
-- `srcs/motion/kinematics.c` - Physics calculations ✅
-- `srcs/settings/settings.c` - Persistent GRBL settings with NVM flash ✅
-- `incs/data_structures.h` - Unified data structures (no circular dependencies) ✅
+- `srcs/gcode/gcode_parser.c` - G-code parsing & GRBL protocol
+- `srcs/gcode/utils.c` - Professional string tokenization utilities
+- `srcs/motion/stepper.c` - Hardware abstraction layer
+- `srcs/motion/motion.c` - Master motion controller
+- `srcs/motion/kinematics.c` - Physics calculations
+- `srcs/settings/settings.c` - Persistent GRBL settings with NVM flash
+- `incs/data_structures.h` - Unified data structures (no circular dependencies)
 - `incs/common.h` - Shared constants and enums
 - `docs/plantuml/` - Architecture diagrams:
   - `01_system_overview.puml` - High-level system architecture
@@ -957,12 +842,11 @@ Physical Address    Virtual (KSEG1)     Size        Purpose
   - `03_arc_linear_interpolation.puml` - Arc/linear interpolation system
 - `README.md` - Complete project documentation with TODO list
 
-## Unified Data Structures (Completed ✅)
-
-### Architecture Pattern
+## Unified Data Structures (Completed)
+Architecture Pattern:
 All major data structures consolidated in `incs/data_structures.h` to eliminate circular dependencies and provide clean module separation.
 
-**Structure Hierarchy:**
+Structure Hierarchy:
 ```c
 // incs/data_structures.h
 - E_AXIS enum (AXIS_X, AXIS_Y, AXIS_Z, AXIS_A, NUM_AXIS)
@@ -979,13 +863,12 @@ All major data structures consolidated in `incs/data_structures.h` to eliminate 
   └── motionQueue[16], head, tail, count
 ```
 
-### Flow Control Infrastructure (Ready to Implement)
+Flow Control Infrastructure (Ready to Use):
 The nested motion queue info in `GCODE_CommandQueue` enables flow control without circular dependencies:
-
 ```c
 // app.c syncs motion queue status before GCODE processing
 case APP_IDLE:
-    // ✅ Sync motion queue count for flow control
+    // Sync motion queue count for flow control
     appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
     
     // Now GCODE_Tasks can check motion buffer occupancy
@@ -993,21 +876,21 @@ case APP_IDLE:
     break;
 ```
 
-### Benefits of Unified Structures
-- ✅ **No circular dependencies** - all structures in one header
-- ✅ **Clean module separation** - data vs logic separation
-- ✅ **Single source of truth** - structure definitions in one place
-- ✅ **Easy to test** - mock entire APP_DATA structure
-- ✅ **Flow control ready** - nested motion queue info accessible to G-code parser
+Benefits of Unified Structures:
+- No circular dependencies - all structures in one header
+- Clean module separation - data vs logic separation
+- Single source of truth - structure definitions in one place
+- Easy to test - mock entire APP_DATA structure
+- Flow control ready - nested motion queue info accessible to G-code parser
 
-## Settings Implementation (Completed ✅)
+## Settings Implementation (Completed)
 
 ### Critical Timing Requirement
-- **NEVER read flash during SETTINGS_Initialize()** - will hang on boot
-- **Must delay NVM_Read() until after all peripherals initialized**
-- **Solution:** APP_LOAD_SETTINGS state executes after APP_CONFIG
+- NEVER read flash during `SETTINGS_Initialize()` - will hang on boot
+- Must delay NVM_Read() until after all peripherals initialized
+- Solution: APP_LOAD_SETTINGS state executes after APP_CONFIG
 
-### Implementation Pattern
+Implementation Pattern:
 ```c
 // SETTINGS_Initialize() - called from main.c after SYS_Initialize()
 void SETTINGS_Initialize(void) {
@@ -1025,7 +908,7 @@ case APP_LOAD_SETTINGS:
     break;
 ```
 
-### NVM Write Pattern (Harmony)
+NVM Write Pattern (Harmony):
 ```c
 // Cache-aligned buffer (CRITICAL for PIC32MZ)
 static uint32_t writeData[BUFFER_SIZE] CACHE_ALIGN;
@@ -1040,27 +923,26 @@ while(xferDone == false);
 xferDone = false;
 ```
 
-### Why RowWrite vs WordWrite
-- Settings = 164 bytes (fits in ONE row of 2048 bytes)
-- Must erase entire 16KB page anyway
-- RowWrite = 1 operation vs WordWrite = 41 operations
-- More efficient, more reliable, matches Harmony pattern
+Why RowWrite vs WordWrite:
+- Settings typically fit in one row (2048 bytes)
+- Must erase full page anyway
+- RowWrite fewer ops → more reliable
 
 ## Arc Interpolation Implementation (COMPLETED ✅ November 4, 2025)
 
 ### Overview
-Arc interpolation provides smooth circular motion for G2/G3 commands. The **incremental streaming architecture** generates one segment per iteration, preventing motion queue starvation and enabling non-blocking operation.
+Arc interpolation provides smooth circular motion for G2/G3 commands. The incremental streaming architecture generates one segment per iteration, preventing motion queue starvation and enabling non-blocking operation.
 
 ### Implementation Architecture
 
-**Incremental Streaming Pattern:**
-- **Non-blocking**: ONE segment generated per APP_Tasks() iteration
-- **Self-regulating**: Only generates when motion queue has space
-- **FPU-accelerated**: Hardware sin/cos for smooth arcs (50-100μs per segment)
-- **Exact end point**: Final segment uses target coordinates (no accumulated error)
-- **Queue never empties**: Continuous flow during arc execution
+Incremental Streaming Pattern:
+- Non-blocking: ONE segment generated per APP_Tasks() iteration
+- Self-regulating: Only generates when motion queue has space
+- FPU-accelerated: Hardware sin/cos for smooth arcs (50-100μs per segment)
+- Exact end point: Final segment uses target coordinates (no accumulated error)
+- Queue never empties: Continuous flow during arc execution
 
-**Arc Generation State Machine:**
+Arc Generation State Machine:
 ```c
 typedef enum {
     ARC_GEN_IDLE = 0,      // No arc in progress
@@ -1068,7 +950,7 @@ typedef enum {
 } ArcGenState;
 ```
 
-**Arc Parameters in APP_DATA:**
+Arc Parameters in APP_DATA:
 ```c
 ArcGenState arcGenState;
 float arcTheta;                    // Current angle (radians)
@@ -1084,32 +966,31 @@ float arcFeedrate;                 // Arc feedrate (mm/min)
 uint8_t modalPlane;                // Modal plane state (G17=0, G18=1, G19=2)
 ```
 
-### Arc Math (GRBL v1.1 Compatible)
+Arc Math (GRBL v1.1 Compatible)
 
-**G-code Format:**
-- **G2**: Clockwise arc in current plane
-- **G3**: Counter-clockwise arc in current plane
-- **Parameters**:
+G-code Format:
+- G2: Clockwise arc in current plane
+- G3: Counter-clockwise arc in current plane
+- Parameters:
   - `X Y Z`: End point coordinates (absolute or relative based on G90/G91)
-  - `I J K`: Center offset from **start point** (always incremental)
-  - Example: `G2 X10 Y0 I5 J0` → Arc from current pos to (10,0), center at (5,0), radius=5mm
+  - `I J K`: Center offset from start point (always incremental)
 
-**Arc Calculations (implemented in app.c lines 487-574):**
-1. **Center point**: `center.x = start.x + centerX`, `center.y = start.y + centerY`
-2. **Radius verification**: 
-   - `r_start = sqrt(centerX² + centerY²)` (radius from start to center)
+Arc Calculations (implemented in app.c):
+1. Center point: `center.x = start.x + I`, `center.y = start.y + J`
+2. Radius verification:
+   - `r_start = sqrt(I² + J²)` (radius from start to center)
    - `r_end = sqrt((end.x - center.x)² + (end.y - center.y)²)` (radius from end to center)
-   - If `|r_start - r_end| > 0.005mm`, trigger ALARM:33 (arc radius error)
-3. **Angles**:
+   - If `|r_start - r_end| > 0.005mm`, trigger ALARM (arc radius error)
+3. Angles:
    - `start_angle = atan2f(start.y - center.y, start.x - center.x)`
    - `end_angle = atan2f(end.y - center.y, end.x - center.x)`
    - `total_angle` with wrap-around handling for CW/CCW direction
-4. **Arc length**: `arc_length = radius × total_angle` (in radians)
-5. **Segment count**: `segments = ceil(arc_length / mm_per_arc_segment)` (GRBL setting $12)
+4. Arc length: `arc_length = radius × total_angle` (in radians)
+5. Segment count: `segments = ceil(arc_length / mm_per_arc_segment)` (GRBL setting $12)
 
-### Incremental Arc Generator (app.c lines 590-641)
+Incremental Arc Generator (app.c)
 
-**Operation Pattern:**
+Operation Pattern:
 ```c
 // Runs in APP_IDLE state when arcGenState == ARC_GEN_ACTIVE
 if(appData.arcGenState == ARC_GEN_ACTIVE && appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
@@ -1118,24 +999,20 @@ if(appData.arcGenState == ARC_GEN_ACTIVE && appData.motionQueueCount < MAX_MOTIO
     
     CoordinatePoint next;
     
-    // Check if this is the last segment
-    bool is_last_segment = (appData.arcClockwise && appData.arcTheta <= appData.arcThetaEnd) ||
-                          (!appData.arcClockwise && appData.arcTheta >= appData.arcThetaEnd);
+    // Determine if last segment
+    bool last = /* ... compare theta to thetaEnd based on direction ... */;
     
-    if(is_last_segment) {
-        // Use exact end point to prevent accumulated error
-        next = appData.arcEndPoint;
+    if(last) {
+        next = appData.arcEndPoint;     // Exact end point
         appData.arcGenState = ARC_GEN_IDLE;
-        
     } else {
         // Calculate intermediate point using sin/cos (FPU accelerated)
         next.x = appData.arcCenter.x + appData.arcRadius * cosf(appData.arcTheta);
         next.y = appData.arcCenter.y + appData.arcRadius * sinf(appData.arcTheta);
-        
         // Linear interpolation for Z and A axes (helical motion)
-        float progress = fabsf(appData.arcTheta - atan2f(...)) / total_angle;
-        next.z = arcCurrent.z + (arcEndPoint.z - arcCurrent.z) * progress;
-        next.a = arcCurrent.a + (arcEndPoint.a - arcCurrent.a) * progress;
+        float progress = /* ... */;
+        next.z = appData.arcCurrent.z + (appData.arcEndPoint.z - appData.arcCurrent.z) * progress;
+        next.a = appData.arcCurrent.a + (appData.arcEndPoint.a - appData.arcCurrent.a) * progress;
     }
     
     // Generate motion segment for this arc increment
@@ -1159,38 +1036,14 @@ if(appData.arcGenState == ARC_GEN_ACTIVE && appData.motionQueueCount < MAX_MOTIO
 }
 ```
 
-### Key Features
+Key Features
+- GRBL v1.1 Compatible Arc Math
+- Helical Motion Support (Z/A linear interpolation during arcs)
+- Plane Selection (G17/G18/G19) via modal state
+- Performance: non-blocking, FPU-accelerated, memory-efficient
+- GRBL Setting Integration: `$12` - mm_per_arc_segment (persistent in NVM)
 
-✅ **GRBL v1.1 Compatible Arc Math**
-- Radius validation prevents malformed arcs
-- Angle calculation with proper wrap-around
-- CW (G2) and CCW (G3) direction support
-
-✅ **Helical Motion Support**
-- Z-axis linear interpolation during arc
-- A-axis (rotary) linear interpolation
-- Full 4-axis helical toolpaths
-
-✅ **Plane Selection (Modal State)**
-- G17: XY plane (default)
-- G18: XZ plane
-- G19: YZ plane
-- Modal state tracked in `appData.modalPlane`
-
-✅ **Performance Characteristics**
-- Non-blocking: 50-100μs per segment generation
-- FPU-accelerated: sin/cos in hardware
-- Memory efficient: No buffer overflow possible
-- Self-regulating: Checks queue space before adding
-
-✅ **GRBL Setting Integration**
-- `$12` - mm_per_arc_segment (default 0.1mm)
-- Accessible via SETTINGS_GetCurrent()
-- Persistent in NVM flash storage
-
-### Testing Arc Interpolation
-
-**Test G-code:**
+Testing Arc Interpolation
 ```gcode
 G17           ; Select XY plane
 G90           ; Absolute positioning
@@ -1199,69 +1052,18 @@ G1 F500       ; Set feedrate to 500 mm/min
 G2 X10 Y0 I5 J0   ; CW arc from (0,0) to (10,0), center at (5,0), radius=5mm
 ```
 
-**Expected Behavior:**
-- Arc broken into ~157 segments (π×10mm / 0.1mm per segment ≈ 31.4 for semicircle)
+Expected Behavior:
+- Arc broken into short segments based on `$12`
 - Smooth circular motion in XY plane
 - Final position: (10.0, 0.0)
-- Motion queue never runs empty during arc
 - Status query shows continuous motion: `<Run|MPos:...>`
-    float r_start = sqrtf(I*I + J*J);
-    float r_end = sqrtf((end.x-center.x)*(end.x-center.x) + (end.y-center.y)*(end.y-center.y));
-    if(fabsf(r_start - r_end) > 0.005f) {
-        return 0;  // Radius error - abort arc
-    }
-    
-    // 2. Calculate angles and arc length
-    float start_angle = atan2f(start.y - center.y, start.x - center.x);
-    float end_angle = atan2f(end.y - center.y, end.x - center.x);
-    float total_angle = clockwise ? (start_angle - end_angle) : (end_angle - start_angle);
-    if(total_angle < 0) total_angle += 2.0f * M_PI;  // Normalize to [0, 2π]
-    
-    float arc_length = r_start * total_angle;  // mm
-    
-    // 3. Calculate segment count
-    uint32_t segment_count = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
-    if(segment_count > max_segments) segment_count = max_segments;
-    if(segment_count == 0) segment_count = 1;  // At least one segment
-    
-    // 4. Generate intermediate points using sin/cos (FPU accelerated)
-    float angle_per_segment = total_angle / segment_count;
-    CoordinatePoint current = start;
-    
-    for(uint32_t i = 1; i <= segment_count; i++) {
-        // Calculate angle for this segment
-        float theta = start_angle + (clockwise ? -1.0f : 1.0f) * angle_per_segment * i;
-        
-        // Calculate next point on arc (using FPU sin/cos)
-        CoordinatePoint next;
-        next.x = center.x + r_start * cosf(theta);
-        next.y = center.y + r_start * sinf(theta);
-        next.z = start.z + (end.z - start.z) * ((float)i / segment_count);  // Linear Z
-        next.a = start.a + (end.a - start.a) * ((float)i / segment_count);  // Linear A
-        
-        // Call KINEMATICS_LinearMove() for this arc segment (reuse existing function!)
-        KINEMATICS_LinearMove(current, next, feedrate, &segment_buffer[i-1]);
-        
-        current = next;  // Move to next segment
-    }
-    
-    return segment_count;  // Number of segments generated
-}
-```
-
-**Key Implementation Points:**
-- **Use hardware FPU** for sin/cos/atan2/sqrt (fast on PIC32MZ with `-mhard-float`)
-- **Reuse KINEMATICS_LinearMove()** - each arc segment is a tiny linear move
-- **Generate ALL segments atomically** before returning (no streaming during arc)
-- **Pre-allocate buffer** in caller (APP_DATA or stack)
-- **Error checking**: Verify radius matches at start and end
 
 ## 🔧 BUILD SYSTEM STATUS (November 6, 2025)
 
 ### Current State
-- ✅ **Build works** - `make all` defaults to Release, project compiles successfully
-- ✅ **Clean works** - `make clean` removes all build artifacts
-- ✅ **Directory structure finalized** - Separate Debug/Release folders for bins, objs, libs, other
+- Build works - `make all` defaults to Release, project compiles successfully
+- Clean works - `make clean` removes all build artifacts
+- Directory structure finalized - Separate Debug/Release folders for bins, objs, libs, other
 
 ### Directory Structure (Final)
 ```
@@ -1282,5 +1084,4 @@ make BUILD_CONFIG=Debug     # Build Debug
 make clean                  # Clean current BUILD_CONFIG artifacts
 ```
 
-**No further Makefile changes planned** - current structure works well and follows standard practices.
-```
+No further Makefile changes planned - current structure works well and follows standard practices.

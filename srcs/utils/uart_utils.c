@@ -12,12 +12,15 @@
 
 #include "utils/uart_utils.h"
 #include "config/default/peripheral/uart/plib_uart3.h"
+#include "data_structures.h"
+#include "common.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 /* ========== INITIALIZATION ========== */
 
-    static char buffer[512];  // Static to avoid stack overflow
+static char buffer[512];  // Static to avoid stack overflow
 
 void UART_Initialize(void) {
     // ✅ PLIB ring buffer handles TX/RX automatically via ISR
@@ -31,45 +34,29 @@ bool UART_Write(const uint8_t* msg, size_t len) {
     if (msg == NULL || len == 0) {
         return false;  // Invalid parameters
     }
-    
-    // ✅ Write directly to PLIB TX ring buffer (1024 bytes)
-    // UART3_Write() copies data to buffer and returns immediately
-    // ISR transmits in background - this is non-blocking
     size_t written = UART3_Write((uint8_t*)msg, len);
-    
-    // ✅ For large messages: Check if buffer has space
-    // If buffer full, can register callback to retry later:
-    //   UART3_WriteCallbackRegister(callback, context);
-    //   UART3_WriteThresholdSet(threshold);
-    //   UART3_WriteNotificationEnable(true, true);
-    
     return (written == len);  // True if all bytes copied to ring buffer
 }
 
 bool UART_Printf(const char* format, ...) {
     if (format == NULL) {
-        return false;  // Invalid format
+        return false;
     }
-    
-
     va_list args;
     va_start(args, format);
     int len = vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
-    
     if (len <= 0 || len >= (int)sizeof(buffer)) {
-        return false;  // Format error or buffer overflow
+        return false;
     }
-    
     return UART_Write((uint8_t*)buffer, (size_t)len);
 }
 
 /* ========== GRBL PROTOCOL MESSAGE HELPERS ========== */
 
 bool UART_SendOK(void) {
-    // ✅ PLIB ring buffer handles transmission - just write and return
     UART3_Write((uint8_t*)"ok\r\n", 4);
-    return true;  // Always succeeds (1024-byte buffer)
+    return true;
 }
 
 bool UART_SendGrblStatus(const char* state, 
@@ -79,17 +66,13 @@ bool UART_SendGrblStatus(const char* state,
     if (state == NULL) {
         return false;
     }
-    
-
     int len = snprintf(buffer, sizeof(buffer),
-        "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%u>\r\n",
-        state, mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z,
-        feedrate, spindle_rpm);
-    
+                       "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%u>\r\n",
+                       state, mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z,
+                       feedrate, (unsigned)spindle_rpm);
     if (len <= 0 || len >= (int)sizeof(buffer)) {
         return false;
     }
-    
     return UART_Write((uint8_t*)buffer, (size_t)len);
 }
 
@@ -108,7 +91,6 @@ bool UART_SendMessage(const char* msg) {
     return UART_Write((uint8_t*)msg, strlen(msg));
 }
 
-
 void UART_PrintHelp(void)
 {
     UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $X $H $SLP $C $J=line $RST=x]\r\n", 52);
@@ -118,43 +100,44 @@ void UART_PrintHelp(void)
     UART_SendOK();
 }
 
-void UART_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue){
+/* ========== SOFT RESET (Ctrl+X) ========================================== */
+/* Central, non-blocking soft reset used by gcode_parser.c */
 
-       
-            // ✅ Clear motion queue
-          //  extern APP_DATA appData;  // Access app data
-            appData->motionQueueCount = 0;
-            appData->motionQueueHead = 0;
-            appData->motionQueueTail = 0;
-            appData->currentSegment = NULL;  // ✅ CRITICAL: Clear segment pointer!
-            
-            // ✅ Clear G-code queue
-            cmdQueue->count = 0;
-            cmdQueue->head = 0;
-            cmdQueue->tail = 0;
-            
-            // ✅ Stop arc generation if active
-            appData->arcGenState = ARC_GEN_IDLE;
-            
-            // ✅ Reset motion phase
-            appData->motionPhase = MOTION_PHASE_IDLE;
+void UART_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
+{
+    if (appData == NULL || cmdQueue == NULL) {
+        return;
+    }
 
-            // ✅ Reset modal and coordinate state for a clean start
-            appData->absoluteMode = true;          // G90
-            appData->modalFeedrate = 0.0f;         // No feed until set
-            appData->modalSpindleRPM = 0;
-            appData->modalToolNumber = 0;
-            appData->currentX = 0.0f;
-            appData->currentY = 0.0f;
-            appData->currentZ = 0.0f;
-            appData->currentA = 0.0f;
-            // Reset work coordinate offset
-            KINEMATICS_SetWorkOffset(0.0f, 0.0f, 0.0f);
+    /* Flush any pending RX bytes to avoid processing pre-reset junk */
+    uint8_t scratch[64];
+    uint32_t rc;
+    while ((rc = UART3_ReadCountGet()) > 0U) {
+        uint32_t toRead = (rc > sizeof(scratch)) ? (uint32_t)sizeof(scratch) : rc;
+        (void)UART3_Read(scratch, toRead);
+    }
 
-            // ✅ Disable OC interrupts explicitly (safety) - use correct modules
-            IEC0CLR = _IEC0_OC5IE_MASK;  // X
-            IEC0CLR = _IEC0_OC1IE_MASK;  // Y
-            IEC0CLR = _IEC0_OC3IE_MASK;  // Z
-            IEC0CLR = _IEC0_OC4IE_MASK;  // A
+    /* Clear motion planner queue (planner and executor state) */
+    appData->motionQueueHead = 0;
+    appData->motionQueueTail = 0;
+    appData->motionQueueCount = 0;
+    appData->currentSegment   = NULL;
 
+    /* Modal state to GRBL defaults: G17, G21, G90, G94, M5, M9, T0, F0, S0 */
+    appData->modalPlane       = 0;        /* 0->G17 (XY) as used by $G print */
+    appData->absoluteMode     = true;     /* G90 */
+    appData->modalFeedrate    = 0.0f;     /* F */
+    appData->modalSpindleRPM  = 0;        /* S */
+    appData->modalToolNumber  = 0;        /* T0 */
+
+    /* Application state back to IDLE */
+    appData->state            = APP_IDLE;
+
+    /* Reset G-code command queue */
+    cmdQueue->head  = 0;
+    cmdQueue->tail  = 0;
+    cmdQueue->count = 0;
+    cmdQueue->motionQueueCount = appData->motionQueueCount;
+
+    /* Do NOT send "ok" here; gcode parser prints the GRBL banner after this. */
 }

@@ -89,6 +89,8 @@ static uint8_t step_pulse_invert_mask = 0;
 static uint8_t direction_invert_mask = 0;
 static uint8_t enable_invert = 0;
 
+static bool steppers_enabled = false;
+
 void STEPPER_Initialize(APP_DATA* appData) {
     // Store reference for ISR access
     app_data_ref = appData;
@@ -212,19 +214,35 @@ void STEPPER_SetStepRate(uint32_t rate_ticks) {
     OCMP1_CompareSecondaryValueSet(period - 40);     // OCxRS: Falling edge
 }
 
-void STEPPER_DisableAll(void) {
-    // Emergency stop - disable OC1 and stepper drivers
-    OCMP1_Disable();
-    TMR4_Stop();
-
-    // Disable stepper drivers (cut power)
-    CNC_Settings* settings = SETTINGS_GetCurrent();
-    MOTION_UTILS_EnableAllAxes(false, settings->step_enable_invert);
+bool STEPPER_IsEnabled(void)
+{
+    return steppers_enabled;
 }
 
-StepperPosition* STEPPER_GetPosition(void)
+void STEPPER_EnableAll(void)
 {
-    return &stepper_pos;
+    if (steppers_enabled) return;
+
+    /* Enable outputs for every axis. Adjust polarity if needed. */
+    for (E_AXIS a = 0; a < NUM_AXIS; a++) {
+        /* If your hardware uses active LOW enable, replace EnableClear with EnableSet. */
+        AXIS_EnableSet(a);   /* or AXIS_EnableClear(a) depending on board */
+    }
+
+    steppers_enabled = true;
+    DEBUG_PRINT_STEPPER("[STEPPER] Enabled all drivers\r\n");
+}
+
+void STEPPER_DisableAll(void)
+{
+    if (!steppers_enabled) return;
+
+    for (E_AXIS a = 0; a < NUM_AXIS; a++) {
+        AXIS_EnableClear(a); /* or AXIS_EnableSet(a) if active LOW */
+    }
+
+    steppers_enabled = false;
+    DEBUG_PRINT_STEPPER("[STEPPER] Disabled all drivers\r\n");
 }
 
 // ============================================================================
@@ -333,6 +351,31 @@ void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context) {
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         AXIS_StepClear(axis);
     }
+}
+
+#include "utils.h"  // for g_axis_config and E_AXIS
+
+StepperPosition* STEPPER_GetPosition(void)
+{
+    static StepperPosition snap;
+
+    // Defaults
+    snap.x_steps = snap.y_steps = snap.z_steps = snap.a_steps = 0;
+    snap.steps_per_mm_x = snap.steps_per_mm_y = snap.steps_per_mm_z = 1.0f;
+    snap.steps_per_deg_a = 1.0f;
+
+    // Live step counters (from axis config pointers)
+    if (g_axis_config[AXIS_X].step_count) snap.x_steps = *g_axis_config[AXIS_X].step_count;
+    if (g_axis_config[AXIS_Y].step_count) snap.y_steps = *g_axis_config[AXIS_Y].step_count;
+    if (g_axis_config[AXIS_Z].step_count) snap.z_steps = *g_axis_config[AXIS_Z].step_count;
+    if (g_axis_config[AXIS_A].step_count) snap.a_steps = *g_axis_config[AXIS_A].step_count;
+
+    // Steps/mm (used by status/MPos→mm conversion)
+    if (g_axis_config[AXIS_X].steps_per_mm) snap.steps_per_mm_x = *g_axis_config[AXIS_X].steps_per_mm;
+    if (g_axis_config[AXIS_Y].steps_per_mm) snap.steps_per_mm_y = *g_axis_config[AXIS_Y].steps_per_mm;
+    if (g_axis_config[AXIS_Z].steps_per_mm) snap.steps_per_mm_z = *g_axis_config[AXIS_Z].steps_per_mm;
+
+    return &snap;
 }
 
 // End of stepper.c

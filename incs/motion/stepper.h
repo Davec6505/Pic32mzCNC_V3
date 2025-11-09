@@ -23,4 +23,10 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward);     // Set direction for a
 void STEPPER_DisableAll(void);                            // Emergency stop
 StepperPosition* STEPPER_GetPosition(void);               // Get current position
 
+/* Returns true if steppers currently enabled. */
+bool STEPPER_IsEnabled(void);
+
+/* Enable all stepper drivers (counterpart to STEPPER_DisableAll). */
+void STEPPER_EnableAll(void);
+
 #endif /* STEPPER_H */
