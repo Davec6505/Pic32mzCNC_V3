@@ -8,7 +8,7 @@
 #include <stdio.h>
 
 // Global settings instance (loaded at startup)
-static GRBL_Settings current_settings;
+static CNC_Settings current_settings;
 
 // ✅ CRITICAL: Cache-aligned buffer for NVM operations (Harmony pattern)
 // PIC32MZ requires cache-aligned buffers for flash read/write operations
@@ -28,7 +28,7 @@ static void eventHandler(uintptr_t context)
 }
 
 // Default settings values
-static const GRBL_Settings default_settings = {
+static const CNC_Settings default_settings = {
     .signature = SETTINGS_SIGNATURE,
     .version = SETTINGS_VERSION,
     .padding = 0,
@@ -84,12 +84,12 @@ static const GRBL_Settings default_settings = {
 };
 
 /* Calculate CRC32 checksum for settings validation */
-uint32_t SETTINGS_CalculateCRC32(const GRBL_Settings* settings)
+uint32_t SETTINGS_CalculateCRC32(const CNC_Settings* settings)
 {
     // Simple CRC32 implementation
     uint32_t crc = 0xFFFFFFFF;
     const uint8_t* data = (const uint8_t*)settings;
-    size_t length = sizeof(GRBL_Settings) - sizeof(uint32_t); // Exclude checksum field
+    size_t length = sizeof(CNC_Settings) - sizeof(uint32_t); // Exclude checksum field
     
     for (size_t i = 0; i < length; i++) {
         crc ^= data[i];
@@ -113,7 +113,7 @@ void SETTINGS_Initialize(void)
 }
 
 /* Load settings from NVM flash */
-bool SETTINGS_LoadFromFlash(GRBL_Settings* settings)
+bool SETTINGS_LoadFromFlash(CNC_Settings* settings)
 {
     if (!settings) return false;
     
@@ -121,8 +121,8 @@ bool SETTINGS_LoadFromFlash(GRBL_Settings* settings)
     NVM_Read(writeData, sizeof(writeData), SETTINGS_READ_ADDRESS);
     
     // ✅ CRITICAL: Validate BEFORE copying to settings (don't corrupt defaults!)
-    GRBL_Settings temp_settings;
-    memcpy(&temp_settings, writeData, sizeof(GRBL_Settings));
+    CNC_Settings temp_settings;
+    memcpy(&temp_settings, writeData, sizeof(CNC_Settings));
     
     // Validate signature first
     if (temp_settings.signature != SETTINGS_SIGNATURE) {
@@ -136,23 +136,23 @@ bool SETTINGS_LoadFromFlash(GRBL_Settings* settings)
     }
     
     // ✅ Only copy if validation passed
-    memcpy(settings, &temp_settings, sizeof(GRBL_Settings));
+    memcpy(settings, &temp_settings, sizeof(CNC_Settings));
     
     return true;
 }
 
 /* Save settings to NVM flash */
-bool SETTINGS_SaveToFlash(const GRBL_Settings* settings)
+bool SETTINGS_SaveToFlash(const CNC_Settings* settings)
 {
     if (!settings) return false;
     
     // ✅ CRITICAL: Calculate checksum first
-    GRBL_Settings temp_settings;
-    memcpy(&temp_settings, settings, sizeof(GRBL_Settings));
+    CNC_Settings temp_settings;
+    memcpy(&temp_settings, settings, sizeof(CNC_Settings));
     temp_settings.checksum = SETTINGS_CalculateCRC32(&temp_settings);
     
     // ✅ CRITICAL: Populate cache-aligned buffer (Harmony pattern)
-    memcpy(writeData, &temp_settings, sizeof(GRBL_Settings));
+    memcpy(writeData, &temp_settings, sizeof(CNC_Settings));
     
     // ✅ Harmony pattern variables
     uint32_t address = SETTINGS_NVM_ADDRESS;
@@ -181,7 +181,7 @@ bool SETTINGS_SaveToFlash(const GRBL_Settings* settings)
     }
     
     // ✅ Write data row-by-row (Harmony pattern)
-    for (i = 0; i < sizeof(GRBL_Settings); i+= NVM_FLASH_ROWSIZE)
+    for (i = 0; i < sizeof(CNC_Settings); i+= NVM_FLASH_ROWSIZE)
     {
         // Program a row of data
         NVM_RowWrite((uint32_t *)writePtr, address);
@@ -204,16 +204,16 @@ bool SETTINGS_SaveToFlash(const GRBL_Settings* settings)
 }
 
 /* Restore default settings */
-void SETTINGS_RestoreDefaults(GRBL_Settings* settings)
+void SETTINGS_RestoreDefaults(CNC_Settings* settings)
 {
     if (!settings) return;
     
-    memcpy(settings, &default_settings, sizeof(GRBL_Settings));
+    memcpy(settings, &default_settings, sizeof(CNC_Settings));
     settings->checksum = SETTINGS_CalculateCRC32(settings);
 }
 
 /* Set a settings value by parameter number */
-bool SETTINGS_SetValue(GRBL_Settings* settings, uint32_t parameter, float value)
+bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
 {
     if (!settings) return false;
     
@@ -272,7 +272,7 @@ bool SETTINGS_SetValue(GRBL_Settings* settings, uint32_t parameter, float value)
 }
 
 /* Get a settings value by parameter number */
-float SETTINGS_GetValue(const GRBL_Settings* settings, uint32_t parameter)
+float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
 {
     if (!settings) return 0.0f;
     
@@ -321,7 +321,7 @@ float SETTINGS_GetValue(const GRBL_Settings* settings, uint32_t parameter)
 }
 
 /* Print all settings (GRBL $$ command) */
-void SETTINGS_PrintAll(const GRBL_Settings* settings)
+void SETTINGS_PrintAll(const CNC_Settings* settings)
 {
     if (!settings) return;
     
@@ -371,18 +371,9 @@ void SETTINGS_PrintAll(const GRBL_Settings* settings)
     // ✅ GRBL protocol: blank line + ok
     len += sprintf(&settings_buffer[len], "\r\nok\r\n");
     
-    // ✅ Ensure complete transmission - retry if buffer full
-    size_t total_sent = 0;
-    while(total_sent < len) {
-        size_t sent = UART3_Write((uint8_t*)&settings_buffer[total_sent], len - total_sent);
-        total_sent += sent;
-        
-        // If not all bytes sent, wait briefly for TX buffer to drain
-        if(sent == 0 && total_sent < len) {
-            // Small delay to let UART transmit (non-blocking busy wait)
-            for(volatile uint32_t i = 0; i < 1000; i++);
-        }
-    }
+    // ✅ Write to PLIB TX ring buffer (1024 bytes)
+    // Non-blocking - ISR handles transmission in background
+    UART3_Write((uint8_t*)settings_buffer, len);
 }
 
 /* Print build info (GRBL $I command) */
@@ -390,13 +381,14 @@ void SETTINGS_PrintBuildInfo(void)
 {
     // ✅ GRBL v1.1 exact format - MUST have space after colons!
     // Format: [VER: version] [OPT: options,blockbuffersize,rxbuffersize,axiscount]
-    // Use single buffer + blocking write for reliable transmission
     const char build_info[] = "[VER: 1.1h.20251102:]\r\n[OPT: VHM,35,1024,4]\r\nok\r\n";
+    
+    // ✅ Write to PLIB TX ring buffer - ISR transmits in background
     UART3_Write((uint8_t*)build_info, sizeof(build_info) - 1);  // -1 excludes null terminator
 }
 
 /* Get pointer to current settings */
-GRBL_Settings* SETTINGS_GetCurrent(void)
+CNC_Settings* SETTINGS_GetCurrent(void)
 {
     return &current_settings;
 }

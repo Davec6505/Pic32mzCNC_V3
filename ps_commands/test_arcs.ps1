@@ -230,7 +230,7 @@ if ($finalStatus -match "MPos:([\d\.\-]+),([\d\.\-]+),([\d\.\-]+)") {
     
     # Check if returned to origin
     $tolerance = 0.1
-    if ([math]::Abs($x) -lt $tolerance -and [math]::Abs($y) -lt $tolerance -and [math]::Abs($z) -lt $tolerance) {
+    if (([math]::Abs($x) -lt $tolerance) -and ([math]::Abs($y) -lt $tolerance) -and ([math]::Abs($z) -lt $tolerance)) {
         Write-Host "`n✓ Successfully returned to origin!" -ForegroundColor Green
     } else {
         Write-Host "`n✗ Position error detected!" -ForegroundColor Yellow

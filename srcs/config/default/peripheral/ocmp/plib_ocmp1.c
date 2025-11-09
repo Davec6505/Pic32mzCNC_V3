@@ -69,8 +69,8 @@ void OCMP1_Initialize (void)
     CFGCON |= 0x00010000U;
     /* Lock system since done with configuration */
     SYSKEY = 0x33333333;
-    OC1R = 1080;
-    OC1RS = 20;
+    OC1R = 1970;
+    OC1RS = 1990;
 
     IEC0SET = _IEC0_OC1IE_MASK;
 }

@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?> 
 <project>                                  
-  <executable name="../bins/Debug/CS23">                 
+  <executable name="../bins/Release/CS23">                 
     <memory name="program">                 
       <units>bytes</units>                 
       <length>2098304</length>                 
-      <used>86144</used>                     
-      <free>2012160</free>                     
+      <used>86420</used>                     
+      <free>2011884</free>                     
     </memory>                              
     <memory name="data">              
       <units>bytes</units>                 
       <length>524288</length>                 
-      <used>8112</used>                     
-      <free>516176</free>                     
+      <used>7344</used>                     
+      <free>516944</free>                     
     </memory>                              
   </executable>                            
 </project>                                 

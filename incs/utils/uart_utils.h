@@ -1,13 +1,16 @@
 /**
  * @file uart_utils.h
- * @brief Non-blocking UART communication utilities for debug and protocol messages
+ * @brief UART communication utilities - PLIB ring buffer wrapper
  * 
- * Provides centralized, non-blocking UART TX functions for:
+ * Provides centralized UART TX functions for:
  * - Debug output (conditional on DEBUG_ level)
  * - GRBL protocol responses (OK, status queries, errors)
  * - General message transmission to UGS/controllers
  * 
- * Uses callback-driven TX complete detection to prevent blocking during motion.
+ * Architecture:
+ * - Uses PLIB UART3 with 1024-byte TX ring buffer
+ * - All writes are non-blocking (ISR handles transmission)
+ * - For streaming large data, use UART3_WriteCallbackRegister() for flow control
  */
 
 #ifndef UART_UTILS_H
@@ -22,55 +25,42 @@
 extern "C" {
 #endif
 
-/* ========== NON-BLOCKING UART TX STATE ========== */
-
-/**
- * @brief TX ready flag - true when UART3 TX buffer empty, false when busy
- * Set by UART write callback, checked before sending to avoid blocking
- */
-extern volatile bool uart3TxReady;
-
 /* ========== INITIALIZATION ========== */
 
 /**
- * @brief Initialize UART utilities (register callback, enable notifications)
+ * @brief Initialize UART utilities
  * Call this once during system initialization
  */
 void UART_Initialize(void);
 
-/* ========== NON-BLOCKING OUTPUT FUNCTIONS ========== */
+/* ========== OUTPUT FUNCTIONS ========== */
 
 /**
- * @brief Non-blocking UART write - only sends if TX ready
+ * @brief Write data to UART TX ring buffer (non-blocking)
  * @param msg Pointer to message buffer
  * @param len Length of message in bytes
- * @return true if message sent, false if TX busy (message dropped)
+ * @return true if all bytes written to ring buffer, false if buffer full
+ * 
+ * @note PLIB TX ring buffer (1024 bytes) handles transmission via ISR
+ * @note For large data streams, check return value and use callbacks if needed
  */
 bool UART_Write(const uint8_t* msg, size_t len);
 
 /**
- * @brief Non-blocking printf-style message formatting and transmission
+ * @brief Printf-style message formatting and transmission (non-blocking)
  * @param format Printf-style format string
  * @param ... Variable arguments
- * @return true if message sent, false if TX busy (message dropped)
+ * @return true if message written to ring buffer, false if buffer full
  * 
  * Example: UART_Printf("[GCODE] Queued: %s\r\n", command);
  */
 bool UART_Printf(const char* format, ...);
 
-/**
- * @brief Check if UART3 is ready to send
- * @return true if ready, false if TX busy
- */
-static inline bool UART_IsReady(void) {
-    return uart3TxReady;
-}
-
 /* ========== GRBL PROTOCOL MESSAGE HELPERS ========== */
 
 /**
- * @brief Send GRBL "OK\r\n" response
- * @return true if sent, false if TX busy
+ * @brief Send GRBL "ok\r\n" response
+ * @return true if sent, false if TX buffer full
  */
 bool UART_SendOK(void);
 

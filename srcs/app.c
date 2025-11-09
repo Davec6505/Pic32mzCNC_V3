@@ -19,9 +19,11 @@
 #include "app.h"
 #include "settings.h"
 #include "kinematics.h"  // For KINEMATICS_LinearMove and CoordinatePoint
+#include "motion/homing.h"  // For homing state machine
 #include "motion_utils.h"  // For hard limit checking
 #include "config/default/peripheral/coretimer/plib_coretimer.h"  // For CORETIMER heartbeat counter
 #include "utils/uart_utils.h"  // Non-blocking UART utilities
+#include "utils/utils.h"       // For UTILS_InitAxisConfig
 #include "motion.h"
 
 // *****************************************************************************
@@ -138,6 +140,16 @@ void APP_Initialize ( void )
     
     // ✅ Initialize UART utilities (callback-based non-blocking output)
     UART_Initialize();
+    
+    // ✅ Initialize axis hardware configuration (must be after SETTINGS and STEPPER init)
+    // NOTE: This will be finalized in APP_CONFIG state after all peripherals are ready
+    UTILS_InitAxisConfig();
+    
+    // ✅ Initialize limit switch configuration (must be after SETTINGS init)
+    UTILS_InitLimitConfig();
+    
+    // ✅ Initialize homing system
+    HOMING_Initialize();
 
 }
 
@@ -182,7 +194,7 @@ void APP_Tasks ( void )
             
             // ✅ CRITICAL: Update stepper cached values after settings loaded
             // STEPPER_Initialize() ran before settings were loaded, so steps_per_mm might be stale
-            GRBL_Settings* settings = SETTINGS_GetCurrent();
+            CNC_Settings* settings = SETTINGS_GetCurrent();
             StepperPosition* stepper_pos = STEPPER_GetPosition();
             stepper_pos->steps_per_mm_x = settings->steps_per_mm_x;
             stepper_pos->steps_per_mm_y = settings->steps_per_mm_y;
@@ -204,13 +216,6 @@ void APP_Tasks ( void )
         
         case APP_IDLE:
         {
-            // ===== LED2 BRING-UP SANITY =====
-            // Turn LED2 ON once on first entry to APP_IDLE to prove GPIO works
-            static bool led2_boot_shown = false;
-            if(!led2_boot_shown) {
-                LED2_Set();
-                led2_boot_shown = true;
-            }
 
             // ===== LED2 STATUS INDICATOR (CORETIMER-TIMED, NOT LOOP-COUNT) =====
             // Maintain stable heartbeat independent of loop workload
@@ -220,12 +225,12 @@ void APP_Tasks ( void )
             if(appData.motionQueueCount == 0) {
                 uint32_t now_ticks = CORETIMER_CounterGet();
                 if ((uint32_t)(now_ticks - hb_last) >= HB_INTERVAL) {
-                    LED2_Toggle();
+                  //  LED2_Toggle();
                     hb_last = now_ticks;
                 }
             }
-            // During motion, ISR toggles LED2 on each step (fast blink)
-            // LED2 will blink at step rate, visible motion indicator
+            // During motion, ISR toggles LED1 on each step (fast blink)
+            // LED1 will blink at step rate, visible motion indicator
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
             // Read bytes, tokenize, and queue commands continuously
             GCODE_Tasks(&appData.gcodeCommandQueue);
@@ -247,16 +252,23 @@ void APP_Tasks ( void )
             // ===== MOTION CONTROLLER (SIMPLIFIED - NO ROLLOVER NEEDED WITH PR2) =====
             MOTION_Tasks(&appData);
 
+            // ===== HOMING STATE MACHINE =====
+            HOMING_Tasks();
+
             // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
             if(appData.arcGenState == ARC_GEN_ACTIVE) {
                 MOTION_Arc(&appData);
             }
+            
+            // ===== HOMING STATE MACHINE (NON-BLOCKING) =====
+            // Process homing cycle if active
+            HOMING_Tasks();
 
             // ===== HARD LIMIT CHECK (TEMP DISABLED) =====
             // Check limit switches with inversion mask from settings
             // ⚠️ TEMPORARILY DISABLED FOR UART TESTING
             /*
-            GRBL_Settings* settings = SETTINGS_GetCurrent();
+            CNC_Settings* settings = SETTINGS_GetCurrent();
             if(MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
                 // ⚠️ HARD LIMIT TRIGGERED - Emergency stop!
                 appData.alarmCode = 1;  // Alarm code 1 = hard limit

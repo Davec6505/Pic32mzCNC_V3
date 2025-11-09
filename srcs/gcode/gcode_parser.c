@@ -19,6 +19,7 @@
 #include <stdlib.h>                     // Defines EXIT_FAILURE
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>                      // For isdigit()
 #include <math.h>                       // ✅ For NAN and isnan()
 
 #include "gcode_parser.h"             
@@ -26,18 +27,26 @@
 #include "stepper.h"
 #include "motion.h"
 #include "kinematics.h"
+#include "motion/homing.h"
 #include "utils.h"
 #include "settings.h"
+
+/* ========== CONFIGURATION ========== */
 #include "data_structures.h"  // ✅ Access to GCODE_CommandQueue with nested motion info
 #include "utils/uart_utils.h"        // ✅ Non-blocking UART utilities
 #include "../config/default/peripheral/uart/plib_uart3.h"  // ✅ UART3 PLIB (for baud, init)
+
+
+
+// ✅ ENABLE startup banner for debugging UART TX
+#define ENABLE_STARTUP_BANNER
 
 // ✅ Flow control threshold - leave 2 slots free for safety
 #define MOTION_BUFFER_THRESHOLD 2
 
 /* USART Buffers */
-static uint8_t txBuffer[128];
-static uint8_t rxBuffer[50];
+static uint8_t txBuffer[250];
+static uint8_t rxBuffer[250];
 static volatile uint32_t nBytesRead = 0;
 static volatile bool rxThresholdEventReceived = false;
 
@@ -50,8 +59,6 @@ GCODE_Data gcodeData = {
 static bool okPending = false;
 
 /* local scope prototypes */
-void usartReadEventHandler(UART_EVENT event, uintptr_t context );
-void usartWriteEventHandler(UART_EVENT event, uintptr_t context );
 GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t length, GCODE_CommandQueue* commandQueue);
 void GCODE_ProcessQueuedCommand(GCODE_CommandQueue* cmdQueue);
 CoordinatePoint parse_coordinate_values(const char* command);
@@ -67,28 +74,14 @@ const char GRBL_CONTROL_CHARS[] = {'?', '~', 0x18, '!', 0x84, '$'}; // add more 
 // *****************************************************************************
 // *****************************************************************************
 
-void usartReadEventHandler(UART_EVENT event, uintptr_t context )
-{
-    uint32_t nBytesAvailable = 0;
-    
-    if (event == UART_EVENT_READ_THRESHOLD_REACHED)
-    {
-        /* Receiver should atleast have the thershold number of bytes in the ring buffer */
-        nBytesAvailable = UART3_ReadCountGet();
-        
-        nBytesRead += UART3_Read((uint8_t*)&rxBuffer[nBytesRead], nBytesAvailable);                          
-    }
-}
-
 void GCODE_USART_Initialize( uint32_t RD_thresholds)
 {
     
-    // ✅ Initialize UART utilities (registers callback, enables notifications)
+    // ✅ Initialize UART utilities
     UART_Initialize();
     
-    /* Register a callback for read events */
-    UART3_ReadCallbackRegister(usartReadEventHandler, (uintptr_t) NULL);    
-    
+    // ✅ PLIB already enables RX ISR in UART3_Initialize()
+    // Ring buffer fills automatically - we just poll UART3_ReadCountGet()
     
     // *******************************************************************************************
     // * Print the size of the read buffer on the terminal Dummy test
@@ -98,27 +91,17 @@ void GCODE_USART_Initialize( uint32_t RD_thresholds)
     UART_Printf("TX Buffer Size = %d\r\n", (int)UART3_WriteBufferSizeGet());
 #endif
 
-    // Use direct UART writes for startup banner to avoid early drops
+#ifdef ENABLE_STARTUP_BANNER
+    // Startup banner - can be disabled to reduce UART traffic at boot
     UART3_Write((uint8_t*)GRBL_FIRMWARE_VERSION, (uint32_t)strlen(GRBL_FIRMWARE_VERSION));
     UART3_Write((uint8_t*)GRBL_BUILD_DATE, (uint32_t)strlen(GRBL_BUILD_DATE));
     UART3_Write((uint8_t*)GRBL_BUILD_TIME, (uint32_t)strlen(GRBL_BUILD_TIME));
+#endif
     
     // ✅ Clear any garbage from RX buffer at startup (prevents spurious OK on first command)
     nBytesRead = 0;
     memset((void*)rxBuffer, 0, sizeof(rxBuffer));
     okPending = false;
-
-    /* set write threshold to indicate when the TX buffer is full */
-    /* enable notifications to get notified when the TX buffer is empty */
-    //UART3_WriteThresholdSet(UART3_WriteBufferSizeGet());     
-    /* Enable notifications, disabled for now */
-    //UART3_WriteNotificationEnable(false, false);
-
-   /* set a threshold value to receive a callback after every 1 characters are received */
-    UART3_ReadThresholdSet(RD_thresholds);
-
-    /* Disable RX event notifications */
-    UART3_ReadNotificationEnable(false, false);
 }
 
 
@@ -246,109 +229,126 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
     switch (gcodeData.state)
     {
     case GCODE_STATE_IDLE:
-        /* check if command has been received */
-       nBytesAvailable = UART3_ReadCountGet();
-
-        // sucessive calls buffering to allow all chars to stream in.
-        if(nBytesAvailable > 0){
-            // ✅ Accumulate bytes until we have a complete line
-            uint32_t space_available = sizeof(rxBuffer) - nBytesRead - 1;
-            uint32_t bytes_to_read = (nBytesAvailable < space_available) ? nBytesAvailable : space_available;
+        // ✅ CRITICAL: Only read from ring buffer if rxBuffer is EMPTY
+        // This prevents overwriting unprocessed data
+        if (nBytesRead == 0) {
+            nBytesAvailable = UART3_ReadCountGet();
             
-            if (bytes_to_read > 0) {
-                uint32_t new_bytes = UART3_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
-                nBytesRead += new_bytes;
+            if(nBytesAvailable > 0) {
+                // ✅ Only read available bytes (up to buffer limit)
+                // rxBuffer size is 250 bytes now
+                //only read what uart ring buffer has available to avoid corrupting plib 
+                // ring buffer data flow.
+                nBytesRead = UART3_Read(rxBuffer, nBytesAvailable);
+                rxBuffer[nBytesRead] = '\0';  // Null terminate
+            }
+        }
+        
+        // ✅ Process whatever is in rxBuffer (if anything)
+        if (nBytesRead > 0) {
+
+            // REMOVED: Debug print was causing infinite loop due to TX buffer overflow
+            // DEBUG_EXEC_GCODE({ UART_Printf("[RX: nBytes=%u, first=0x%02X]\r\n", ...); });
+            
+            // ✅ CRITICAL: Check for control characters FIRST (before terminator check)
+            // Real-time chars (`?`, `~`, `!`, 0x18) don't need terminators
+            // Settings/query chars (`$`, `G`) need terminators but go to CONTROL_CHAR state
+            if(rxBuffer[0] == '?' || rxBuffer[0] == '~' || rxBuffer[0] == '!' || rxBuffer[0] == 0x18 ||
+               rxBuffer[0] == '$' || rxBuffer[0] == 'G' || rxBuffer[0] == 'g') {
+                DEBUG_PRINT_GCODE("[IDLE] Control/command char detected: 0x%02X\r\n", (unsigned)rxBuffer[0]);
+                gcodeData.state = GCODE_STATE_CONTROL_CHAR;
+                // DON'T clear nBytesRead here - CONTROL_CHAR state needs the buffer
+                // Exit IDLE case immediately - will process in CONTROL_CHAR on next GCODE_Tasks() call
+                break;
             }
             
-            // ✅ CRITICAL: Check for line terminator OR control character
-            static bool has_line_terminator = false;
+            // ✅ Only process regular commands from here on (control chars already handled above)
+            
+            // ✅ Find FIRST line terminator (for commands that need it)
+            bool has_terminator = false;
+            uint32_t terminator_pos = 0;
             for(uint32_t i = 0; i < nBytesRead; i++) {
                 if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r') {
-                    has_line_terminator = true;
-                    break;
-                }
-            }
-
-           // Process the received data        
-           // We need to check the 1st char for control characters like ?,~,^X,!,etc.
-           bool control_char_found = false;
-            for(uint8_t i=0; i<(sizeof(GRBL_CONTROL_CHARS))/(sizeof(GRBL_CONTROL_CHARS[0])); i++){
-                
-                if(rxBuffer[0] == GRBL_CONTROL_CHARS[i]){
-                    control_char_found = true;
-                    gcodeData.state = GCODE_STATE_CONTROL_CHAR;   
-                    break;          
-                }
-            }
-
-            // ✅ If control char found, immediately break to handler (skip G-code processing)
-            if(control_char_found){
-                // Don't send OK for control characters
-                // Reset line terminator flag since we're not processing as G-code
-                has_line_terminator = false;
-                // Break out - next iteration will process in GCODE_STATE_CONTROL_CHAR
-                break;
-                
-            } else {
-                // Not a control char - process as regular G-code
-
-                //must not continue until line terminator is found
-                if(!has_line_terminator){
-                    break;
-                }
-
-                // ✅ Check for actual G-code ONCE before deciding what to do
-                bool has_gcode = false;
-                for(uint32_t i = 0; i < nBytesRead; i++) {
-                    if(rxBuffer[i] != '\r' && rxBuffer[i] != '\n' &&
-                        rxBuffer[i] != ' ' && rxBuffer[i] != '\t' && rxBuffer[i] != 0) {
-                            // Found valid G-code character*/
-                            has_gcode = true;               
-                            break;
-                      //  }
-                    }
-                }
-
-                if(has_gcode){
-                    // Process G-code line
-                    cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, nBytesRead, cmdQueue);
-                
-                    // ✅ FLOW CONTROL: Check motion buffer and SEND OK immediately if space
-                    if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-                       UART_SendOK();  // ✅ Send immediately
-                    } else {
-                        // ✅ Buffer nearly full - withhold "OK"
-                        okPending = true;
-                    }
-                
-                    // Clear buffer and reset for next line
-                    nBytesRead = 0; 
-                    memset(rxBuffer, 0, sizeof(rxBuffer));
-                    gcodeData.state = GCODE_STATE_IDLE;
-                    has_line_terminator = false;
-                    break;
-                    
-                } else {
-                    // ✅ Line terminator but no G-code (empty line or whitespace only)
-                    // Clear buffer, don't send "OK", stay in IDLE
-                    nBytesRead = 0; 
-                    memset(rxBuffer, 0, sizeof(rxBuffer));
-                    gcodeData.state = GCODE_STATE_IDLE;
-                    has_line_terminator = false;
+                    has_terminator = true;
+                    terminator_pos = i;
                     break;
                 }
             }
             
+            // If no terminator, wait for more data
+            if(!has_terminator) {
+                break;  // Exit, rxBuffer keeps current data for next iteration
+            }
+            
+            // ✅ CRITICAL: Only process up to FIRST terminator
+            // Null-terminate at first terminator (isolates first command)
+            rxBuffer[terminator_pos] = '\0';
+            
+            // ✅ Process first complete command based on first character
+            bool command_processed = false;
+            
+            if(rxBuffer[0] == '$' || rxBuffer[0] == 'G' || rxBuffer[0] == 'g') {
+                // Multi-byte command - process immediately
+                command_processed = true;
+                gcodeData.state = GCODE_STATE_CONTROL_CHAR;
+                
+            } else {
+                // Regular G-code or empty line
+                bool has_content = false;
+                for(uint32_t i = 0; i < terminator_pos; i++) {
+                    if(rxBuffer[i] != ' ' && rxBuffer[i] != '\t' && rxBuffer[i] != 0) {
+                        has_content = true;
+                        break;
+                    }
+                }
+                
+                if(has_content) {
+                    cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
+                    
+                    if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
+                        UART_SendOK();
+                    } else {
+                        okPending = true;
+                    }
+                }
+                command_processed = true;
+            }
+            
+            if(command_processed) {
+                // ✅ CRITICAL: Only shift buffer if staying in IDLE state
+                // If state changed (e.g., CONTROL_CHAR), leave buffer intact for target state
+                if(gcodeData.state == GCODE_STATE_IDLE) {
+                    // ✅ Shift remaining bytes to start of buffer
+                    // Skip past terminator (and any following CR/LF)
+                    uint32_t skip_pos = terminator_pos + 1;
+                    while(skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n')) {
+                        skip_pos++;
+                    }
+                    
+                    uint32_t remaining_bytes = nBytesRead - skip_pos;
+                    if(remaining_bytes > 0) {
+                        // Move remaining data to start of buffer
+                        memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
+                        nBytesRead = remaining_bytes;
+                        rxBuffer[nBytesRead] = '\0';
+                    } else {
+                        // No remaining data - clear buffer
+                        nBytesRead = 0;
+                        memset(rxBuffer, 0, sizeof(rxBuffer));
+                    }
+                }
+                // If state changed to CONTROL_CHAR, buffer preserved for processing
+            }
+            break;
+            
         } else {
-            // ✅ CRITICAL: Check if we have a pending OK from previous call
-            // Send it now if motion buffer has space
+            // No bytes in rxBuffer - check for pending OK
             if (okPending && 
                 cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
                 UART_SendOK();
                 okPending = false;
             }
             
-            // If no bytes break out of switch
             gcodeData.state = GCODE_STATE_IDLE;
             break;
         }
@@ -357,10 +357,12 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
 case GCODE_STATE_CONTROL_CHAR:
     {
     /* Handle specific control characters per GRBL protocol */
+    DEBUG_PRINT_GCODE("[CTRL] rxBuffer[0]=0x%02X\r\n", (unsigned)rxBuffer[0]);
     bool buffer_already_cleared = false;  // Flag to skip shared buffer shifting
     switch(rxBuffer[0]) {
         case '?':  // Status query - NO "OK" response
         {
+            DEBUG_PRINT_GCODE("[?] Processing status query\r\n");
             StepperPosition* pos = STEPPER_GetPosition();
             WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
             
@@ -476,11 +478,8 @@ case GCODE_STATE_CONTROL_CHAR:
             IEC0CLR = _IEC0_OC1IE_MASK;  // Y
             IEC0CLR = _IEC0_OC3IE_MASK;  // Z
             IEC0CLR = _IEC0_OC4IE_MASK;  // A
-
-            // ✅ Also mark UART TX as ready so next debug/status prints aren't dropped
-            uart3TxReady = true;
             
-            // ✅ Send startup banner
+            // ✅ Send startup banner (PLIB ring buffer handles transmission)
             UART3_Write((uint8_t*)GRBL_FIRMWARE_VERSION, sizeof(GRBL_FIRMWARE_VERSION));
             
             // ✅ Transition to safe state
@@ -491,7 +490,7 @@ case GCODE_STATE_CONTROL_CHAR:
         // ✅ NEW: Settings commands handler
         case '$':  // Settings commands
         {
-            // ✅ Settings commands need complete line - read until we have terminator
+            // ✅ Settings commands need complete line - check if we have terminator
             bool has_terminator = false;
             
             // Check if we already have terminator in buffer
@@ -502,33 +501,32 @@ case GCODE_STATE_CONTROL_CHAR:
                 }
             }
             
-            // If no terminator yet, read more bytes from UART3
-            while(!has_terminator){
+            // If no terminator yet, try to read more (but don't block)
+            if(!has_terminator){
                 uint32_t bytes_available = UART3_ReadCountGet();
                 
-                if(bytes_available == 0){
-                    // No more data available right now - exit and wait for next call
-                    // BUT keep state as CONTROL_CHAR so we resume here
-                    return;
-                }
-                
-                // Read more bytes into rxBuffer
-                uint32_t space_available = sizeof(rxBuffer) - nBytesRead - 1;
-                uint32_t bytes_to_read = (bytes_available < space_available) ? bytes_available : space_available;
-                
-                if(bytes_to_read > 0){
-                    uint32_t new_bytes = UART3_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
-                    nBytesRead += new_bytes;
+                if(bytes_available > 0){
+                    // Read more bytes into rxBuffer
+                    uint32_t space_available = sizeof(rxBuffer) - nBytesRead - 1;
+                    uint32_t bytes_to_read = (bytes_available < space_available) ? bytes_available : space_available;
                     
-                    // Check again for terminator
-                    for(uint32_t i = 0; i < nBytesRead; i++){
-                        if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r'){
-                            has_terminator = true;
-                            break;
+                    if(bytes_to_read > 0){
+                        uint32_t new_bytes = UART3_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
+                        nBytesRead += new_bytes;
+                        
+                        // Check again for terminator
+                        for(uint32_t i = 0; i < nBytesRead; i++){
+                            if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r'){
+                                has_terminator = true;
+                                break;
+                            }
                         }
                     }
-                } else {
-                    break;  // Buffer full, process what we have
+                }
+                
+                // If still no terminator, return and wait for more data
+                if(!has_terminator){
+                    return;  // Keep state as CONTROL_CHAR, will resume on next call
                 }
             }
             
@@ -544,15 +542,27 @@ case GCODE_STATE_CONTROL_CHAR:
                 }
             }
             
-            if(strncmp((char*)rxBuffer, "$$", 2) == 0){
+            if(strncmp((char*)rxBuffer, "$$", 2) == 0 && (rxBuffer[2] == '\0' || rxBuffer[2] == '\r' || rxBuffer[2] == '\n')){
                 SETTINGS_PrintAll(SETTINGS_GetCurrent());
                 // Note: SETTINGS_PrintAll() sends "ok" internally
                 
-            } else if(strncmp((char*)rxBuffer, "$I", 2) == 0){
+                // ✅ Clear buffer after settings command
+                nBytesRead = 0;
+                memset(rxBuffer, 0, sizeof(rxBuffer));
+                gcodeData.state = GCODE_STATE_IDLE;
+                buffer_already_cleared = true;
+                
+            } else if(strncmp((char*)rxBuffer, "$I", 2) == 0 && (rxBuffer[2] == '\0' || rxBuffer[2] == '\r' || rxBuffer[2] == '\n')){
                 SETTINGS_PrintBuildInfo();
                 // Note: SETTINGS_PrintBuildInfo() sends "ok" internally
                 
-            } else if(strncmp((char*)rxBuffer, "$G", 2) == 0){
+                // ✅ Clear buffer after build info command
+                nBytesRead = 0;
+                memset(rxBuffer, 0, sizeof(rxBuffer));
+                gcodeData.state = GCODE_STATE_IDLE;
+                buffer_already_cleared = true;
+                
+            } else if(strncmp((char*)rxBuffer, "$G", 2) == 0 && (rxBuffer[2] == '\0' || rxBuffer[2] == '\r' || rxBuffer[2] == '\n')){
                 // ✅ GRBL $G command - print parser state (modal settings)
                 extern APP_DATA appData;
                 char state_buffer[128];
@@ -583,6 +593,32 @@ case GCODE_STATE_CONTROL_CHAR:
                     }
                 }
                 UART_SendOK();  // ✅ GRBL system.c returns STATUS_OK for $G command
+                
+            } else if(strncmp((char*)rxBuffer, "$H", 2) == 0){
+                // ✅ GRBL $H command - start homing cycle
+                extern APP_DATA appData;
+                
+                // Check if homing is enabled ($22)
+                CNC_Settings* settings = SETTINGS_GetCurrent();
+                if(!settings->homing_enable){
+                    UART3_Write((uint8_t*)"error:22\r\n", 10);  // Error 22 = Homing not enabled
+                } else {
+                    // Start homing for all axes enabled in $23 mask
+                    uint32_t axes_to_home = 0;
+                    
+                    // Build axis mask from $23 homing_dir_mask
+                    // If bit is set in $23, home that axis
+                    // GRBL homes axes with non-zero bits in $23
+                    // For simplicity, home all axes (X=bit0, Y=bit1, Z=bit2, A=bit3)
+                    // TODO: Make this configurable via $23 interpretation
+                    axes_to_home = 0x07;  // Home X, Y, Z (default GRBL behavior)
+                    
+                    if(HOMING_Start(axes_to_home)){
+                        UART_SendOK();  // Homing started
+                    } else {
+                        UART3_Write((uint8_t*)"error:23\r\n", 10);  // Error 23 = Homing fail
+                    }
+                }
                 
             } else if(strncmp((char*)rxBuffer, "$RST=$", 6) == 0){
                 // ✅ Restore defaults to RAM only
@@ -634,6 +670,75 @@ case GCODE_STATE_CONTROL_CHAR:
             break;
         }
             
+        case 'G':
+        case 'g':
+        case 'M':
+        case 'm':
+        {
+            // ✅ Non-blocking full-line read for G/M commands (UGS pipelines without relying on first-char)
+            bool has_terminator = false;
+            for(uint32_t i = 0; i < nBytesRead; i++){
+                if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r'){
+                    has_terminator = true;
+                    break;
+                }
+            }
+
+            if(!has_terminator){
+                uint32_t bytes_available = UART3_ReadCountGet();
+                if(bytes_available > 0){
+                    uint32_t space_available = sizeof(rxBuffer) - nBytesRead - 1;
+                    uint32_t bytes_to_read = (bytes_available < space_available) ? bytes_available : space_available;
+                    if(bytes_to_read > 0){
+                        uint32_t new_bytes = UART3_Read((uint8_t*)&rxBuffer[nBytesRead], bytes_to_read);
+                        nBytesRead += new_bytes;
+                        for(uint32_t i = 0; i < nBytesRead; i++){
+                            if(rxBuffer[i] == '\n' || rxBuffer[i] == '\r'){
+                                has_terminator = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if(!has_terminator){
+                    // Wait for more data - keep CONTROL_CHAR state
+                    return;
+                }
+            }
+
+            // Find terminator and isolate command
+            cmd_end = 0;
+            for(uint32_t i = 0; i < nBytesRead; i++){
+                if(rxBuffer[i] == '\r' || rxBuffer[i] == '\n'){
+                    rxBuffer[i] = '\0';
+                    cmd_end = i;
+                    break;
+                }
+            }
+
+            // Queue the full G/M line (handles multi-token G/M lines)
+            cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
+
+            if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
+                UART_SendOK();
+            } else {
+                okPending = true;
+            }
+
+            // Shift remaining bytes (if any)
+            if(nBytesRead > (cmd_end + 1)){
+                uint32_t bytes_after_cmd = nBytesRead - (cmd_end + 1);
+                memmove(rxBuffer, &rxBuffer[cmd_end + 1], bytes_after_cmd);
+                nBytesRead = bytes_after_cmd;
+            } else {
+                nBytesRead = 0;
+            }
+
+            gcodeData.state = GCODE_STATE_IDLE;
+            break;
+        }
+
         default:
             // Unknown control char - silently ignore (GRBL behavior)
             break;
@@ -750,6 +855,47 @@ bool parse_command_to_event(const char* command, GCODE_Event* event)
     else if (strstr(command, "G91")) {
         event->type = GCODE_EVENT_SET_RELATIVE;
         return true;
+    }
+    else if (strstr(command, "G10")) {
+        // G10 L2 Pn - Set coordinate system offset (L2 = use current position, L20 = use specified position)
+        // G10 L2 P0 - Sets G54 origin (P0=G54, P1=G55, etc.)
+        // G10 L20 P0 X0 Y0 Z0 - Sets G54 origin to specified values in current work coordinate system
+        
+        // Parse L value (operation type)
+        const char* l_ptr = strchr(command, 'L');
+        uint32_t l_value = 2;  // Default to L2
+        if (l_ptr != NULL) {
+            l_value = (uint32_t)strtol(l_ptr + 1, NULL, 10);
+        }
+        
+        // Parse P value (coordinate system selector: P0=G54, P1=G55, etc.)
+        const char* p_ptr = strchr(command, 'P');
+        uint32_t p_value = 0;  // Default to P0 (G54)
+        if (p_ptr != NULL) {
+            p_value = (uint32_t)strtol(p_ptr + 1, NULL, 10);
+        }
+        
+        // For now, only support P0 (G54) - main work coordinate system
+        if (p_value != 0) {
+            return false;  // Unsupported coordinate system (G55-G59 not implemented yet)
+        }
+        
+        // L2 = Set origin to current position (like G92 but for coordinate system)
+        // L20 = Set origin to specified position
+        if (l_value == 2 || l_value == 20) {
+            event->type = GCODE_EVENT_SET_WORK_OFFSET;
+            
+            // Extract coordinates
+            CoordinatePoint coords = parse_coordinate_values(command);
+            event->data.setWorkOffset.x = coords.x;
+            event->data.setWorkOffset.y = coords.y;
+            event->data.setWorkOffset.z = coords.z;
+            event->data.setWorkOffset.a = coords.a;
+            
+            return true;
+        }
+        
+        return false;  // Unsupported L value
     }
     else if (strstr(command, "G92")) {
         // G92 - Set work coordinate system (set current position)

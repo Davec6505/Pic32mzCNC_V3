@@ -1,7 +1,8 @@
 #include "motion_utils.h"
 #include "definitions.h"
+#include "utils/utils.h"  // For g_axis_config with function pointers
 
-// ✅ GPIO Pin Arrays indexed by E_AXIS enum
+// Legacy GPIO_PIN arrays - kept for compatibility but function pointers preferred
 // Uses Harmony GPIO_PIN constants (e.g., DirX_PIN, EnX_PIN, StepX_PIN)
 // These are used with GPIO_PinSet(), GPIO_PinClear(), GPIO_PinRead() functions
 
@@ -47,11 +48,11 @@ void MOTION_UTILS_SetDirection(E_AXIS axis, bool forward, uint8_t invert_mask)
     // Apply inversion if configured
     bool actual_state = inverted ? !forward : forward;
     
-    // Set GPIO pin using Harmony inline function
+    // Use inline atomic functions - single instruction, zero overhead!
     if(actual_state){
-        GPIO_PinSet(DIR_PINS[axis]);
+        AXIS_DirSet(axis);
     } else {
-        GPIO_PinClear(DIR_PINS[axis]);
+        AXIS_DirClear(axis);
     }
 }
 
@@ -70,11 +71,11 @@ void MOTION_UTILS_EnableAxis(E_AXIS axis, bool enable, uint8_t invert_mask)
     // Apply inversion if configured
     bool actual_state = inverted ? !enable : enable;
     
-    // Set GPIO pin using Harmony inline function
+    // Use inline atomic functions - single instruction, zero overhead!
     if(actual_state){
-        GPIO_PinSet(EN_PINS[axis]);
+        AXIS_EnableSet(axis);
     } else {
-        GPIO_PinClear(EN_PINS[axis]);
+        AXIS_EnableClear(axis);
     }
 }
 

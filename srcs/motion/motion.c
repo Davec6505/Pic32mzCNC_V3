@@ -280,25 +280,14 @@ void MOTION_Arc(APP_DATA* appData) {
         return;
     }
     
-    DEBUG_PRINT_MOTION("[ARC] Generating segment: theta=%.3f, target=%.3f, inc=%.3f\r\n",
-                      appData->arcTheta, appData->arcThetaEnd, appData->arcThetaIncrement);
-    
-    // Increment angle for next segment
-    appData->arcTheta += appData->arcThetaIncrement;
+    DEBUG_PRINT_MOTION("[ARC] Generating segment: seg=%lu/%lu, theta=%.3f\r\n",
+                      appData->arcSegmentCurrent, appData->arcSegmentTotal, appData->arcTheta);
     
     CoordinatePoint next;
     bool is_last_segment = false;
     
-    // Determine if this is the final segment based on direction
-    // CW: theta decreases (negative increment), check if we've passed the end
-    // CCW: theta increases (positive increment), check if we've passed the end
-    if(appData->arcThetaIncrement < 0.0f) {
-        // Clockwise - theta decreasing
-        is_last_segment = (appData->arcTheta <= appData->arcThetaEnd);
-    } else {
-        // Counter-clockwise - theta increasing
-        is_last_segment = (appData->arcTheta >= appData->arcThetaEnd);
-    }
+    // Check if this is the last segment based on segment counter
+    is_last_segment = (appData->arcSegmentCurrent >= (appData->arcSegmentTotal - 1));
     
     if(is_last_segment) {
         // Use exact end point to prevent accumulated error
@@ -306,31 +295,20 @@ void MOTION_Arc(APP_DATA* appData) {
         appData->arcGenState = ARC_GEN_IDLE;
         
     } else {
-        // Calculate intermediate point using sin/cos (FPU accelerated)
+        // Calculate intermediate point using CURRENT theta
         next.x = appData->arcCenter.x + appData->arcRadius * cosf(appData->arcTheta);
         next.y = appData->arcCenter.y + appData->arcRadius * sinf(appData->arcTheta);
         
         // Linear interpolation for Z and A axes (helical motion)
-        float start_angle = atan2f(appData->arcCurrent.y - appData->arcCenter.y,
-                                   appData->arcCurrent.x - appData->arcCenter.x);
-        float end_angle = atan2f(appData->arcEndPoint.y - appData->arcCenter.y,
-                                 appData->arcEndPoint.x - appData->arcCenter.x);
+        // Calculate progress based on segment count (more reliable than angles)
+        float progress = (float)appData->arcSegmentCurrent / (float)(appData->arcSegmentTotal - 1);
         
-        float total_angle;
-        if(appData->arcClockwise) {
-            total_angle = (start_angle >= end_angle) ? 
-                         (start_angle - end_angle) : 
-                         (start_angle - end_angle + 2.0f * M_PI);
-        } else {
-            total_angle = (end_angle >= start_angle) ? 
-                         (end_angle - start_angle) : 
-                         (end_angle - start_angle + 2.0f * M_PI);
-        }
+        // Interpolate Z and A from start to end
+        next.z = appData->arcStartPoint.z + (appData->arcEndPoint.z - appData->arcStartPoint.z) * progress;
+        next.a = appData->arcStartPoint.a + (appData->arcEndPoint.a - appData->arcStartPoint.a) * progress;
         
-        float progress = fabsf(appData->arcTheta - start_angle) / total_angle;
-        
-        next.z = appData->arcCurrent.z + (appData->arcEndPoint.z - appData->arcCurrent.z) * progress;
-        next.a = appData->arcCurrent.a + (appData->arcEndPoint.a - appData->arcCurrent.a) * progress;
+        // Increment angle for next segment
+        appData->arcTheta += appData->arcThetaIncrement;
     }
     
     // Generate motion segment for this arc increment
@@ -343,6 +321,9 @@ void MOTION_Arc(APP_DATA* appData) {
     
     // Update current position
     appData->arcCurrent = next;
+    
+    // Increment segment counter
+    appData->arcSegmentCurrent++;
     
     // Update work coordinates when arc completes
     if(appData->arcGenState == ARC_GEN_IDLE) {
@@ -398,7 +379,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             
             // ✅ SOFT LIMIT CHECK - TEMPORARILY DISABLED FOR DEBUG
             /*
-            GRBL_Settings* settings = SETTINGS_GetCurrent();
+            CNC_Settings* settings = SETTINGS_GetCurrent();
             bool limit_violation = false;
             
             if(!isnan(settings->max_travel_x) && !isnan(settings->max_travel_y) && !isnan(settings->max_travel_z)) {
@@ -516,20 +497,30 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // Initialize arc state
             appData->arcGenState = ARC_GEN_ACTIVE;
             appData->arcTheta = start_angle;
+            appData->arcThetaStart = start_angle;  // Store initial angle for progress calculation
             appData->arcThetaEnd = end_angle;
             appData->arcCenter.x = center.x;
             appData->arcCenter.y = center.y;
             appData->arcCurrent = start;
+            appData->arcStartPoint = start;  // Store initial position for Z/A interpolation
             appData->arcEndPoint = end;
             appData->arcRadius = r_start;
             appData->arcClockwise = event->data.arcMove.clockwise;
             appData->arcPlane = appData->modalPlane;
             appData->arcFeedrate = event->data.arcMove.feedrate;
             
-            GRBL_Settings* settings = SETTINGS_GetCurrent();
+            // ✅ CRITICAL: Reset step accumulators when starting new arc
+            // This prevents fractional steps from previous moves affecting arc accuracy
+            KINEMATICS_ResetAccumulators();
+            
+            CNC_Settings* settings = SETTINGS_GetCurrent();
             float arc_length = r_start * total_angle;
             uint32_t num_segments = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
             if(num_segments < 1) num_segments = 1;
+            
+            appData->arcSegmentCurrent = 0;      // Start at segment 0
+            appData->arcSegmentTotal = num_segments;  // Store total for termination check
+            
             appData->arcThetaIncrement = total_angle / (float)num_segments;
             if(!event->data.arcMove.clockwise) {
                 appData->arcThetaIncrement = fabsf(appData->arcThetaIncrement);

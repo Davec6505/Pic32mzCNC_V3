@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// GRBL v1.1 Settings (subset for CNC controller)
+// CNC Controller Settings Structure
 typedef struct {
     // Signature for validation
     uint32_t signature;  // 0x47524231 = "GRB1"
@@ -59,7 +59,7 @@ typedef struct {
     
     // CRC32 checksum (for validation)
     uint32_t checksum;
-} GRBL_Settings;
+} CNC_Settings;
 
 // Default settings
 #define SETTINGS_SIGNATURE 0x47524231  // "GRB1"
@@ -83,14 +83,14 @@ typedef struct {
 
 // Function prototypes
 void SETTINGS_Initialize(void);
-bool SETTINGS_LoadFromFlash(GRBL_Settings* settings);
-bool SETTINGS_SaveToFlash(const GRBL_Settings* settings);
-void SETTINGS_RestoreDefaults(GRBL_Settings* settings);
-bool SETTINGS_SetValue(GRBL_Settings* settings, uint32_t parameter, float value);
-float SETTINGS_GetValue(const GRBL_Settings* settings, uint32_t parameter);
-void SETTINGS_PrintAll(const GRBL_Settings* settings);
+bool SETTINGS_LoadFromFlash(CNC_Settings* settings);
+bool SETTINGS_SaveToFlash(const CNC_Settings* settings);
+void SETTINGS_RestoreDefaults(CNC_Settings* settings);
+bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value);
+float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter);
+void SETTINGS_PrintAll(const CNC_Settings* settings);
 void SETTINGS_PrintBuildInfo(void);
-uint32_t SETTINGS_CalculateCRC32(const GRBL_Settings* settings);
-GRBL_Settings* SETTINGS_GetCurrent(void);
+uint32_t SETTINGS_CalculateCRC32(const CNC_Settings* settings);
+CNC_Settings* SETTINGS_GetCurrent(void);
 
 #endif // SETTINGS_H

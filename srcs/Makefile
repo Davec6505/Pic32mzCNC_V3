@@ -28,7 +28,7 @@ ifeq ($(DRY_RUN),1)
 	MOVE =  powershell -Command "if (Test-Path '$(subst /,\,$(1))') { Write-Host 'Would move: ' + '$(subst /,\,$(1))' + ' to ' + '$(subst /,\,$(2))' -ForegroundColor Red }"
 else
 	MKDIR = powershell -Command "New-Item -ItemType Directory -Path '$(subst /,\,$(1))' -Force | Out-Null"
-	RMDIR = powershell -Command "if (Test-Path '$(subst /,\,$(1))') {Write-Host 'Deleted: ' + '$(subst /,\,$(1))' -ForegroundColor Green; Remove-Item -Recurse -Force '$(subst /,\,$(1))' }"
+	RMDIR = powershell -Command "if (Test-Path '$(subst /,\,$(1))') {Write-Host 'Deleted: ' + '$(subst /,\,$(1))' -ForegroundColor Green; Remove-Item -Recurse -Force -Confirm:\$$false '$(subst /,\,$(1))' }"
 	MOVE = powershell -Command "if (Test-Path '$(subst /,\,$(1))') { Move-Item -Path '$(subst /,\,$(1))' -Destination '$(subst /,\,$(2))' -Force }"
 #	MOVE = if exist "$(subst /,\,$(1))" move "$(subst /,\,$(1))" "$(subst /,\,$(2))"
 endif

@@ -2,13 +2,14 @@
 
 ## Project Overview
 This is a CNC motion control system for PIC32MZ microcontrollers using hardware timers and Bresenham interpolation for precise multi-axis stepper motor control.
-
+##    Always run make from root directory VI
+To ensure proper build configuration and output paths, always execute `make` commands from the root directory of the Pic32mzCNC_V3 project. This guarantees that all relative paths and build settings are correctly applied. makefile incs target is dynamic, it knows the paths no need to add absolute file references, all paths are relative to the root directory.
 ## 🚀 Current Implementation Status (November 7, 2025)
 ### ✅ COMPLETED FEATURES
 - **Professional event-driven G-code system** with clean architecture
 - **Event queue implementation** respecting APP_DATA abstraction layer
 - **Comprehensive G-code support**: G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T
-- **Core architecture implemented** with absolute compare mode
+- **Core architecture implemented** with period-based timer (TMR4/PR4)
 - **Single instance pattern in appData** for clean separation  
 - **Proper tokenization** - G/M commands keep all parameters (LinuxCNC/GRBL compatible)
 - **Multi-command line support** - "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
@@ -36,6 +37,77 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - **Non-blocking UART utilities module** - uart_utils.c/h with callback-based output
 - **Professional compile-time debug system** - Zero runtime overhead, multiple subsystems (November 7, 2025)
 - **Clean build system** - make/make all defaults to Release, make build for incremental (November 7, 2025)
+- **ATOMIC INLINE GPIO FUNCTIONS** - Zero-overhead ISR with `__attribute__((always_inline))` (November 8, 2025)
+- **FUNCTION POINTER ARCHITECTURE** - Array-based axis control with GPIO_Control structs (November 8, 2025)
+- **ISR STACK OPTIMIZATION** - Eliminated 32 bytes/call local arrays with static pointers (November 8, 2025)
+- **PRE-CALCULATED DOMINANT AXIS** - Stored in MotionSegment, zero ISR overhead (November 8, 2025)
+
+### 🔧 ATOMIC INLINE GPIO ARCHITECTURE (November 8, 2025)
+**Module:** `incs/utils/utils.h`, `srcs/utils/utils.c`, `srcs/motion/stepper.c`
+
+**Purpose:** Maximum ISR performance using PIC32 atomic SET/CLR/INV registers with always-inline functions.
+
+**Key Architecture:**
+```c
+// AxisConfig structure (one per axis)
+typedef struct {
+    GPIO_Control step;           // Function pointers (compatibility)
+    GPIO_Control dir;
+    GPIO_Control enable;
+    
+    GPIO_Atomic step_atomic;     // Direct register pointers (ISR performance)
+    GPIO_Atomic dir_atomic;
+    GPIO_Atomic enable_atomic;
+    
+    float* max_rate;             // Settings pointers
+    float* acceleration;
+    float* steps_per_mm;
+    int32_t* step_count;         // Position tracking
+} AxisConfig;
+
+// Atomic register structure
+typedef struct {
+    volatile uint32_t* set_reg;  // &LATxSET
+    volatile uint32_t* clr_reg;  // &LATxCLR
+    volatile uint32_t* inv_reg;  // &LATxINV
+    volatile uint32_t* port_reg; // &PORTx
+    uint32_t mask;               // Bit mask
+} GPIO_Atomic;
+```
+
+**Always-Inline Helpers (Zero Overhead!):**
+```c
+static inline void __attribute__((always_inline)) AXIS_StepSet(E_AXIS axis) {
+    *g_axis_config[axis].step_atomic.set_reg = g_axis_config[axis].step_atomic.mask;
+}
+// Compiles to single instruction: sw $t1, 0($t0)
+```
+
+**ISR Usage:**
+```c
+void OCP1_ISR(uintptr_t context) {
+    AXIS_StepSet(dominant_axis);  // Single instruction atomic GPIO
+    
+    if (direction_bits & (1 << dominant_axis)) {
+        AXIS_IncrementSteps(dominant_axis);  // Inlined (*ptr)++
+    } else {
+        AXIS_DecrementSteps(dominant_axis);  // Inlined (*ptr)--
+    }
+}
+```
+
+**Performance Benefits:**
+- ✅ Single instruction GPIO writes (LATxSET atomic hardware)
+- ✅ Zero function call overhead (always_inline attribute)
+- ✅ No stack usage for GPIO operations
+- ✅ Compiler-optimized to raw register access
+- ✅ Maintains clean, readable code structure
+
+**Available Inline Functions:**
+- `AXIS_StepSet(axis)` / `AXIS_StepClear(axis)`
+- `AXIS_DirSet(axis)` / `AXIS_DirClear(axis)`
+- `AXIS_EnableSet(axis)` / `AXIS_EnableClear(axis)`
+- `AXIS_IncrementSteps(axis)` / `AXIS_DecrementSteps(axis)`
 
 ### 🔧 COMPILE-TIME DEBUG SYSTEM (November 7, 2025)
 **Module:** `incs/common.h`, `srcs/Makefile`, `docs/DEBUG_SYSTEM_TUTORIAL.md`
@@ -58,7 +130,10 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - `DEBUG_APP` - Application state machine
 
 **Build Usage:**
-```bash
+```powershell
+# ⚠️ CRITICAL: ALWAYS run make from repository root directory
+# NEVER cd into srcs before running make!
+
 # Single subsystem (builds to Debug folder with debug symbols)
 make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION"
 
@@ -68,6 +143,9 @@ make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE DEBUG_SEGMENT"
 # Release build (no debug, default - builds to Release folder)
 make
 make BUILD_CONFIG=Release
+
+# Clean build artifacts
+make clean  # Cleans current BUILD_CONFIG (Debug or Release)
 ```
 
 **Code Usage:**
@@ -444,115 +522,32 @@ case APP_IDLE:
 - ✅ **CPU efficiency** - UART polled 100x/sec vs 512,000x/sec
 - ✅ **Dynamic axis swapping** - ISR knows which axis is master
 
-### Timer Architecture
-- **TMR2 runs continuously** - Managed rollover strategy (see below)
-- **32-bit timer** (TMR2:TMR3 pair) for extended range
+### Timer Architecture (Period-Based, TMR4/PR4)
+- **TMR4 rolls over at PR4 value** - not free-running
+- OC1 uses **relative compare values** against the rolling timer
+- `PR4` sets the period (step interval + pulse width + margin)
+- `OC1R` sets when pulse starts (step_interval)
+- `OC1RS` sets when pulse ends (step_interval + pulse_width)
+- Example: For 1ms steps with 3µs pulse: `OC1R = 12500`, `OC1RS = 12537`, `PR4 = 12539`
 - **Hardware Configuration:**
   - PBCLK3 = 50MHz (peripheral bus clock)
   - Prescaler = 1:4 (TCKPS = 2)
   - Timer Frequency = 12.5MHz (50MHz / 4)
   - Timer Resolution = **80ns per tick** (1 / 12.5MHz)
-  - Period Register (PR2) = 0xFFFFFFFF (32-bit free-running)
-  - **Rollover time: 343.6 seconds (~5.7 minutes)** at 12.5MHz
-- **No timer interrupts used** - timer provides stable time base only
-- **Step timing** controlled entirely by OC module compare interrupts
-
-### Timer Rollover Management (CRITICAL)
-**Problem:** 32-bit TMR2 overflows after 343.6 seconds, causing OCx scheduling issues
-
-**Solution: Controlled Reset Before Rollover**
-- Monitor TMR2 value in main loop or low-priority task
-- When TMR2 > **0xF0000000** (~96% full, ~328 seconds):
-  1. **Stop accepting new motion segments** (set motion queue full flag)
-  2. **Wait for all pending motion to complete** (motionQueueCount == 0)
-  3. **Disable all OCx compare interrupts** (IEC0/1/2 clear OCx bits)
-  4. **Reset TMR2 = 0** (atomic write: TMR2 = 0)
-  5. **Clear all OCx compare values** (OCxR = 0, OCxRS = 0)
-  6. **Re-enable OCx interrupts**
-  7. **Resume motion processing**
-
-**Implementation Pattern:**
-```c
-// In MOTION_Tasks or APP_Tasks (main loop)
-#define TMR2_RESET_THRESHOLD  0xF0000000  // ~328 seconds, leaves 15.6s margin
-
-static bool tmr2_reset_pending = false;
-
-void MOTION_CheckTimerRollover(void) {
-    uint32_t tmr_now = TMR2;
-    
-    if (tmr_now > TMR2_RESET_THRESHOLD && !tmr2_reset_pending) {
-        tmr2_reset_pending = true;
-        // Stop accepting new motion (signal to APP_Tasks)
-    }
-    
-    if (tmr2_reset_pending && appData.motionQueueCount == 0) {
-        // Safe to reset - no pending motion
-        IEC0CLR = _IEC0_OC1IE_MASK | _IEC0_OC2IE_MASK;  // Disable OC interrupts
-        IEC0CLR = _IEC0_OC3IE_MASK | _IEC0_OC4IE_MASK;
-        
-        TMR2 = 0;  // Reset timer
-        
-        // Clear all compare registers
-        OC1R = 0; OC1RS = 0;
-        OC2R = 0; OC2RS = 0;
-        OC3R = 0; OC3RS = 0;
-        OC4R = 0; OC4RS = 0;
-        
-        IFS0CLR = _IFS0_OC1IF_MASK | _IFS0_OC2IF_MASK;  // Clear flags
-        IFS0CLR = _IFS0_OC3IF_MASK | _IFS0_OC4IF_MASK;
-        
-        IEC0SET = _IEC0_OC1IE_MASK | _IEC0_OC2IE_MASK;  // Re-enable
-        IEC0SET = _IEC0_OC3IE_MASK | _IEC0_OC4IE_MASK;
-        
-        tmr2_reset_pending = false;  // Resume motion
-    }
-}
-```
-
-**Why This Works:**
-- ✅ **Predictable reset point** - controlled by software, not hardware overflow
-- ✅ **No lost steps** - only resets when motion queue is empty
-- ✅ **Clean OCx state** - all compare registers cleared before resuming
-- ✅ **Large safety margin** - 15.6 seconds to drain motion queue
-- ✅ **Transparent to motion** - resumes normally after reset
-
-**Alternative: Period Match Reset (Simpler)**
-Set PR2 to a large value (e.g., 0xF0000000) and use timer period interrupt:
-```c
-// Timer initialization
-PR2 = 0xF0000000;  // Period match at ~328 seconds
-IPC2bits.T2IP = 1;  // Low priority
-IEC0SET = _IEC0_T2IE_MASK;  // Enable period interrupt
-
-// In TMR2 ISR
-void __ISR(_TIMER_2_VECTOR, IPL1SOFT) TMR2Handler(void) {
-    IFS0CLR = _IFS0_T2IF_MASK;
-    // TMR2 automatically resets to 0 on period match
-    // OCx values remain valid (relative to 0)
-    // Motion continues seamlessly
-}
-```
-
-**Recommendation:** Use **controlled reset approach** for better control over when reset occurs.
-
-### Absolute Compare Mode
-- All OCx compare registers use **ABSOLUTE timer values**, not relative offsets
-- `OCxR` and `OCxRS` are set to specific TMR2 count values
-- Compare values must always be scheduled **ahead of current TMR2 count**
-- Example: If TMR2 = 1000, set OC1R = 1500 (not OC1R = TMR2 + 500)
+- **No timer rollover issues** - TMR4 automatically resets to 0 at PR4, OCx values remain valid
+- **Step timing** controlled entirely by OC1 ISR scheduling next pulse
 
 ### Dynamic Dominant Axis Tracking
-- **Dominant axis** (highest step count) continuously tracks ahead of TMR2
-- Dominant axis OCx pair is always scheduled for next pulse
-- **Subordinate axes** scheduled on-demand only when Bresenham requires a step
-- **Dominant axis can swap** mid-motion by changing which OCx tracks ahead
+- **Dominant axis** (highest step count) drives the step timing
+- Dominant axis determines step_interval for OC1/PR4
+- **Subordinate axes** step on-demand when Bresenham requires a step
+- **Dominant axis can swap** mid-motion by recalculating Bresenham state
 
 ### Bresenham Integration  
-- Bresenham algorithm runs in **state machine**, NOT in ISR
-- ISRs are minimal: clear flag, schedule next pulse, exit
-- Error term updates happen in main loop or state machine
-- Subordinate axis scheduling based on error accumulation
+- Bresenham algorithm runs in **OC1 ISR** for precise timing
+- ISR: Generate step pulse, run Bresenham, schedule next step
+- Error term updates happen in ISR each step
+- Subordinate axis pulse generation based on error accumulation
 
 ### Single Instance Pattern in appData ✅
 - **All major data structures** centralized in APP_DATA struct
@@ -586,46 +581,52 @@ void __ISR(_OC1_VECTOR, IPL5SOFT) OC1Handler(void) {
     // Clear interrupt flag FIRST
     IFS0CLR = _IFS0_OC1IF_MASK;
     
-    // Minimal work: schedule next pulse using ABSOLUTE value
-    uint32_t now = TMR2;
-    OC1R = now + step_interval;  // ABSOLUTE timer count
-    OC1RS = OC1R + pulse_width;   // ABSOLUTE timer count
+    // Schedule next pulse using period-based timing
+    uint32_t step_interval = current_segment->step_interval;
+    uint32_t pulse_width = current_segment->pulse_width;
+    
+    OC1R = step_interval;                      // Pulse start
+    OC1RS = step_interval + pulse_width;       // Pulse end
+    PR4 = step_interval + pulse_width + 2;     // Timer period
     
     // Update step counter
     steps_completed++;
     
-    // Exit quickly - Bresenham runs in state machine
+    // Run Bresenham for subordinate axes
+    // ... (Bresenham code in ISR)
 }
 ```
 
 ### Compare Register Updates
 ```c
-// CORRECT - Absolute values
-uint32_t current_time = TMR2;
-OC1R = current_time + 500;    // Pulse at TMR2 = current + 500
-OC1RS = OC1R + 20;             // Pulse width = 20 ticks
+// CORRECT - Period-based timing
+uint32_t step_interval = 12500;  // Timer ticks for this step
+uint32_t pulse_width = 37;        // 3µs pulse width
+OC1R = step_interval;             // Pulse starts at interval
+OC1RS = step_interval + pulse_width;  // Pulse ends
+PR4 = step_interval + pulse_width + 2;  // Timer rolls over
 
-// INCORRECT - Don't use relative offsets
-OC1R = 500;  // WRONG - not absolute!
+// INCORRECT - Don't use absolute timer reads
+uint32_t now = TMR4;  // WRONG - timer is period-based!
+OC1R = now + 500;     // WRONG - ignores period rollover
 ```
 
 ### Subordinate Axis Scheduling
 ```c
-// Schedule subordinate axis only when needed
+// Schedule subordinate axis only when needed (in ISR)
 if (error_y >= delta_x) {
-    uint32_t now = TMR2;
-    OC2R = now + offset;       // ABSOLUTE value
-    OC2RS = OC2R + pulse_width; // ABSOLUTE value
+    // Y axis needs a step this cycle
+    LATCSET = (1 << 2);  // Set Y step pin HIGH
     error_y -= delta_x;
-} else {
-    // CRITICAL: Set equal values to STOP pulse generation
-    // Prevents spurious pulses during arc and Bresenham execution
-    OC2R = OC2RS;  // Equal values = no pulse
 }
+// TMR5 will clear all step pins after pulse width
 ```
 
 ### Disabling Pulse Generation
 ```c
+// To stop pulse generation (end of segment):
+TMR4_Stop();  // Stops all motion
+```
 // To stop pulse generation on any axis (for safety/sanity):
 // Set OCxR = OCxRS (equal values prevent compare match pulse)
 OC2R = OC2RS;  // Y axis stops generating pulses
@@ -782,20 +783,16 @@ while (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
 ## Important Constraints
 
 ### Never Do
-- ❌ Use relative compare values (always use absolute TMR2 counts)
-- ❌ Perform Bresenham calculations in ISR
-- ❌ Schedule compare values behind current TMR2 count
+- ❌ Use absolute timer reads for scheduling (use period-based intervals)
+- ❌ Set PR4 smaller than OC1RS (pulse won't complete)
 - ❌ Use blocking delays in main loop (let APP_Tasks run freely)
-- ❌ Allow TMR2 to overflow uncontrolled (implement rollover management)
+- ❌ Modify OC1R/OC1RS outside of ISR during active motion
 
 ### Always Do
-- ✅ Schedule OCx registers with absolute timer values ahead of TMR2
+- ✅ Use period-based timing: `OC1R = step_interval; PR4 = step_interval + pulse_width + margin`
 - ✅ Clear interrupt flags immediately at ISR entry
 - ✅ Keep ISRs minimal and fast
-- ✅ Run Bresenham logic in state machine
-- ✅ Track dominant axis continuously ahead of TMR2
-- ✅ Monitor TMR2 for rollover and reset before overflow (see Timer Rollover Management)
-- ✅ Ensure motion queue is empty before TMR2 reset
+- ✅ Run Bresenham logic in OC1 ISR for precise timing
 - ✅ Schedule subordinate axes only when required
 - ✅ **Set OCxR = OCxRS to disable pulse generation** (prevents spurious pulses)
 
@@ -833,7 +830,7 @@ When implementing velocity profiling in the future:
 - Pre-compute interval values or use real-time calculation
 - Update dominant axis OCx scheduling with variable intervals
 
-**Note:** Velocity profiling is not yet implemented but should be designed with the absolute compare mode architecture in mind.
+**Note:** Velocity profiling is not yet implemented but should be designed with the period-based timer architecture in mind.
 
 ## Hardware Details
 - **Microcontroller:** PIC32MZ2048EFH100
@@ -847,11 +844,11 @@ When implementing velocity profiling in the future:
   - Optimizations: `-ffast-math -fno-math-errno`
   - Use FPU for planning (KINEMATICS), integer math for ISR
 - **Timer Configuration:**
-  - TMR2/TMR3 in 32-bit mode (T32 = 1)
+  - TMR4 16-bit timer (period-based, rolls over at PR4)
   - Prescaler: 1:4 (TCKPS = 2)
   - Timer Frequency: 12.5MHz
   - **Timer Resolution: 80ns per tick**
-  - Free-running, no period match interrupts
+  - TMR5 16-bit timer for step pulse width (one-shot mode)
 - **Output Compare Modules:** OC1 (X), OC2 (Y), OC3 (Z), OC4 (A)
 - **Microstepping Support:** Designed for up to 256 microstepping
   - Worst case: 512kHz step rate (256 microsteps × high speed)

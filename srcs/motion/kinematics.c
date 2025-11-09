@@ -1,8 +1,10 @@
 #include "kinematics.h"
 #include "motion.h"
 #include "stepper.h"
-#include "settings.h"  // For GRBL_Settings access
+#include "settings.h"  // For CNC_Settings access
 #include "common.h"
+#include "utils/uart_utils.h"  // For DEBUG_PRINT_MOTION
+#include "utils/utils.h"       // For AxisConfig
 #include <stdlib.h>
 #include <math.h>
 
@@ -12,6 +14,12 @@
 
 // Single instance of work coordinates managed by kinematics (physics module)
 static WorkCoordinateSystem work_coordinates;
+
+// Step accumulators - preserve fractional steps across arc segments (file scope for reset access)
+static float step_accumulator_x = 0.0f;
+static float step_accumulator_y = 0.0f;
+static float step_accumulator_z = 0.0f;
+static float step_accumulator_a = 0.0f;
 
 void KINEMATICS_Initialize(void) {
     // Initialize work coordinate system to default (G54)
@@ -65,7 +73,7 @@ CoordinatePoint KINEMATICS_MachineToWork(CoordinatePoint machine_pos) {
 MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end, float feedrate, 
                                    MotionSegment* segment_buffer) {
     // Get settings and stepper position (reuse existing modules - no duplication)
-    GRBL_Settings* settings = SETTINGS_GetCurrent();
+    CNC_Settings* settings = SETTINGS_GetCurrent();
     StepperPosition* stepper = STEPPER_GetPosition();
     
     // Convert to machine coordinates using internal work coordinates
@@ -78,14 +86,30 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     float dz_mm = machine_end.z - machine_start.z;
     float da_mm = machine_end.a - machine_start.a;
     
-    // Convert mm to steps using existing steps_per_mm from settings (PRESERVE SIGN!)
-    segment_buffer->delta_x = (int32_t)(dx_mm * stepper->steps_per_mm_x);
-    segment_buffer->delta_y = (int32_t)(dy_mm * stepper->steps_per_mm_y);
-    segment_buffer->delta_z = (int32_t)(dz_mm * stepper->steps_per_mm_z);
-    segment_buffer->delta_a = (int32_t)(da_mm * stepper->steps_per_deg_a);
+    // Convert mm to steps WITH ACCUMULATION to preserve fractional steps
+    step_accumulator_x += dx_mm * stepper->steps_per_mm_x;
+    step_accumulator_y += dy_mm * stepper->steps_per_mm_y;
+    step_accumulator_z += dz_mm * stepper->steps_per_mm_z;
+    step_accumulator_a += da_mm * stepper->steps_per_deg_a;
     
-    // Determine dominant axis (highest ABSOLUTE step count) - dynamic dominant axis tracking
-    int32_t max_delta = abs(segment_buffer->delta_x);  // ✅ Use abs() for comparison
+    // Extract integer steps and keep remainder
+    segment_buffer->delta_x = (int32_t)step_accumulator_x;
+    segment_buffer->delta_y = (int32_t)step_accumulator_y;
+    segment_buffer->delta_z = (int32_t)step_accumulator_z;
+    segment_buffer->delta_a = (int32_t)step_accumulator_a;
+    
+    step_accumulator_x -= (float)segment_buffer->delta_x;
+    step_accumulator_y -= (float)segment_buffer->delta_y;
+    step_accumulator_z -= (float)segment_buffer->delta_z;
+    step_accumulator_a -= (float)segment_buffer->delta_a;
+    
+    DEBUG_PRINT_MOTION("[KINEMATICS] dx=%.4f dy=%.4f → steps: X=%ld Y=%ld Z=%ld A=%ld (acc: %.3f,%.3f)\r\n",
+                      dx_mm, dy_mm, segment_buffer->delta_x, segment_buffer->delta_y,
+                      segment_buffer->delta_z, segment_buffer->delta_a,
+                      step_accumulator_x, step_accumulator_y);
+    
+    // Determine dominant axis (highest ABSOLUTE step count) - for Bresenham and timing
+    int32_t max_delta = abs(segment_buffer->delta_x);
     segment_buffer->dominant_axis = AXIS_X;
     E_AXIS limiting_axis = AXIS_X;
     
@@ -105,6 +129,9 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         limiting_axis = AXIS_A;
     }
     
+    // Store dominant delta (used by Bresenham in ISR)
+    segment_buffer->dominant_delta = max_delta;
+    
     // Convert feedrate from mm/min to mm/sec
     float feedrate_mm_sec = feedrate / 60.0f;
     // Guard: if no feed specified (0 or negative), fall back to a safe default
@@ -114,32 +141,15 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         feedrate_mm_sec = 600.0f / 60.0f;
     }
     
-    // Get max_rate and acceleration for limiting axis (reuse existing settings)
-    float max_rate_mm_min = 0.0f;
-    float acceleration_mm_sec2 = 0.0f;
-    
-    switch(limiting_axis) {
-        case AXIS_X:
-            max_rate_mm_min = settings->max_rate_x;
-            acceleration_mm_sec2 = settings->acceleration_x;
-            break;
-        case AXIS_Y:
-            max_rate_mm_min = settings->max_rate_y;
-            acceleration_mm_sec2 = settings->acceleration_y;
-            break;
-        case AXIS_Z:
-            max_rate_mm_min = settings->max_rate_z;
-            acceleration_mm_sec2 = settings->acceleration_z;
-            break;
-        case AXIS_A:
-            max_rate_mm_min = settings->max_rate_a;
-            acceleration_mm_sec2 = settings->acceleration_a;
-            break;
-        default:
-            max_rate_mm_min = settings->max_rate_x;
-            acceleration_mm_sec2 = settings->acceleration_x;
-            break;
+    // Get max_rate and acceleration for limiting axis using axis config
+    const AxisConfig* axis_cfg = UTILS_GetAxisConfig(limiting_axis);
+    if (!axis_cfg) {
+        // Fallback to X axis if invalid
+        axis_cfg = UTILS_GetAxisConfig(AXIS_X);
     }
+    
+    float max_rate_mm_min = *(axis_cfg->max_rate);
+    float acceleration_mm_sec2 = *(axis_cfg->acceleration);
     
     // Clamp feedrate to max rate
     float max_rate_mm_sec = max_rate_mm_min / 60.0f;
@@ -168,6 +178,11 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         steps_per_sec = 1.0f;
     }
     segment_buffer->nominal_rate = (uint32_t)(TIMER_FREQ / steps_per_sec);
+    
+    // ✅ DEBUG: Print timing calculations
+    DEBUG_PRINT_MOTION("[KINEMATICS] F=%.1f mm/min, steps/mm=%.1f, steps/sec=%.1f, nominal_rate=%lu ticks (%.2fms)\r\n",
+        feedrate, steps_per_mm_dominant, steps_per_sec, 
+        segment_buffer->nominal_rate, (float)segment_buffer->nominal_rate / TIMER_FREQ * 1000.0f);
     
     // Calculate acceleration profile (GRBL-style trapezoidal)
     // Distance to accelerate: d = v² / (2*a)
@@ -232,7 +247,47 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
 // Placeholder for arc interpolation (future implementation)
 MotionSegment* KINEMATICS_ArcMove(CoordinatePoint start, CoordinatePoint end, CoordinatePoint center, 
                                  bool clockwise, MotionSegment* segment_buffer) {
-    // TODO: Implement arc interpolation using absolute compare mode
+    // TODO: Implement arc interpolation
     // Will break arcs into linear segments for Bresenham execution
     return NULL;  // Placeholder
+}
+
+// Reset step accumulators - call when starting new arc or after position reset (G92)
+void KINEMATICS_ResetAccumulators(void) {
+    step_accumulator_x = 0.0f;
+    step_accumulator_y = 0.0f;
+    step_accumulator_z = 0.0f;
+    step_accumulator_a = 0.0f;
+}
+// Get current position from stepper counts
+CoordinatePoint KINEMATICS_GetCurrentPosition(void) {
+    CoordinatePoint current;
+    
+    // Use axis config abstraction for clean access
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        const AxisConfig* cfg = UTILS_GetAxisConfig(axis);
+        if (!cfg) continue;
+        
+        float position = (float)AXIS_GetSteps(axis) / (*cfg->steps_per_mm);
+        
+        switch(axis) {
+            case AXIS_X: current.x = position; break;
+            case AXIS_Y: current.y = position; break;
+            case AXIS_Z: current.z = position; break;
+            case AXIS_A: current.a = position; break;
+            default: break;
+        }
+    }
+    
+    return current;
+}
+
+// Set machine position for a single axis (used during homing)
+void KINEMATICS_SetAxisMachinePosition(E_AXIS axis, float position) {
+    const AxisConfig* cfg = UTILS_GetAxisConfig(axis);
+    if (!cfg) return;  // Invalid axis
+    
+    // Convert position to steps and update using abstracted inline helper
+    int32_t steps = (int32_t)(position * (*cfg->steps_per_mm));
+    AXIS_SetSteps(axis, steps);
 }

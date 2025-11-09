@@ -27,4 +27,13 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
 MotionSegment* KINEMATICS_ArcMove(CoordinatePoint start, CoordinatePoint end, CoordinatePoint center, 
                                  bool clockwise, MotionSegment* segment_buffer);  // Fixed: Removed wcs parameter
 
+// Reset step accumulators (call when starting new arc or after G92)
+void KINEMATICS_ResetAccumulators(void);
+
+// Get current position from stepper counts
+CoordinatePoint KINEMATICS_GetCurrentPosition(void);
+
+// Set machine position for a single axis (used during homing)
+void KINEMATICS_SetAxisMachinePosition(E_AXIS axis, float position);
+
 #endif /* KINEMATICS_H */
