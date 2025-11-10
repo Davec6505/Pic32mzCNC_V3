@@ -21,7 +21,8 @@ void STEPPER_LoadSegment(MotionSegment* segment);         // Load new segment fo
 void STEPPER_SetStepRate(uint32_t rate_ticks);            // Update PR2 for velocity profiling
 void STEPPER_SetDirection(E_AXIS axis, bool forward);     // Set direction for axis
 void STEPPER_DisableAll(void);                            // Emergency stop
-StepperPosition* STEPPER_GetPosition(void);               // Get current position
+StepperPosition* STEPPER_GetPosition(void);               // Get current position (snapshot)
+StepperPosition* STEPPER_GetPositionPointer(void);        // Get pointer to live position counters
 
 /* Returns true if steppers currently enabled. */
 bool STEPPER_IsEnabled(void);

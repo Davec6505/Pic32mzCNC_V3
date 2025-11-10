@@ -127,10 +127,16 @@ void STEPPER_Initialize(APP_DATA* appData) {
     
     steppers_enabled = true;
     
-    // ✅ DEBUG: Verify enable pins are set
+    // ✅ DEBUG: Verify enable pins are set correctly after enabling
     DEBUG_PRINT_STEPPER("[STEPPER_Init] Enable invert mask: 0x%02X\r\n", enable_invert);
-    DEBUG_PRINT_STEPPER("[STEPPER_Init] EnX state: %d, EnY state: %d\r\n", 
-        EnX_Get(), EnY_Get());
+    DEBUG_EXEC_STEPPER(
+        int enx_state = EnX_Get();
+        int eny_state = EnY_Get();
+        int enz_state = EnZ_Get();
+        int ena_state = EnA_Get();
+    );
+    DEBUG_PRINT_STEPPER("[STEPPER_Init] EnX=%d EnY=%d EnZ=%d EnA=%d (0=low/enabled for active-low)\r\n",
+        enx_state, eny_state, enz_state, ena_state);
 }
 
 // ============================================================================
@@ -257,26 +263,30 @@ void STEPPER_EnableAll(void)
 {
     if (steppers_enabled) return;
 
-    /* Enable outputs for every axis. Adjust polarity if needed. */
-    for (E_AXIS a = 0; a < NUM_AXIS; a++) {
-        /* If your hardware uses active LOW enable, replace EnableClear with EnableSet. */
-        AXIS_EnableSet(a);   /* or AXIS_EnableClear(a) depending on board */
-    }
-
+    // Re-read enable invert setting in case it changed via $4 command
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+    enable_invert = settings->step_enable_invert;
+    
+    // Use MOTION_UTILS to properly apply inversion logic
+    MOTION_UTILS_EnableAllAxes(true, enable_invert);
+    
     steppers_enabled = true;
-    DEBUG_PRINT_STEPPER("[STEPPER] Enabled all drivers\r\n");
+    DEBUG_PRINT_STEPPER("[STEPPER] Enabled all drivers (invert=0x%02X)\r\n", enable_invert);
 }
 
 void STEPPER_DisableAll(void)
 {
     if (!steppers_enabled) return;
 
-    for (E_AXIS a = 0; a < NUM_AXIS; a++) {
-        AXIS_EnableClear(a); /* or AXIS_EnableSet(a) if active LOW */
-    }
-
+    // Re-read enable invert setting in case it changed
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+    enable_invert = settings->step_enable_invert;
+    
+    // Use MOTION_UTILS to properly apply inversion logic
+    MOTION_UTILS_DisableAllAxes(enable_invert);
+    
     steppers_enabled = false;
-    DEBUG_PRINT_STEPPER("[STEPPER] Disabled all drivers\r\n");
+    DEBUG_PRINT_STEPPER("[STEPPER] Disabled all drivers (invert=0x%02X)\r\n", enable_invert);
 }
 
 // ============================================================================
@@ -313,6 +323,16 @@ void OCP1_ISR(uintptr_t context) {
     
     // Atomic GPIO step pulse - single instruction, zero overhead!
     AXIS_StepSet(dominant_axis);
+    
+    // ✅ CRITICAL DEBUG: Read back GPIO state immediately after Set
+    // This confirms if AXIS_StepSet actually toggles the pin
+    DEBUG_EXEC_STEPPER({
+        static uint32_t debug_counter = 0;
+        if (++debug_counter >= 100) {  // Print every 100th step to avoid UART flood
+            debug_counter = 0;
+            LED2_Toggle();  // Visual confirmation of debug execution
+        }
+    });
     
     // Update step counter based on direction (inline, zero overhead)
     if (direction_bits & (1 << dominant_axis)) {
@@ -414,6 +434,12 @@ StepperPosition* STEPPER_GetPosition(void)
     if (g_axis_config[AXIS_Z].steps_per_mm) snap.steps_per_mm_z = *g_axis_config[AXIS_Z].steps_per_mm;
 
     return &snap;
+}
+
+// Get pointer to LIVE position counters (for g_axis_config initialization)
+StepperPosition* STEPPER_GetPositionPointer(void)
+{
+    return &stepper_pos;
 }
 
 // End of stepper.c

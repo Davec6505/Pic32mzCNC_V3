@@ -62,18 +62,22 @@ void MOTION_UTILS_SetDirection(E_AXIS axis, bool forward, uint8_t invert_mask)
  * @param axis: E_AXIS enum (AXIS_X, AXIS_Y, AXIS_Z, AXIS_A)
  * @param enable: true = enable motor, false = disable (idle)
  * @param invert_mask: Enable inversion mask from settings ($4)
+ * 
+ * GRBL $4 Logic:
+ * $4=0 (bit clear): Active-LOW enable (pin LOW = motor enabled)  ← Most common
+ * $4=1 (bit set):   Active-HIGH enable (pin HIGH = motor enabled)
  */
 void MOTION_UTILS_EnableAxis(E_AXIS axis, bool enable, uint8_t invert_mask)
 {
     if(axis >= AXIS_COUNT) return;
     
-    // Check if enable signal should be inverted (from settings $4 mask)
-    bool inverted = (invert_mask >> axis) & 0x01;
+    // Check if this axis uses active-HIGH enable (inverted from normal active-LOW)
+    bool active_high = (invert_mask >> axis) & 0x01;
     
-    // Apply inversion logic:
-    // Normal: enable=true → pin HIGH, enable=false → pin LOW
-    // Inverted: enable=true → pin LOW, enable=false → pin HIGH
-    bool pin_state = inverted ? !enable : enable;
+    // Determine pin state:
+    // Active-LOW ($4 bit=0):  enable=true → pin LOW,  enable=false → pin HIGH
+    // Active-HIGH ($4 bit=1): enable=true → pin HIGH, enable=false → pin LOW
+    bool pin_state = active_high ? enable : !enable;
     
     // Set GPIO pin to computed state using atomic functions (zero overhead)
     if(pin_state) {

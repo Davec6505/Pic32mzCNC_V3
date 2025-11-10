@@ -98,7 +98,7 @@ static inline bool __attribute__((always_inline)) Wrapper_A_Max_Get(void)    { r
 // Initialize axis configuration - MUST be called during app initialization
 void UTILS_InitAxisConfig(void) {
     CNC_Settings* settings = SETTINGS_GetCurrent();
-    StepperPosition* stepper_pos = STEPPER_GetPosition();
+    StepperPosition* stepper_pos = STEPPER_GetPositionPointer();  // Get LIVE counters, not snapshot!
     
     // ===== X AXIS (AXIS_X = 0) =====
     g_axis_config[AXIS_X].step.Set = Wrapper_StepX_Set;

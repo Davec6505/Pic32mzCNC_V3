@@ -88,21 +88,11 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
         return;
     }
 
-<<<<<<< HEAD
-/* -------------------------------------------------------------------------- */
-/* Centralized Soft Reset                                                     */
-/* -------------------------------------------------------------------------- */
-static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue)
-{
-    extern APP_DATA appData;
-    
-    STEPPER_DisableAll();
-    
-    UART_SoftReset(&appData, cmdQueue);
-=======
     /* 1. Stop all motion immediately */
     STEPPER_DisableAll();
->>>>>>> 4a479250100d24f1fe9c59ab79aef671178f599c
+    
+    // Stop TMR4 to prevent ISR from running
+    TMR4_Stop();
 
     /* 2. Flush any pending RX bytes to avoid processing pre-reset junk */
     uint8_t scratch[64];
@@ -145,13 +135,8 @@ static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue)
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
 
-<<<<<<< HEAD
-    /* Mark steppers to be re-enabled automatically on first G0/G1/G2/G3 */
-    //stepperEnablePending = true;
-=======
     /* 8. Mark steppers to be re-enabled automatically on first motion command */
     // stepperEnablePending = true;
->>>>>>> 4a479250100d24f1fe9c59ab79aef671178f599c
 
     /* 9. Print GRBL startup banner (expected by senders after Ctrl+X) */
 #ifdef ENABLE_STARTUP_BANNER
@@ -313,6 +298,34 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         if (gnum >= 54 && gnum <= 59) {
             ev->type = GCODE_EVENT_SET_WCS;
             ev->data.setWCS.wcs_number = gnum - 54;  // G54=0, G55=1, ..., G59=5
+            return true;
+        }
+
+        // G92 - Set work coordinate offset (same as G10 L20 P0)
+        if (gnum == 92) {
+            char* pX = find_char((char*)cmd, 'X');
+            char* pY = find_char((char*)cmd, 'Y');
+            char* pZ = find_char((char*)cmd, 'Z');
+            char* pA = find_char((char*)cmd, 'A');
+            const float unit_scale = unitsInches ? 25.4f : 1.0f;
+            float desiredX = pX ? (parse_float_after(pX) * unit_scale) : NAN;
+            float desiredY = pY ? (parse_float_after(pY) * unit_scale) : NAN;
+            float desiredZ = pZ ? (parse_float_after(pZ) * unit_scale) : NAN;
+            float desiredA = pA ? (parse_float_after(pA) * unit_scale) : NAN;
+            
+            StepperPosition* pos = STEPPER_GetPosition();
+            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
+            float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
+            float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
+            float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
+            
+            // Set offset = MachinePos - DesiredWorkPos
+            if (!isnan(desiredX)) wcs->offset.x = mpos_x - desiredX;
+            if (!isnan(desiredY)) wcs->offset.y = mpos_y - desiredY;
+            if (!isnan(desiredZ)) wcs->offset.z = mpos_z - desiredZ;
+            // A-axis not yet supported in WCS
+            (void)desiredA;
+            
             return true;
         }
 
