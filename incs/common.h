@@ -13,10 +13,28 @@
 // Simple validation - no function overhead needed
 #define IS_VALID_AXIS(axis) ((axis) < NUM_OF_AXIS)
 
-// GRBL Protocol Constants
-#define GRBL_FIRMWARE_VERSION "Pic32mzCNC v1.1 [\"$\" for help]\r\n"
+// GRBL Protocol Constants - Configurable firmware identification
+//
+// TO CUSTOMIZE THE STARTUP BANNER:
+// 1. Change GRBL_FIRMWARE_VERSION to your desired banner string
+// 2. Must include \r\n at end for proper GRBL protocol compliance
+// 3. G-code senders expect specific format: "Firmware_Name version ['$' for help]"
+//
+// Examples:
+// #define GRBL_FIRMWARE_VERSION "Grbl 1.1h ['$' for help]\r\n"           // Standard GRBL
+// #define GRBL_FIRMWARE_VERSION "Pic32mzCNC v1.2 ['$' for help]\r\n"     // Custom version
+// #define GRBL_FIRMWARE_VERSION "MyCompany CNC v2.0 ['$' for help]\r\n"  // OEM version
+
+#define GRBL_FIRMWARE_VERSION "Pic32mzCNC v1.1h ['$' for help]\r\n"
 #define GRBL_BUILD_DATE "[Build Date: " __DATE__ "]\r\n"
 #define GRBL_BUILD_TIME "[Build Time: " __TIME__ "]\r\n"
+
+// Banner configuration macros - compile-time string and length calculation
+#define STARTUP_BANNER_STRING GRBL_FIRMWARE_VERSION
+#define STARTUP_BANNER_LENGTH (sizeof(GRBL_FIRMWARE_VERSION) - 1)  // -1 for null terminator
+
+// Convenient macro for UART banner transmission (zero runtime overhead)
+#define UART_SEND_BANNER() UART3_Write((uint8_t*)STARTUP_BANNER_STRING, STARTUP_BANNER_LENGTH)
 
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║                          DEBUG INFRASTRUCTURE                              ║

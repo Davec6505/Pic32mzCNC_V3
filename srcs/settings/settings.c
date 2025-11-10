@@ -77,6 +77,23 @@ static const CNC_Settings default_settings = {
     .homing_debounce = 25,
     .homing_pull_off = 2.0f,
     
+    // Junction deviation for smooth cornering  
+    .junction_deviation = 0.01f,   // GRBL default: 0.01mm
+    
+    // Work coordinate systems (G54-G59) - all initialized to zero
+    .wcs_g54_x = 0.0f, .wcs_g54_y = 0.0f, .wcs_g54_z = 0.0f,
+    .wcs_g55_x = 0.0f, .wcs_g55_y = 0.0f, .wcs_g55_z = 0.0f,
+    .wcs_g56_x = 0.0f, .wcs_g56_y = 0.0f, .wcs_g56_z = 0.0f,
+    .wcs_g57_x = 0.0f, .wcs_g57_y = 0.0f, .wcs_g57_z = 0.0f,
+    .wcs_g58_x = 0.0f, .wcs_g58_y = 0.0f, .wcs_g58_z = 0.0f,
+    .wcs_g59_x = 0.0f, .wcs_g59_y = 0.0f, .wcs_g59_z = 0.0f,
+    
+    // G92 coordinate offset - initialized to zero
+    .g92_offset_x = 0.0f, .g92_offset_y = 0.0f, .g92_offset_z = 0.0f,
+    
+    // Tool length offset - initialized to zero
+    .tool_length_offset = 0.0f,
+    
     // Arc configuration
     .mm_per_arc_segment = 0.1f,    // GRBL default: 0.1mm per arc segment
     
@@ -226,6 +243,9 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 4: settings->step_enable_invert = (uint8_t)value; break;
         case 5: settings->limit_pins_invert = (uint8_t)value; break;
         
+        // Junction deviation
+        case 11: settings->junction_deviation = value; break;
+        
         // Arc configuration
         case 12: settings->mm_per_arc_segment = value; break;
         
@@ -284,6 +304,7 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         case 4: return (float)settings->step_enable_invert;
         case 5: return (float)settings->limit_pins_invert;
         
+        case 11: return settings->junction_deviation;
         case 12: return settings->mm_per_arc_segment;
         
         case 100: return settings->steps_per_mm_x;
@@ -337,6 +358,7 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$3=%u\r\n", settings->step_direction_invert);
     len += sprintf(&settings_buffer[len], "$4=%u\r\n", settings->step_enable_invert);
     len += sprintf(&settings_buffer[len], "$5=%u\r\n", settings->limit_pins_invert);
+    len += sprintf(&settings_buffer[len], "$11=%.3f\r\n", settings->junction_deviation);
     len += sprintf(&settings_buffer[len], "$12=%.3f\r\n", settings->mm_per_arc_segment);
 
         
@@ -395,4 +417,110 @@ void SETTINGS_PrintBuildInfo(void)
 CNC_Settings* SETTINGS_GetCurrent(void)
 {
     return &current_settings;
+}
+
+/* Get work coordinate system offset (G54=0, G55=1, ..., G59=5) */
+bool SETTINGS_GetWorkCoordinateSystem(uint8_t wcs_number, float* x, float* y, float* z) {
+    if (wcs_number > 5 || !x || !y || !z) return false;  // G54-G59 only
+    
+    switch (wcs_number) {
+        case 0:  // G54
+            *x = current_settings.wcs_g54_x;
+            *y = current_settings.wcs_g54_y;
+            *z = current_settings.wcs_g54_z;
+            break;
+        case 1:  // G55
+            *x = current_settings.wcs_g55_x;
+            *y = current_settings.wcs_g55_y;
+            *z = current_settings.wcs_g55_z;
+            break;
+        case 2:  // G56
+            *x = current_settings.wcs_g56_x;
+            *y = current_settings.wcs_g56_y;
+            *z = current_settings.wcs_g56_z;
+            break;
+        case 3:  // G57
+            *x = current_settings.wcs_g57_x;
+            *y = current_settings.wcs_g57_y;
+            *z = current_settings.wcs_g57_z;
+            break;
+        case 4:  // G58
+            *x = current_settings.wcs_g58_x;
+            *y = current_settings.wcs_g58_y;
+            *z = current_settings.wcs_g58_z;
+            break;
+        case 5:  // G59
+            *x = current_settings.wcs_g59_x;
+            *y = current_settings.wcs_g59_y;
+            *z = current_settings.wcs_g59_z;
+            break;
+    }
+    return true;
+}
+
+/* Set work coordinate system offset and save to flash */
+bool SETTINGS_SetWorkCoordinateSystem(uint8_t wcs_number, float x, float y, float z) {
+    if (wcs_number > 5) return false;  // G54-G59 only
+    
+    switch (wcs_number) {
+        case 0:  // G54
+            current_settings.wcs_g54_x = x;
+            current_settings.wcs_g54_y = y;
+            current_settings.wcs_g54_z = z;
+            break;
+        case 1:  // G55
+            current_settings.wcs_g55_x = x;
+            current_settings.wcs_g55_y = y;
+            current_settings.wcs_g55_z = z;
+            break;
+        case 2:  // G56
+            current_settings.wcs_g56_x = x;
+            current_settings.wcs_g56_y = y;
+            current_settings.wcs_g56_z = z;
+            break;
+        case 3:  // G57
+            current_settings.wcs_g57_x = x;
+            current_settings.wcs_g57_y = y;
+            current_settings.wcs_g57_z = z;
+            break;
+        case 4:  // G58
+            current_settings.wcs_g58_x = x;
+            current_settings.wcs_g58_y = y;
+            current_settings.wcs_g58_z = z;
+            break;
+        case 5:  // G59
+            current_settings.wcs_g59_x = x;
+            current_settings.wcs_g59_y = y;
+            current_settings.wcs_g59_z = z;
+            break;
+    }
+    
+    // Save to flash immediately
+    return SETTINGS_SaveToFlash(&current_settings);
+}
+
+/* Get G92 coordinate offset */
+void SETTINGS_GetG92Offset(float* x, float* y, float* z) {
+    if (x) *x = current_settings.g92_offset_x;
+    if (y) *y = current_settings.g92_offset_y;
+    if (z) *z = current_settings.g92_offset_z;
+}
+
+/* Set G92 coordinate offset */
+void SETTINGS_SetG92Offset(float x, float y, float z) {
+    current_settings.g92_offset_x = x;
+    current_settings.g92_offset_y = y;
+    current_settings.g92_offset_z = z;
+    // Note: G92 is typically not saved to flash (temporary offset)
+}
+
+/* Get tool length offset */
+float SETTINGS_GetToolLengthOffset(void) {
+    return current_settings.tool_length_offset;
+}
+
+/* Set tool length offset and save to flash */
+void SETTINGS_SetToolLengthOffset(float offset) {
+    current_settings.tool_length_offset = offset;
+    SETTINGS_SaveToFlash(&current_settings);  // Save TLO to flash
 }

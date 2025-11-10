@@ -60,18 +60,20 @@ void HOMING_Initialize(void);
 
 /**
  * @brief Start homing cycle for specified axes
+ * @param appData Pointer to application data structure
  * @param axes_mask Bitmask of axes to home (0x01=X, 0x02=Y, 0x04=Z, 0x08=A)
  * @return true if homing started, false if already active or disabled
  * 
- * Example: HOMING_Start(0x07) homes X, Y, Z axes
+ * Example: HOMING_Start(appData, 0x07) homes X, Y, Z axes
  */
-bool HOMING_Start(uint32_t axes_mask);
+bool HOMING_Start(APP_DATA* appData, uint32_t axes_mask);
 
 /**
  * @brief Execute homing state machine (call in main loop)
+ * @param appData Pointer to application data structure
  * @return Current homing state
  */
-HomingState HOMING_Tasks(void);
+HomingState HOMING_Tasks(APP_DATA* appData);
 
 /**
  * @brief Abort homing cycle immediately
@@ -103,19 +105,19 @@ void HOMING_ClearAlarm(void);
  * @brief Start seek phase for current axis
  * Fast approach at homing_seek_rate
  */
-void HOMING_StartSeek(void);
+void HOMING_StartSeek(APP_DATA* appData);
 
 /**
  * @brief Start locate phase for current axis
  * Slow precision move at homing_feed_rate
  */
-void HOMING_StartLocate(void);
+void HOMING_StartLocate(APP_DATA* appData);
 
 /**
  * @brief Start pulloff phase for current axis
  * Retract by homing_pull_off distance
  */
-void HOMING_StartPulloff(void);
+void HOMING_StartPulloff(APP_DATA* appData);
 
 /**
  * @brief Check if limit switch triggered for current axis

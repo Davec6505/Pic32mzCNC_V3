@@ -101,43 +101,5 @@ void UART_PrintHelp(void)
 }
 
 /* ========== SOFT RESET (Ctrl+X) ========================================== */
-/* Central, non-blocking soft reset used by gcode_parser.c */
-
-void UART_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
-{
-    if (appData == NULL || cmdQueue == NULL) {
-        return;
-    }
-
-    /* Flush any pending RX bytes to avoid processing pre-reset junk */
-    uint8_t scratch[64];
-    uint32_t rc;
-    while ((rc = UART3_ReadCountGet()) > 0U) {
-        uint32_t toRead = (rc > sizeof(scratch)) ? (uint32_t)sizeof(scratch) : rc;
-        (void)UART3_Read(scratch, toRead);
-    }
-
-    /* Clear motion planner queue (planner and executor state) */
-    appData->motionQueueHead = 0;
-    appData->motionQueueTail = 0;
-    appData->motionQueueCount = 0;
-    appData->currentSegment   = NULL;
-
-    /* Modal state to GRBL defaults: G17, G21, G90, G94, M5, M9, T0, F0, S0 */
-    appData->modalPlane       = 0;        /* 0->G17 (XY) as used by $G print */
-    appData->absoluteMode     = true;     /* G90 */
-    appData->modalFeedrate    = 0.0f;     /* F */
-    appData->modalSpindleRPM  = 0;        /* S */
-    appData->modalToolNumber  = 0;        /* T0 */
-
-    /* Application state back to IDLE */
-    appData->state            = APP_IDLE;
-
-    /* Reset G-code command queue */
-    cmdQueue->head  = 0;
-    cmdQueue->tail  = 0;
-    cmdQueue->count = 0;
-    cmdQueue->motionQueueCount = appData->motionQueueCount;
-
-    /* Do NOT send "ok" here; gcode parser prints the GRBL banner after this. */
-}
+/* NOTE: Soft reset logic has been consolidated into GCODE_SoftReset() in gcode_parser.c */
+/* This eliminates the circular dependency and keeps all reset logic in one place */

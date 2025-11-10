@@ -159,4 +159,26 @@ void UTILS_TrimWhitespace(char* str);
 bool UTILS_IsEmptyString(const char* str);
 uint32_t UTILS_SafeStrlen(const char* str, uint32_t max_len);
 
+// ===== COORDINATE ARRAY UTILITIES (ELIMINATES AXIS SWITCH STATEMENTS) =====
+
+// Treat CoordinatePoint as float[4] array using guaranteed memory layout
+// CoordinatePoint { float x, y, z, a; } -> [0]=x, [1]=y, [2]=z, [3]=a
+
+static inline void SET_COORDINATE_AXIS(CoordinatePoint* coord, E_AXIS axis, float value) {
+    ((float*)coord)[axis] = value;
+}
+
+static inline float GET_COORDINATE_AXIS(const CoordinatePoint* coord, E_AXIS axis) {
+    return ((float*)coord)[axis];
+}
+
+static inline void ADD_COORDINATE_AXIS(CoordinatePoint* coord, E_AXIS axis, float delta) {
+    ((float*)coord)[axis] += delta;
+}
+
+// Usage examples (replaces all switch statements for coordinate manipulation):
+//   SET_COORDINATE_AXIS(&target, current_axis, base_value + distance);
+//   float current_value = GET_COORDINATE_AXIS(&position, axis);
+//   ADD_COORDINATE_AXIS(&target, axis, move_distance);
+
 #endif /* UTILS_H */

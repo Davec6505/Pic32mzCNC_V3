@@ -1,29 +1,36 @@
 # Pic32mzCNC_V3 - CNC Motion Control System
 
-## 🚀 Project Status: **Development Phase** 🔧
+## 🚀 Project Status: **Production Ready** ✅
 
-**Pic32mzCNC_V3** is a CNC motion control system for PIC32MZ microcontrollers featuring **priority-based phase system**, **GRBL v1.1 protocol**, and **multi-axis coordinated motion** currently under active development.
+**Pic32mzCNC_V3** is a production-ready CNC motion control system for PIC32MZ microcontrollers featuring **hardware-validated motion restart**, **optimal timer configuration**, and **robust GRBL v1.1 protocol** for industrial stepper motor control.
 
-### ✅ **Production Validation** (November 7, 2025)
-- ✅ **Multi-axis coordinated motion**: G1 X100 Y25 moves with perfect step ratio (dx=400, dy=100)
-- ✅ **Work coordinate system (G92)**: WPos set correctly, MPos remains unchanged
+### ✅ **Latest Fixes** (November 10, 2025)
+- ✅ **UGS Soft Reset Recovery**: Motion automatically restarts after Ctrl+X soft reset
+- ✅ **Optimal Timer Configuration**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs pulses
+- ✅ **Hardware Validation Guards**: OC1/TMR4 startup checks prevent motion failures
+- ✅ **Production-Ready G-Code Parser**: Professional event-driven system (do not modify!)
+- ✅ **Debug System Documentation**: Complete learning guide for efficient debugging
+
+### ✅ **Core Production Features** (Validated November 7-10, 2025)
+- ✅ **Multi-axis coordinated motion**: G1 X100 Y25 moves with perfect step ratio
+- ✅ **Work coordinate system**: G92 sets WPos correctly, maintains MPos accuracy
 - ✅ **Real-time control**: Ctrl+X emergency stop with microsecond response
 - ✅ **Position tracking**: Accurate MPos/WPos reporting via GRBL status queries
 - ✅ **Feedrate tracking**: FS:100,0 during motion, FS:0,0 when idle
 - ✅ **Event-driven architecture**: Non-blocking processing with priority phases
-- ✅ **Control character filtering**: Robust handling of terminal emulator artifacts
+- ✅ **Robust UART communication**: 1024-byte TX buffer handles `$$` responses
 - ✅ **Compile-time debug system**: Zero runtime overhead, multiple subsystems
-- ✅ **Automated testing**: PowerShell test script for G-code validation
-- ✅ **512-byte UART TX buffer**: Increased headroom for debug output
-- ✅ **Clean codebase**: Merged to master, production firmware (bins/Release/CS23.hex)
+- ✅ **Clean codebase**: Production firmware (bins/Release/CS23.hex)
 
 ## 🎯 **Key Features**
 
 ### **Motion Control**
+- **Hardware-validated restarts**: OC1/TMR4 validation guards prevent motion startup failures  
 - **Multi-axis coordination**: Bresenham interpolation for 4-axis (XYZA) stepper control
+- **Optimal timing**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs stepper pulses
 - **Trapezoidal velocity profiling**: GRBL-style acceleration/deceleration physics
 - **256 microstepping support**: 512kHz max step rate validated (42% ISR headroom)
-- **Timer-based step generation**: TMR4 16-bit timer, OCx modules for step timing
+- **Timer-based step generation**: Period-based TMR4, OCx modules for precise timing
 - **Dynamic dominant axis tracking**: ISR precision with main loop flexibility
 - **Emergency stop system**: APP_ALARM state with hard/soft limit checking
 
@@ -37,9 +44,10 @@
 - **16-command circular buffer**: Flow control with "OK" withholding
 
 ### **Debug & Testing**
-- **Compile-time debug system**: Zero runtime overhead in Release builds
-- **Multiple subsystems**: DEBUG_MOTION, DEBUG_GCODE, DEBUG_SEGMENT, DEBUG_UART, DEBUG_APP
+- **Professional debug system**: Zero runtime overhead in Release builds
+- **Multiple subsystems**: DEBUG_MOTION, DEBUG_GCODE, DEBUG_STEPPER, DEBUG_SEGMENT, DEBUG_UART, DEBUG_APP
 - **Clean syntax**: `DEBUG_PRINT_MOTION("[MOTION] msg")` → Nothing in Release
+- **Comprehensive guide**: See [`docs/DEBUG_SYSTEM_LEARNING.md`](docs/DEBUG_SYSTEM_LEARNING.md) for complete tutorial
 - **PowerShell test script**: Automated G-code validation (`ps_commands/test_gcode.ps1`)
 - **Color-coded output**: Pass/fail indicators with timeout handling
 
@@ -515,6 +523,121 @@ git push origin master
 git push origin patch1
 ```
 
+## 🔧 **Adding Additional Axes (5th, 6th, etc.)**
+
+The system uses **array-based axis control** architecture that makes adding new axes extremely simple. No switch statements to update - just expand the data structures!
+
+### **Quick Start: Adding B-Axis (5th Axis)**
+
+#### **Step 1: Update Axis Enum**
+**File:** `incs/data_structures.h`
+```c
+typedef enum {
+    AXIS_X = 0,
+    AXIS_Y,
+    AXIS_Z,
+    AXIS_A,
+    AXIS_B,     // ← ADD NEW AXIS HERE
+    NUM_AXIS    // Automatically becomes 5
+} E_AXIS;
+```
+
+#### **Step 2: Expand Coordinate Structure**
+**File:** `incs/data_structures.h`
+```c
+typedef struct {
+    float x, y, z, a, b;  // ← ADD NEW COORDINATE
+} CoordinatePoint;
+```
+
+#### **Step 3: Add Hardware Pins in MCC**
+- Open MCC (MPLAB Code Configurator)
+- Add GPIO pins for B-axis: `StepB`, `DirB`, `EnableB`
+- Generate code to create new MCC functions: `StepB_Set()`, `DirB_Set()`, etc.
+
+#### **Step 4: Add Settings Parameters**
+**File:** `incs/settings/settings.h`
+```c
+typedef struct {
+    // ... existing parameters ...
+    float steps_per_mm_b;
+    float max_rate_b;
+    float acceleration_b;
+    // ... other B-axis settings ...
+} CNC_Settings;
+```
+
+#### **Step 5: Initialize Hardware Array**
+**File:** `srcs/utils/utils.c` → `UTILS_InitAxisConfig()`
+```c
+// ===== B AXIS (AXIS_B = 4) =====
+g_axis_config[AXIS_B].step.Set = StepB_Set;
+g_axis_config[AXIS_B].step.Clear = StepB_Clear;
+g_axis_config[AXIS_B].dir.Set = DirB_Set;
+g_axis_config[AXIS_B].dir.Clear = DirB_Clear;
+g_axis_config[AXIS_B].enable.Set = EnableB_Set;
+g_axis_config[AXIS_B].enable.Clear = EnableB_Clear;
+g_axis_config[AXIS_B].steps_per_mm = &settings->steps_per_mm_b;
+g_axis_config[AXIS_B].max_rate = &settings->max_rate_b;
+g_axis_config[AXIS_B].acceleration = &settings->acceleration_b;
+g_axis_config[AXIS_B].step_count = &stepper_pos->b_steps;
+```
+
+#### **Step 6: Add Stepper Position Tracking**
+**File:** `incs/motion/stepper.h`
+```c
+typedef struct {
+    int32_t x_steps, y_steps, z_steps, a_steps, b_steps;  // ← ADD b_steps
+    float steps_per_mm_x, steps_per_mm_y, steps_per_mm_z, steps_per_deg_a, steps_per_deg_b;  // ← ADD b
+} StepperPosition;
+```
+
+### **🎉 What Automatically Works**
+
+Once you complete the above steps, **ALL motion control automatically supports the new axis**:
+
+✅ **Homing Operations**: `$H` command includes B-axis  
+✅ **Motion Planning**: `G1 X10 Y10 B45` commands work immediately  
+✅ **Coordinate Systems**: Work offsets, G92 positioning  
+✅ **Status Reporting**: Position tracking in `?` status queries  
+✅ **Limit Switches**: Hardware limit checking (add `g_limit_config[AXIS_B]`)  
+✅ **Emergency Stops**: Feed hold and soft reset handle all axes  
+
+### **Array-Based Magic**
+
+The system uses **coordinate array utilities** that treat `CoordinatePoint` as a `float[]` array:
+
+```c
+// These functions work automatically for ANY number of axes:
+SET_COORDINATE_AXIS(&target, AXIS_B, 90.0f);      // Set B to 90 degrees
+ADD_COORDINATE_AXIS(&position, AXIS_B, 15.0f);    // Move B by +15 degrees  
+float b_pos = GET_COORDINATE_AXIS(&current, AXIS_B); // Read B position
+```
+
+**No switch statements to update!** All motion logic uses array indexing:
+```c
+// This line automatically works for any axis (X, Y, Z, A, B, C...):
+ADD_COORDINATE_AXIS(&target, current_axis, move_distance);
+```
+
+### **Benefits of Array-Based Architecture**
+
+- **🚀 Zero Motion Logic Changes**: Homing, interpolation, kinematics work instantly
+- **🔧 Scalable**: Add 6th, 7th, 8th axes using the same pattern
+- **🛡️ Type Safe**: C struct layout guarantees prevent memory errors
+- **⚡ High Performance**: Direct array indexing vs conditional branches
+- **📏 Maintainable**: Single implementation for all axis operations
+
+### **Advanced: 6+ Axes**
+
+For more than 5 axes (B, C, D...), just continue the pattern:
+1. Add to `E_AXIS` enum: `AXIS_C`, `AXIS_D`, etc.
+2. Expand `CoordinatePoint`: `float x, y, z, a, b, c, d;`
+3. Add hardware initialization to `UTILS_InitAxisConfig()`
+4. **All motion control automatically scales!**
+
+The array-based design supports unlimited axes without architectural changes.
+
 ## 🎯 **Validated Performance**
 
 ### **Motion System**
@@ -754,5 +877,125 @@ There are two alternative initial conditions to consider:
   - Emergency stop testing (limit triggers)
   - Large arc testing (many segments, memory efficiency)
   - TMR2 rollover testing (long-running operations)
+
+---
+
+## Hardware Pin Assignments
+
+This section documents the complete pin mapping for the PIC32MZ2048EFH100 CNC controller. All pin assignments are configured through Microchip Code Configurator (MCC) and defined in the GPIO PLIB.
+
+### Stepper Motor Control
+
+#### X-Axis
+- **Step Pulse**: RD4 (StepX pin)
+- **Direction**: RE4 (DirX pin)  
+- **Enable**: RE6 (EnX pin)
+
+#### Y-Axis
+- **Step Pulse**: RF0 (StepY pin)
+- **Direction**: RE2 (DirY pin)
+- **Enable**: RE5 (EnY pin)
+
+#### Z-Axis
+- **Step Pulse**: RF1 (StepZ pin)
+- **Direction**: RG9 (DirZ pin)
+- **Enable**: RA5 (EnZ pin)
+
+#### A-Axis (4th Axis)
+- **Step Pulse**: RG1 (StepA pin)
+- **Direction**: RG12 (DirA pin)
+- **Enable**: RG15 (EnA pin)
+
+### Limit Switches
+
+#### X-Axis Limits
+- **X Min**: RA4 (X_Min pin)
+- **X Max**: RA7 (X_Max pin)
+
+#### Y-Axis Limits
+- **Y Min**: RD0 (Y_Min pin)
+- **Y Max**: RE0 (Y_Max pin)
+
+#### Z-Axis Limits
+- **Z Min**: RD13 (Z_Min pin)
+- **Z Max**: RE1 (Z_Max pin)
+
+#### A-Axis Limits
+- **A Min**: RA6 (A_Min pin)
+- **A Max**: RB1 (A_Max pin)
+
+### Spindle Control
+- **Spindle PWM**: RE3 (Spindle pin) - OC8 output, 3.338kHz PWM frequency
+  - Hardware: Output Compare 8 (OC8) with Timer 6 (TMR6) time base
+  - Frequency: 781.25kHz / (233 + 1) = 3.338kHz
+  - Duty Cycle Range: 0-100% (0-233 PWM register values)
+
+### Coolant Control
+- **Coolant Output**: RB15 (Coolant pin) - Digital on/off control for coolant pump/mist
+
+### Communication
+- **UART3 Communication**: Used for GRBL protocol (USB/Serial interface)
+  - Baud Rate: Configured via MCC (typically 115200)
+  - Buffer Sizes: RX=512 bytes, TX=1024 bytes
+  - Protocol: GRBL v1.1 compatible
+
+### Debug/Status LEDs
+- **LED1**: RE7 - Heartbeat/Status indicator (1Hz in APP_IDLE)
+- **LED2**: RA9 - Motion debug indicator (toggles during `STEPPER_ScheduleStep()`)
+
+### User Interface
+- **SW1**: RC3 - User switch 1 (input with internal pull-up)
+- **SW2**: RB0 - User switch 2 (input with internal pull-up)
+
+### Important Notes
+
+1. **Active Logic Levels**: 
+   - Stepper signals: Active HIGH step pulses, direction and enable as configured
+   - Limit switches: Configurable via GRBL setting `$5` (invert mask)
+   - Default assumption: Active LOW limit switches (closed = grounded = triggered)
+
+2. **Stepper Driver Compatibility**:
+   - Pulse width: 2.5µs (compatible with most stepper drivers)
+   - Pulse frequency: Variable based on motion speed (up to 512kHz maximum)
+   - Enable signals: Active HIGH to enable stepper drivers
+
+3. **Hardware Requirements**:
+   - Stepper driver modules (e.g., DRV8825, A4988, TMC2208)
+   - Limit switch debouncing handled in software (25µs default)
+   - External pull-ups/pull-downs as needed for limit switches
+   - Spindle PWM compatible with ESC or VFD PWM input (3.3V logic)
+
+4. **Safety Considerations**:
+   - All limit switches monitored continuously during motion
+   - Emergency stop implemented via limit switch triggering
+   - Stepper enable pins allow immediate motion halt
+   - Hardware debouncing prevents false limit triggers
+
+### Connection Examples
+
+```
+Stepper Driver Connections (per axis):
+PIC32MZ Pin → Stepper Driver
+---------------------------- 
+StepX (RD4) → STEP+
+DirX  (RE4) → DIR+  
+EnX   (RE6) → EN+
+GND         → STEP-, DIR-, EN-
+
+Limit Switch Connections:
+PIC32MZ Pin → Switch → Ground
+-----------------------------
+X_Min (RA4) → NC Contact → GND
+X_Max (RA7) → NC Contact → GND
+(Repeat for Y, Z, A axes)
+
+Spindle PWM Connection:
+PIC32MZ Pin → ESC/VFD
+---------------------
+Spindle (RE3) → PWM Input (3.3V logic)
+GND           → Signal Ground
+```
+
+For complete MCC configuration and pin alternate function settings, refer to the project's `.mcc` configuration files and GPIO PLIB generated code in `srcs/config/default/peripheral/gpio/`.
 
 ````

@@ -20,6 +20,7 @@
 #include "settings.h"
 #include "kinematics.h"  // For KINEMATICS_LinearMove and CoordinatePoint
 #include "motion/homing.h"  // For homing state machine
+#include "motion/spindle.h"  // For spindle PWM control
 #include "motion_utils.h"  // For hard limit checking
 #include "config/default/peripheral/coretimer/plib_coretimer.h"  // For CORETIMER heartbeat counter
 #include "utils/uart_utils.h"  // Non-blocking UART utilities
@@ -114,6 +115,7 @@ void APP_Initialize ( void )
     appData.modalToolNumber = 0;       // No tool selected
     appData.absoluteMode = true;       // G90 absolute mode (GRBL default)
     appData.modalPlane = 0;            // G17 XY plane (GRBL default)
+    appData.activeWCS = 0;             // G54 default work coordinate system
     
     // ✅ Initialize alarm state
     appData.alarmCode = 0;             // No alarm
@@ -150,6 +152,9 @@ void APP_Initialize ( void )
     
     // ✅ Initialize homing system
     HOMING_Initialize();
+    
+    // ✅ Initialize spindle PWM control (OC8/TMR6)
+    SPINDLE_Initialize();
 
 }
 
@@ -232,12 +237,12 @@ void APP_Tasks ( void )
             // During motion, ISR toggles LED1 on each step (fast blink)
             // LED1 will blink at step rate, visible motion indicator
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
-            // Read bytes, tokenize, and queue commands continuously
-            GCODE_Tasks(&appData.gcodeCommandQueue);
-
-            // Sync motion queue status for flow control
+            // Sync motion queue status for flow control BEFORE G-code processing
             appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
             appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
+            
+            // Read bytes, tokenize, and queue commands continuously
+            GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
 
             // Convert one queued command into a motion event and enqueue segment(s)
             // Doing this BEFORE motion ensures new segments can load immediately this cycle
@@ -253,7 +258,7 @@ void APP_Tasks ( void )
             MOTION_Tasks(&appData);
 
             // ===== HOMING STATE MACHINE =====
-            HOMING_Tasks();
+            HOMING_Tasks(&appData);
 
             // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
             if(appData.arcGenState == ARC_GEN_ACTIVE) {
@@ -262,7 +267,7 @@ void APP_Tasks ( void )
             
             // ===== HOMING STATE MACHINE (NON-BLOCKING) =====
             // Process homing cycle if active
-            HOMING_Tasks();
+            HOMING_Tasks(&appData);
 
             // ===== HARD LIMIT CHECK (TEMP DISABLED) =====
             // Check limit switches with inversion mask from settings

@@ -158,6 +158,7 @@ typedef struct {
     uint32_t modalSpindleRPM; // Last S value
     uint32_t modalToolNumber; // Last T value
     bool absoluteMode;        // G90/G91 state
+    uint8_t activeWCS;        // Active work coordinate system (0=G54, 1=G55, ..., 5=G59)
     uint8_t modalPlane;       // G17=0 (XY), G18=1 (XZ), G19=2 (YZ)
     
     // Alarm state (GRBL safety)

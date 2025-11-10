@@ -10,7 +10,10 @@
 #include "stepper.h"      // Include stepper.h BEFORE motion.h to ensure STEPPER_SetDirection is declared
 #include "motion.h"
 #include "kinematics.h"
+#include "spindle.h"      // Spindle PWM control
+#include "homing.h"       // Homing system control
 #include "settings.h"
+#include "utils/utils.h"       // For AxisConfig and UTILS_GetAxisConfig
 #include "utils/uart_utils.h"  // Required for DEBUG_PRINT_XXX macros
 #include "../config/default/peripheral/tmr/plib_tmr4.h"  // TMR4 PLIB access (16-bit timer for OC1)
 #include "../config/default/peripheral/gpio/plib_gpio.h"  // Required for DEBUG_EXEC_XXX LED toggles
@@ -311,9 +314,16 @@ void MOTION_Arc(APP_DATA* appData) {
         appData->arcTheta += appData->arcThetaIncrement;
     }
     
-    // Generate motion segment for this arc increment
+    // Generate motion segment for this arc increment with smooth junction planning
     MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-    KINEMATICS_LinearMove(appData->arcCurrent, next, appData->arcFeedrate, segment);
+    
+    // Arc segments should maintain higher velocities for smoothness
+    float feedrate_mm_sec = appData->arcFeedrate / 60.0f;  // Convert mm/min to mm/sec
+    float arc_velocity = feedrate_mm_sec * 0.8f;  // Use 80% of feedrate for smooth arcs
+    
+    // Use junction planning for smoother arc execution
+    KINEMATICS_LinearMove(appData->arcCurrent, next, appData->arcFeedrate, segment, 
+                         arc_velocity, arc_velocity);
     
     // Add to motion queue
     appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
@@ -413,8 +423,67 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             DEBUG_PRINT_MOTION("[MOTION] Calling KINEMATICS_LinearMove: start=(%.2f,%.2f), end=(%.2f,%.2f), F=%.1f\r\n",
                               start.x, start.y, end.x, end.y, feedrate);
             
-            // Convert to motion segment
-            KINEMATICS_LinearMove(start, end, feedrate, segment);
+            // ===== JUNCTION PLANNING: Calculate entry and exit velocities =====
+            float entry_velocity = 8.33f;  // Default: start from minimum speed (500 mm/min)
+            float exit_velocity = 8.33f;   // Default: decelerate to stop
+            
+            // Check if we can apply junction deviation with previous segment
+            if (appData->motionQueueCount > 0) {
+                // Get previous segment for junction analysis
+                uint32_t prev_index = (appData->motionQueueHead - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+                MotionSegment* prev_segment = &appData->motionQueue[prev_index];
+                
+                // Calculate normalized direction vectors
+                if (prev_segment->dominant_delta > 0) {
+                    CoordinatePoint prev_dir = {
+                        .x = (float)prev_segment->delta_x / (float)prev_segment->dominant_delta,
+                        .y = (float)prev_segment->delta_y / (float)prev_segment->dominant_delta,
+                        .z = (float)prev_segment->delta_z / (float)prev_segment->dominant_delta,
+                        .a = (float)prev_segment->delta_a / (float)prev_segment->dominant_delta
+                    };
+                    
+                    // We need current segment's direction, so do a preview calculation
+                    float dx_mm = end.x - start.x;
+                    float dy_mm = end.y - start.y; 
+                    float dz_mm = end.z - start.z;
+                    float da_mm = end.a - start.a;
+                    
+                    float distance = sqrtf(dx_mm*dx_mm + dy_mm*dy_mm + dz_mm*dz_mm + da_mm*da_mm);
+                    
+                    if (distance > 0.001f) {  // Avoid division by zero
+                        CoordinatePoint curr_dir = {
+                            .x = dx_mm / distance,
+                            .y = dy_mm / distance,
+                            .z = dz_mm / distance,
+                            .a = da_mm / distance
+                        };
+                        
+                        // Get settings for junction calculation
+                        CNC_Settings* settings = SETTINGS_GetCurrent();
+                        const AxisConfig* axis_cfg = UTILS_GetAxisConfig(AXIS_X);  // Use X axis for junction accel
+                        if (axis_cfg && settings) {
+                            float junction_speed = KINEMATICS_CalculateJunctionSpeed(prev_dir, curr_dir, 
+                                                                                    settings->junction_deviation,
+                                                                                    *(axis_cfg->acceleration));
+                            
+                            // Limit junction speed to reasonable maximum (feedrate / 60)
+                            float max_junction = feedrate / 60.0f;  // Convert mm/min to mm/sec
+                            if (junction_speed > max_junction) {
+                                junction_speed = max_junction;
+                            }
+                            
+                            // Update previous segment's exit velocity for smoother transition
+                            entry_velocity = junction_speed;
+                            
+                            DEBUG_PRINT_MOTION("[JUNCTION] Junction speed: %.1f mm/sec (entry to current segment)\r\n", 
+                                             junction_speed);
+                        }
+                    }
+                }
+            }
+            
+            // Convert to motion segment with junction velocities
+            KINEMATICS_LinearMove(start, end, feedrate, segment, entry_velocity, exit_velocity);
 
             DEBUG_PRINT_MOTION("[MOTION] Segment: steps=%lu, dx=%ld, dy=%ld, dz=%ld\r\n",
                               segment->steps_remaining, segment->delta_x, segment->delta_y, segment->delta_z);
@@ -533,12 +602,13 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
         
         case GCODE_EVENT_SPINDLE_ON:
             appData->modalSpindleRPM = event->data.spindle.rpm;
-            // TODO: Spindle hardware control
+            SPINDLE_SetSpeed(event->data.spindle.rpm);
+            SPINDLE_Start();
             return true;
             
         case GCODE_EVENT_SPINDLE_OFF:
             appData->modalSpindleRPM = 0;
-            // TODO: Spindle hardware control
+            SPINDLE_Stop();
             return true;
             
         case GCODE_EVENT_SET_ABSOLUTE:
@@ -548,6 +618,17 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
         case GCODE_EVENT_SET_RELATIVE:
             appData->absoluteMode = false;
             return true;
+            
+        case GCODE_EVENT_SET_WCS:
+        {
+            // G54-G59 - Select active work coordinate system
+            uint8_t wcs_number = event->data.setWCS.wcs_number;
+            if (wcs_number <= 5) {  // G54=0 through G59=5
+                appData->activeWCS = wcs_number;
+                // No need to save to flash - modal state persists during session only
+            }
+            return true;
+        }
             
         case GCODE_EVENT_SET_WORK_OFFSET:
         {
@@ -579,11 +660,32 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             return true;
         }
         
+        case GCODE_EVENT_SET_FEEDRATE:
+            // Feedrate is handled in modal state
+            return true;
+            
+        case GCODE_EVENT_SET_SPINDLE_SPEED:
+            // Update modal spindle speed and apply if running
+            appData->modalSpindleRPM = event->data.setSpindleSpeed.rpm;
+            SPINDLE_SetSpeed(event->data.setSpindleSpeed.rpm);
+            return true;
+            
+        case GCODE_EVENT_HOMING:
+        {
+            // Start homing cycle
+            if (HOMING_Start(appData, event->data.homing.axes_mask)) {
+                DEBUG_PRINT_MOTION("[MOTION] Homing cycle started for axes mask: 0x%02X\r\n", 
+                                  event->data.homing.axes_mask);
+                return true;
+            } else {
+                DEBUG_PRINT_MOTION("[MOTION] Homing cycle failed to start\r\n");
+                return false;
+            }
+        }
+        
         case GCODE_EVENT_DWELL:
         case GCODE_EVENT_COOLANT_ON:
         case GCODE_EVENT_COOLANT_OFF:
-        case GCODE_EVENT_SET_FEEDRATE:
-        case GCODE_EVENT_SET_SPINDLE_SPEED:
         case GCODE_EVENT_SET_TOOL:
         case GCODE_EVENT_NONE:
         default:

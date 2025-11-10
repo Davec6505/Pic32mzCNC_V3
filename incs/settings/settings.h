@@ -55,7 +55,19 @@ typedef struct {
     uint32_t homing_debounce;      // $26 - Homing switch debounce (ms)
     float homing_pull_off;         // $27 - Homing switch pull-off distance (mm)
     
-
+    // Junction deviation for smooth cornering
+    float junction_deviation;      // $11 - Junction deviation (mm)
+    
+    // Work coordinate systems (G54-G59, G92 offset, Tool length offset)
+    // GRBL v1.1 standard: 6 work coordinate systems + G92 offset + TLO
+    float wcs_g54_x, wcs_g54_y, wcs_g54_z;  // G54 work coordinate system
+    float wcs_g55_x, wcs_g55_y, wcs_g55_z;  // G55 work coordinate system  
+    float wcs_g56_x, wcs_g56_y, wcs_g56_z;  // G56 work coordinate system
+    float wcs_g57_x, wcs_g57_y, wcs_g57_z;  // G57 work coordinate system
+    float wcs_g58_x, wcs_g58_y, wcs_g58_z;  // G58 work coordinate system
+    float wcs_g59_x, wcs_g59_y, wcs_g59_z;  // G59 work coordinate system
+    float g92_offset_x, g92_offset_y, g92_offset_z;  // G92 coordinate offset
+    float tool_length_offset;                        // Tool length offset (TLO)
     
     // CRC32 checksum (for validation)
     uint32_t checksum;
@@ -92,5 +104,13 @@ void SETTINGS_PrintAll(const CNC_Settings* settings);
 void SETTINGS_PrintBuildInfo(void);
 uint32_t SETTINGS_CalculateCRC32(const CNC_Settings* settings);
 CNC_Settings* SETTINGS_GetCurrent(void);
+
+// Work coordinate system functions
+bool SETTINGS_GetWorkCoordinateSystem(uint8_t wcs_number, float* x, float* y, float* z);  // Get WCS (0=G54, 1=G55, etc.)
+bool SETTINGS_SetWorkCoordinateSystem(uint8_t wcs_number, float x, float y, float z);     // Set WCS and save to flash
+void SETTINGS_GetG92Offset(float* x, float* y, float* z);                                // Get G92 offset
+void SETTINGS_SetG92Offset(float x, float y, float z);                                   // Set G92 offset
+float SETTINGS_GetToolLengthOffset(void);                                                // Get TLO
+void SETTINGS_SetToolLengthOffset(float offset);                                         // Set TLO
 
 #endif // SETTINGS_H

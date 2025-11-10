@@ -31,7 +31,12 @@
 /* -------------------------------------------------------------------------- */
 /* Configuration                                                              */
 /* -------------------------------------------------------------------------- */
-#define ENABLE_STARTUP_BANNER
+#define ENABLE_STARTUP_BANNER     // Enable/disable startup banner
+                                  // G-code senders (UGS, bCNC) expect this banner
+                                  // Comment out to disable for debugging or custom ID
+
+// Banner message configured in common.h via STARTUP_BANNER_STRING macro
+
 #define MOTION_BUFFER_THRESHOLD 2
 
 /* -------------------------------------------------------------------------- */
@@ -60,8 +65,6 @@ static bool unitsInches = false;            /* false=mm (G21), true=inches (G20)
 /* -------------------------------------------------------------------------- */
 static inline bool is_control_char(uint8_t c){ return (c == '?' || c == '~' || c == '!' || c == 0x18); }
 GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t length, GCODE_CommandQueue* commandQueue);
-static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue);
-static void GCODE_PrintStartupBanner(void);
 
 
 static inline char* find_char(char* s, char key){
@@ -77,16 +80,15 @@ static float parse_float_after(char* start){
 }
 
 /* -------------------------------------------------------------------------- */
-/* Startup Banner                                                             */
+/* Centralized Soft Reset (PUBLIC FUNCTION)                                  */
 /* -------------------------------------------------------------------------- */
-static void GCODE_PrintStartupBanner(void)
+void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
 {
-#ifdef ENABLE_STARTUP_BANNER
-    /* GRBL-compatible startup banner expected by senders after Ctrl+X */
-    UART3_Write((uint8_t*)"Grbl 1.1h ['$' for help]\r\n", 26);
-#endif
-}
+    if (appData == NULL || cmdQueue == NULL) {
+        return;
+    }
 
+<<<<<<< HEAD
 /* -------------------------------------------------------------------------- */
 /* Centralized Soft Reset                                                     */
 /* -------------------------------------------------------------------------- */
@@ -97,7 +99,42 @@ static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue)
     STEPPER_DisableAll();
     
     UART_SoftReset(&appData, cmdQueue);
+=======
+    /* 1. Stop all motion immediately */
+    STEPPER_DisableAll();
+>>>>>>> 4a479250100d24f1fe9c59ab79aef671178f599c
 
+    /* 2. Flush any pending RX bytes to avoid processing pre-reset junk */
+    uint8_t scratch[64];
+    uint32_t rc;
+    while ((rc = UART3_ReadCountGet()) > 0U) {
+        uint32_t toRead = (rc > sizeof(scratch)) ? (uint32_t)sizeof(scratch) : rc;
+        (void)UART3_Read(scratch, toRead);
+    }
+
+    /* 3. Clear motion planner queue (planner and executor state) */
+    appData->motionQueueHead = 0;
+    appData->motionQueueTail = 0;
+    appData->motionQueueCount = 0;
+    appData->currentSegment   = NULL;
+
+    /* 4. Modal state to GRBL defaults: G17, G21, G90, G94, M5, M9, T0, F0, S0 */
+    appData->modalPlane       = 0;        /* 0->G17 (XY) as used by $G print */
+    appData->absoluteMode     = true;     /* G90 */
+    appData->modalFeedrate    = 0.0f;     /* F */
+    appData->modalSpindleRPM  = 0;        /* S */
+    appData->modalToolNumber  = 0;        /* T0 */
+
+    /* 5. Application state back to IDLE */
+    appData->state            = APP_IDLE;
+
+    /* 6. Reset G-code command queue */
+    cmdQueue->head  = 0;
+    cmdQueue->tail  = 0;
+    cmdQueue->count = 0;
+    cmdQueue->motionQueueCount = appData->motionQueueCount;
+
+    /* 7. Reset G-code parser state */
     okPending = false;
     grblAlarm = false;
     grblCheckMode = false;
@@ -108,10 +145,18 @@ static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue)
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
 
+<<<<<<< HEAD
     /* Mark steppers to be re-enabled automatically on first G0/G1/G2/G3 */
     //stepperEnablePending = true;
+=======
+    /* 8. Mark steppers to be re-enabled automatically on first motion command */
+    // stepperEnablePending = true;
+>>>>>>> 4a479250100d24f1fe9c59ab79aef671178f599c
 
-    GCODE_PrintStartupBanner();
+    /* 9. Print GRBL startup banner (expected by senders after Ctrl+X) */
+#ifdef ENABLE_STARTUP_BANNER
+    UART_SEND_BANNER();  // Compile-time string and length from common.h
+#endif
 }
 
 /* -------------------------------------------------------------------------- */
@@ -121,7 +166,11 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
 {
     (void)RD_thresholds;
     UART_Initialize();
-    GCODE_PrintStartupBanner();
+    
+    /* Print GRBL startup banner (disable for custom firmware identification) */
+#ifdef ENABLE_STARTUP_BANNER
+    UART_SEND_BANNER();  // Compile-time string and length from common.h
+#endif
 
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
@@ -260,6 +309,13 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         if (gnum == 90) { ev->type = GCODE_EVENT_SET_ABSOLUTE; return true; }
         if (gnum == 91) { ev->type = GCODE_EVENT_SET_RELATIVE; return true; }
 
+        // Work coordinate system selection (G54-G59)
+        if (gnum >= 54 && gnum <= 59) {
+            ev->type = GCODE_EVENT_SET_WCS;
+            ev->data.setWCS.wcs_number = gnum - 54;  // G54=0, G55=1, ..., G59=5
+            return true;
+        }
+
         if (gnum == 10) {
             char* pP = find_char((char*)cmd, 'P');
             char* pL = find_char((char*)cmd, 'L');
@@ -392,6 +448,17 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         if (mnum == 7) { ev->type = GCODE_EVENT_COOLANT_ON; return true; }
         if (mnum == 9) { ev->type = GCODE_EVENT_COOLANT_OFF; return true; }
     }
+    
+    // System commands ($H, $X, etc.)
+    if (cmd[0] == '$') {
+        if (cmd[1] == 'H' && (cmd[2] == '\0' || cmd[2] == '\n' || cmd[2] == '\r')) {
+            // $H - Home all axes command
+            ev->type = GCODE_EVENT_HOMING;
+            ev->data.homing.axes_mask = 0x0F; // Home all axes (XYZA = bits 0-3)
+            return true;
+        }
+    }
+    
     return false;
 }
 
@@ -424,7 +491,7 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
 /* -------------------------------------------------------------------------- */
 /* Main G-code / Protocol Tasks                                               */
 /* -------------------------------------------------------------------------- */
-void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
+void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 {
     GCODE_CommandQueue* cmdQueue = commandQueue;
     uint32_t nBytesAvailable = 0;
@@ -449,7 +516,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
         if (nBytesRead >= 4 &&
             rxBuffer[0] == '0' && rxBuffer[1] == 'x' &&
             rxBuffer[2] == '1' && rxBuffer[3] == '8') {
-            GCODE_HandleSoftReset(cmdQueue);
+            GCODE_SoftReset(appData, cmdQueue);
             break;
         }
 
@@ -526,23 +593,22 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
                 float wpos_y = mpos_y - wcs->offset.y;
                 float wpos_z = mpos_z - wcs->offset.z;
 
-                extern APP_DATA appData;
                 const char* state = "Idle";
                 if (grblAlarm) state = "Alarm";
                 else if (feedHoldActive) state = "Hold";
-                else if (appData.currentSegment != NULL &&
-                         appData.currentSegment->steps_completed < appData.currentSegment->steps_remaining) {
+                else if (appData->currentSegment != NULL &&
+                         appData->currentSegment->steps_completed < appData->currentSegment->steps_remaining) {
                     state = "Run";
-                } else if (appData.motionQueueCount > 0) {
+                } else if (appData->motionQueueCount > 0) {
                     state = "Run";
                 }
 
-                float feedrate_mm_min = (state[0] == 'R') ? appData.modalFeedrate : 0.0f;
+                float feedrate_mm_min = (state[0] == 'R') ? appData->modalFeedrate : 0.0f;
                 if (state[0] == 'R' && feedrate_mm_min <= 0.0f) {
-                    feedrate_mm_min = (appData.modalFeedrate > 0.0f) ? appData.modalFeedrate : 600.0f;
-                    appData.modalFeedrate = feedrate_mm_min;
+                    feedrate_mm_min = (appData->modalFeedrate > 0.0f) ? appData->modalFeedrate : 600.0f;
+                    appData->modalFeedrate = feedrate_mm_min;
                 }
-                uint32_t spindle_rpm = appData.modalSpindleRPM;
+                uint32_t spindle_rpm = appData->modalSpindleRPM;
 
                 uint32_t response_len = (uint32_t)snprintf((char*)txBuffer, sizeof(txBuffer),
                     "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%u%s%s>\r\n",
@@ -564,8 +630,10 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
                 STEPPER_DisableAll();
                 break;
             case 0x18: /* Soft reset */
-                GCODE_HandleSoftReset(cmdQueue);
+            {
+                GCODE_SoftReset(appData, cmdQueue);
                 break;
+            }
             default:
                 break;
         }
@@ -619,39 +687,61 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             send_ok = false;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == '#') {
-            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-            char buf[160];
+            // GRBL $# command: Report work coordinate systems and offsets
+            char buf[400];  // Increased buffer for all WCS data
             int p = 0;
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G54:%.3f,%.3f,%.3f]\r\n", wcs->offset.x, wcs->offset.y, wcs->offset.z);
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G55:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G56:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G57:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G58:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G59:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G92:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[TLO:0.000]\r\n");
+            
+            // Report all work coordinate systems (G54-G59)
+            for (uint8_t wcs = 0; wcs < 6; wcs++) {
+                float x, y, z;
+                if (SETTINGS_GetWorkCoordinateSystem(wcs, &x, &y, &z)) {
+                    p += snprintf(&buf[p], sizeof(buf)-p, "[G%d:%.3f,%.3f,%.3f]\r\n", 
+                                 54 + wcs, x, y, z);
+                }
+            }
+            
+            // Report G92 coordinate offset
+            float g92_x, g92_y, g92_z;
+            SETTINGS_GetG92Offset(&g92_x, &g92_y, &g92_z);
+            p += snprintf(&buf[p], sizeof(buf)-p, "[G92:%.3f,%.3f,%.3f]\r\n", g92_x, g92_y, g92_z);
+            
+            // Report tool length offset
+            float tlo = SETTINGS_GetToolLengthOffset();
+            p += snprintf(&buf[p], sizeof(buf)-p, "[TLO:%.3f]\r\n", tlo);
+            
+            // Report probe position (currently not implemented - show zeros)
             p += snprintf(&buf[p], sizeof(buf)-p, "[PRB:0.000,0.000,0.000:0]\r\n");
+            
             UART3_Write((uint8_t*)buf, (uint32_t)p);
             handled = true;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'G') {
-            extern APP_DATA appData;
             char state_buffer[160];
             int l = 0;
             l += sprintf(&state_buffer[l], "[GC:");
             l += sprintf(&state_buffer[l], "G0 ");
-            l += sprintf(&state_buffer[l], "G54 ");
-            l += sprintf(&state_buffer[l], "G%d ", appData.modalPlane == 0 ? 17 : (appData.modalPlane == 1 ? 18 : 19));
+            l += sprintf(&state_buffer[l], "G%d ", 54 + appData->activeWCS);  // Dynamic WCS (G54-G59)
+            l += sprintf(&state_buffer[l], "G%d ", appData->modalPlane == 0 ? 17 : (appData->modalPlane == 1 ? 18 : 19));
             l += sprintf(&state_buffer[l], "%s ", unitsInches ? "G20" : "G21");
-            l += sprintf(&state_buffer[l], "G%d ", appData.absoluteMode ? 90 : 91);
+            l += sprintf(&state_buffer[l], "G%d ", appData->absoluteMode ? 90 : 91);
             l += sprintf(&state_buffer[l], "G94 ");
             l += sprintf(&state_buffer[l], "M5 ");
             l += sprintf(&state_buffer[l], "M9 ");
-            l += sprintf(&state_buffer[l], "T%u ", appData.modalToolNumber);
-            l += sprintf(&state_buffer[l], "F%.1f ", appData.modalFeedrate);
-            l += sprintf(&state_buffer[l], "S%u", appData.modalSpindleRPM);
+            l += sprintf(&state_buffer[l], "T%u ", appData->modalToolNumber);
+            l += sprintf(&state_buffer[l], "F%.1f ", appData->modalFeedrate);
+            l += sprintf(&state_buffer[l], "S%u", appData->modalSpindleRPM);
             l += sprintf(&state_buffer[l], "]\r\n");
             UART3_Write((uint8_t*)state_buffer, (uint32_t)l);
+            handled = true;
+        }
+        else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'H') {
+            // $H - Homing cycle command
+            // Create homing event and add to command queue
+            if (cmdQueue->count < GCODE_MAX_COMMANDS) {
+                strcpy(cmdQueue->commands[cmdQueue->head].command, "$H");
+                cmdQueue->head = (cmdQueue->head + 1) % GCODE_MAX_COMMANDS;
+                cmdQueue->count++;
+            }
             handled = true;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'I') {
