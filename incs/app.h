@@ -41,9 +41,7 @@ extern "C" {
 // *****************************************************************************
 
 // ✅ APP_STATES and APP_DATA now defined in data_structures.h
-
-// Global application data structure - defined in app.c
-extern APP_DATA appData;
+// Note: APP_DATA instance is private to app.c - passed via pointers
 
 // *****************************************************************************
 // *****************************************************************************

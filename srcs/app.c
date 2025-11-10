@@ -232,12 +232,12 @@ void APP_Tasks ( void )
             // During motion, ISR toggles LED1 on each step (fast blink)
             // LED1 will blink at step rate, visible motion indicator
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
-            // Read bytes, tokenize, and queue commands continuously
-            GCODE_Tasks(&appData.gcodeCommandQueue);
-
-            // Sync motion queue status for flow control
+            // Sync motion queue status for flow control BEFORE G-code processing
             appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
             appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
+            
+            // Read bytes, tokenize, and queue commands continuously
+            GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
 
             // Convert one queued command into a motion event and enqueue segment(s)
             // Doing this BEFORE motion ensures new segments can load immediately this cycle
@@ -253,7 +253,7 @@ void APP_Tasks ( void )
             MOTION_Tasks(&appData);
 
             // ===== HOMING STATE MACHINE =====
-            HOMING_Tasks();
+            HOMING_Tasks(&appData);
 
             // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
             if(appData.arcGenState == ARC_GEN_ACTIVE) {
@@ -262,7 +262,7 @@ void APP_Tasks ( void )
             
             // ===== HOMING STATE MACHINE (NON-BLOCKING) =====
             // Process homing cycle if active
-            HOMING_Tasks();
+            HOMING_Tasks(&appData);
 
             // ===== HARD LIMIT CHECK (TEMP DISABLED) =====
             // Check limit switches with inversion mask from settings

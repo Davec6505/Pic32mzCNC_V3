@@ -160,15 +160,8 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // Timer frequency (TMR4 in 16-bit mode)
     const float TIMER_FREQ = (float)TMR4_FrequencyGet();
     
-    // Get steps_per_mm for dominant axis (reuse existing variable)
-    float steps_per_mm_dominant = stepper->steps_per_mm_x;
-    switch(segment_buffer->dominant_axis) {
-        case AXIS_X: steps_per_mm_dominant = stepper->steps_per_mm_x; break;
-        case AXIS_Y: steps_per_mm_dominant = stepper->steps_per_mm_y; break;
-        case AXIS_Z: steps_per_mm_dominant = stepper->steps_per_mm_z; break;
-        case AXIS_A: steps_per_mm_dominant = stepper->steps_per_deg_a; break;
-        default: break;
-    }
+    // Array-based steps_per_mm lookup (replaces switch statement)
+    float steps_per_mm_dominant = *g_axis_config[segment_buffer->dominant_axis].steps_per_mm;
     
     // Calculate nominal step interval (cruise speed)
     // steps_per_sec = feedrate_mm_sec * steps_per_mm
@@ -270,13 +263,8 @@ CoordinatePoint KINEMATICS_GetCurrentPosition(void) {
         
         float position = (float)AXIS_GetSteps(axis) / (*cfg->steps_per_mm);
         
-        switch(axis) {
-            case AXIS_X: current.x = position; break;
-            case AXIS_Y: current.y = position; break;
-            case AXIS_Z: current.z = position; break;
-            case AXIS_A: current.a = position; break;
-            default: break;
-        }
+        // Array-based coordinate setting (replaces switch statement)
+        SET_COORDINATE_AXIS(&current, axis, position);
     }
     
     return current;

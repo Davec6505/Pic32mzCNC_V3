@@ -91,7 +91,7 @@ typedef struct {
 
 /* GCODE USART function prototypes */
 void GCODE_USART_Initialize(uint32_t RD_thresholds);
-void GCODE_Tasks(GCODE_CommandQueue* commandQueue);
+void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue);
 
 // Soft reset function (handles Ctrl+X/0x18) - consolidates all reset logic
 void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue);

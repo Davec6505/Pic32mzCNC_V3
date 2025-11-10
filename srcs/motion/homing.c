@@ -10,7 +10,6 @@
 #include "motion/motion_utils.h"
 #include "utils/utils.h"
 #include "settings/settings.h"
-#include "app.h"  // For extern APP_DATA appData declaration
 #include "../config/default/peripheral/coretimer/plib_coretimer.h"
 #include "../config/default/peripheral/gpio/plib_gpio.h"
 #include "common.h"
@@ -30,7 +29,7 @@ void HOMING_Initialize(void) {
 
 // ===== PUBLIC API =====
 
-bool HOMING_Start(uint32_t axes_mask) {
+bool HOMING_Start(APP_DATA* appData, uint32_t axes_mask) {
     // Check if homing already active
     if (g_homing.state != HOMING_STATE_IDLE) {
         return false;
@@ -65,12 +64,12 @@ bool HOMING_Start(uint32_t axes_mask) {
     
     // Start seek phase
     g_homing.state = HOMING_STATE_SEEK;
-    HOMING_StartSeek();
+    HOMING_StartSeek(appData);
     
     return true;
 }
 
-HomingState HOMING_Tasks(void) {
+HomingState HOMING_Tasks(APP_DATA* appData) {
     if (g_homing.state == HOMING_STATE_IDLE) {
         return HOMING_STATE_IDLE;
     }
@@ -83,8 +82,8 @@ HomingState HOMING_Tasks(void) {
                 // Limit hit - transition to locate phase
                 g_homing.motion_active = false;
                 g_homing.state = HOMING_STATE_LOCATE;
-                HOMING_StartLocate();
-            } else if (!g_homing.motion_active && appData.motionQueueCount == 0) {
+                HOMING_StartLocate(appData);
+            } else if (!g_homing.motion_active && appData->motionQueueCount == 0) {
                 // Motion completed without hitting limit - ALARM
                 g_homing.state = HOMING_STATE_ALARM;
                 g_homing.alarm_code = 9;  // GRBL Alarm 9: Homing fail (travel exceeded)
@@ -98,8 +97,8 @@ HomingState HOMING_Tasks(void) {
                 // Limit hit at slow speed - transition to pulloff
                 g_homing.motion_active = false;
                 g_homing.state = HOMING_STATE_PULLOFF;
-                HOMING_StartPulloff();
-            } else if (!g_homing.motion_active && appData.motionQueueCount == 0) {
+                HOMING_StartPulloff(appData);
+            } else if (!g_homing.motion_active && appData->motionQueueCount == 0) {
                 // Motion completed without hitting limit - ALARM
                 g_homing.state = HOMING_STATE_ALARM;
                 g_homing.alarm_code = 9;  // GRBL Alarm 9: Homing fail
@@ -109,7 +108,7 @@ HomingState HOMING_Tasks(void) {
             
         case HOMING_STATE_PULLOFF:
             // Wait for pulloff motion to complete
-            if (!g_homing.motion_active && appData.motionQueueCount == 0) {
+            if (!g_homing.motion_active && appData->motionQueueCount == 0) {
                 // Check if limit cleared
                 bool limit_cleared = !HOMING_LimitTriggered();
                 
@@ -123,7 +122,7 @@ HomingState HOMING_Tasks(void) {
                     // Move to next axis or complete
                     if (HOMING_NextAxis()) {
                         g_homing.state = HOMING_STATE_SEEK;
-                        HOMING_StartSeek();
+                        HOMING_StartSeek(appData);
                     } else {
                         // All axes homed successfully
                         g_homing.state = HOMING_STATE_COMPLETE;
@@ -180,7 +179,7 @@ void HOMING_ClearAlarm(void) {
 
 // ===== INTERNAL HELPERS =====
 
-void HOMING_StartSeek(void) {
+void HOMING_StartSeek(APP_DATA* appData) {
     const LimitConfig* limit_cfg = UTILS_GetLimitConfig(g_homing.current_axis);
     
     if (limit_cfg == NULL) {
@@ -199,21 +198,16 @@ void HOMING_StartSeek(void) {
     CoordinatePoint current = KINEMATICS_GetCurrentPosition();
     CoordinatePoint target = current;
     
-    switch (g_homing.current_axis) {
-        case AXIS_X: target.x = current.x + search_distance; break;
-        case AXIS_Y: target.y = current.y + search_distance; break;
-        case AXIS_Z: target.z = current.z + search_distance; break;
-        case AXIS_A: target.a = current.a + search_distance; break;
-        default: break;
-    }
+    // Array-based axis targeting (replaces switch statement)
+    ADD_COORDINATE_AXIS(&target, g_homing.current_axis, search_distance);
     
     // Generate motion segment at seek rate
-    if (appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
-        MotionSegment* segment = &appData.motionQueue[appData.motionQueueHead];
+    if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
+        MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
         KINEMATICS_LinearMove(current, target, *limit_cfg->homing_seek_rate, segment);
         
-        appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-        appData.motionQueueCount++;
+        appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+        appData->motionQueueCount++;
         
         g_homing.motion_active = true;
     } else {
@@ -222,7 +216,7 @@ void HOMING_StartSeek(void) {
     }
 }
 
-void HOMING_StartLocate(void) {
+void HOMING_StartLocate(APP_DATA* appData) {
     const LimitConfig* limit_cfg = UTILS_GetLimitConfig(g_homing.current_axis);
     
     if (limit_cfg == NULL) {
@@ -242,45 +236,36 @@ void HOMING_StartLocate(void) {
     CoordinatePoint current = KINEMATICS_GetCurrentPosition();
     CoordinatePoint target = current;
     
-    switch (g_homing.current_axis) {
-        case AXIS_X: target.x = current.x + backoff_distance; break;
-        case AXIS_Y: target.y = current.y + backoff_distance; break;
-        case AXIS_Z: target.z = current.z + backoff_distance; break;
-        case AXIS_A: target.a = current.a + backoff_distance; break;
-        default: break;
-    }
+    // Array-based axis targeting (replaces switch statement)
+    ADD_COORDINATE_AXIS(&target, g_homing.current_axis, backoff_distance);
     
     // Generate backoff motion segment at slow rate
-    if (appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
-        MotionSegment* segment = &appData.motionQueue[appData.motionQueueHead];
+    if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
+        MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
         KINEMATICS_LinearMove(current, target, *limit_cfg->homing_feed_rate, segment);
         
-        appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-        appData.motionQueueCount++;
+        appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+        appData->motionQueueCount++;
     }
     
     // Generate slow re-approach segment
     current = target;
-    switch (g_homing.current_axis) {
-        case AXIS_X: target.x = current.x + locate_distance; break;
-        case AXIS_Y: target.y = current.y + locate_distance; break;
-        case AXIS_Z: target.z = current.z + locate_distance; break;
-        case AXIS_A: target.a = current.a + locate_distance; break;
-        default: break;
-    }
     
-    if (appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
-        MotionSegment* segment = &appData.motionQueue[appData.motionQueueHead];
+    // Array-based axis targeting (replaces switch statement)
+    ADD_COORDINATE_AXIS(&target, g_homing.current_axis, locate_distance);
+    
+    if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
+        MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
         KINEMATICS_LinearMove(current, target, *limit_cfg->homing_feed_rate, segment);
         
-        appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-        appData.motionQueueCount++;
+        appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+        appData->motionQueueCount++;
         
         g_homing.motion_active = true;
     }
 }
 
-void HOMING_StartPulloff(void) {
+void HOMING_StartPulloff(APP_DATA* appData) {
     const LimitConfig* limit_cfg = UTILS_GetLimitConfig(g_homing.current_axis);
     
     if (limit_cfg == NULL) {
@@ -297,21 +282,16 @@ void HOMING_StartPulloff(void) {
     CoordinatePoint current = KINEMATICS_GetCurrentPosition();
     CoordinatePoint target = current;
     
-    switch (g_homing.current_axis) {
-        case AXIS_X: target.x = current.x + pulloff_distance; break;
-        case AXIS_Y: target.y = current.y + pulloff_distance; break;
-        case AXIS_Z: target.z = current.z + pulloff_distance; break;
-        case AXIS_A: target.a = current.a + pulloff_distance; break;
-        default: break;
-    }
+    // Array-based axis targeting (replaces switch statement)
+    ADD_COORDINATE_AXIS(&target, g_homing.current_axis, pulloff_distance);
     
     // Generate pulloff motion segment
-    if (appData.motionQueueCount < MAX_MOTION_SEGMENTS) {
-        MotionSegment* segment = &appData.motionQueue[appData.motionQueueHead];
+    if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
+        MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
         KINEMATICS_LinearMove(current, target, *limit_cfg->homing_feed_rate, segment);
         
-        appData.motionQueueHead = (appData.motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-        appData.motionQueueCount++;
+        appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+        appData->motionQueueCount++;
         
         g_homing.motion_active = true;
     }

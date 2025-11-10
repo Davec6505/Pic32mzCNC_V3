@@ -18,7 +18,6 @@
 
 #include "gcode_parser.h"
 #include "common.h"
-#include "app.h"              // For extern APP_DATA appData declaration
 #include "stepper.h"
 #include "motion.h"
 #include "kinematics.h"
@@ -456,7 +455,7 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
 /* -------------------------------------------------------------------------- */
 /* Main G-code / Protocol Tasks                                               */
 /* -------------------------------------------------------------------------- */
-void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
+void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 {
     GCODE_CommandQueue* cmdQueue = commandQueue;
     uint32_t nBytesAvailable = 0;
@@ -481,7 +480,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
         if (nBytesRead >= 4 &&
             rxBuffer[0] == '0' && rxBuffer[1] == 'x' &&
             rxBuffer[2] == '1' && rxBuffer[3] == '8') {
-            GCODE_SoftReset(&appData, cmdQueue);
+            GCODE_SoftReset(appData, cmdQueue);
             break;
         }
 
@@ -561,19 +560,19 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
                 const char* state = "Idle";
                 if (grblAlarm) state = "Alarm";
                 else if (feedHoldActive) state = "Hold";
-                else if (appData.currentSegment != NULL &&
-                         appData.currentSegment->steps_completed < appData.currentSegment->steps_remaining) {
+                else if (appData->currentSegment != NULL &&
+                         appData->currentSegment->steps_completed < appData->currentSegment->steps_remaining) {
                     state = "Run";
-                } else if (appData.motionQueueCount > 0) {
+                } else if (appData->motionQueueCount > 0) {
                     state = "Run";
                 }
 
-                float feedrate_mm_min = (state[0] == 'R') ? appData.modalFeedrate : 0.0f;
+                float feedrate_mm_min = (state[0] == 'R') ? appData->modalFeedrate : 0.0f;
                 if (state[0] == 'R' && feedrate_mm_min <= 0.0f) {
-                    feedrate_mm_min = (appData.modalFeedrate > 0.0f) ? appData.modalFeedrate : 600.0f;
-                    appData.modalFeedrate = feedrate_mm_min;
+                    feedrate_mm_min = (appData->modalFeedrate > 0.0f) ? appData->modalFeedrate : 600.0f;
+                    appData->modalFeedrate = feedrate_mm_min;
                 }
-                uint32_t spindle_rpm = appData.modalSpindleRPM;
+                uint32_t spindle_rpm = appData->modalSpindleRPM;
 
                 uint32_t response_len = (uint32_t)snprintf((char*)txBuffer, sizeof(txBuffer),
                     "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%u%s%s>\r\n",
@@ -596,7 +595,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
                 break;
             case 0x18: /* Soft reset */
             {
-                GCODE_SoftReset(&appData, cmdQueue);
+                GCODE_SoftReset(appData, cmdQueue);
                 break;
             }
             default:
@@ -673,15 +672,15 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             l += sprintf(&state_buffer[l], "[GC:");
             l += sprintf(&state_buffer[l], "G0 ");
             l += sprintf(&state_buffer[l], "G54 ");
-            l += sprintf(&state_buffer[l], "G%d ", appData.modalPlane == 0 ? 17 : (appData.modalPlane == 1 ? 18 : 19));
+            l += sprintf(&state_buffer[l], "G%d ", appData->modalPlane == 0 ? 17 : (appData->modalPlane == 1 ? 18 : 19));
             l += sprintf(&state_buffer[l], "%s ", unitsInches ? "G20" : "G21");
-            l += sprintf(&state_buffer[l], "G%d ", appData.absoluteMode ? 90 : 91);
+            l += sprintf(&state_buffer[l], "G%d ", appData->absoluteMode ? 90 : 91);
             l += sprintf(&state_buffer[l], "G94 ");
             l += sprintf(&state_buffer[l], "M5 ");
             l += sprintf(&state_buffer[l], "M9 ");
-            l += sprintf(&state_buffer[l], "T%u ", appData.modalToolNumber);
-            l += sprintf(&state_buffer[l], "F%.1f ", appData.modalFeedrate);
-            l += sprintf(&state_buffer[l], "S%u", appData.modalSpindleRPM);
+            l += sprintf(&state_buffer[l], "T%u ", appData->modalToolNumber);
+            l += sprintf(&state_buffer[l], "F%.1f ", appData->modalFeedrate);
+            l += sprintf(&state_buffer[l], "S%u", appData->modalSpindleRPM);
             l += sprintf(&state_buffer[l], "]\r\n");
             UART3_Write((uint8_t*)state_buffer, (uint32_t)l);
             handled = true;

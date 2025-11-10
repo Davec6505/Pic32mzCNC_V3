@@ -166,18 +166,10 @@ bool MOTION_UTILS_CheckAxisLimits(E_AXIS axis, uint8_t invert_mask)
     #ifdef X_Min_Get  // Only compile if limit pins are defined
     bool inverted = (invert_mask >> axis) & 0x01;
     
-    switch(axis) {
-        case AXIS_X:
-            return (X_Min_Get() ^ inverted) || (X_Max_Get() ^ inverted);
-        case AXIS_Y:
-            return (Y_Min_Get() ^ inverted) || (Y_Max_Get() ^ inverted);
-        case AXIS_Z:
-            return (Z_Min_Get() ^ inverted) || (Z_Max_Get() ^ inverted);
-        case AXIS_A:
-            return (A_Min_Get() ^ inverted) || (A_Max_Get() ^ inverted);
-        default:
-            return false;
-    }
+    // Array-based limit checking (replaces switch statement)
+    return (g_limit_config[axis].limit.GetMin() ^ inverted) || 
+           (g_limit_config[axis].limit.GetMax() ^ inverted);
+    
     #else
     return false;  // Pins not defined yet
     #endif
