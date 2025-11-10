@@ -125,6 +125,8 @@ void STEPPER_Initialize(APP_DATA* appData) {
     // Enable all stepper drivers
     MOTION_UTILS_EnableAllAxes(true, enable_invert);
     
+    steppers_enabled = true;
+    
     // ✅ DEBUG: Verify enable pins are set
     DEBUG_PRINT_STEPPER("[STEPPER_Init] Enable invert mask: 0x%02X\r\n", enable_invert);
     DEBUG_PRINT_STEPPER("[STEPPER_Init] EnX state: %d, EnY state: %d\r\n", 

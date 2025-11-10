@@ -53,7 +53,7 @@ static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
 static bool unitsInches = false;            /* false=mm (G21), true=inches (G20) */
 
 /* ADDED: After soft reset steppers remain disabled; enable on first motion */
-/* static bool stepperEnablePending = false;*/
+// static bool stepperEnablePending = false;
 
 /* -------------------------------------------------------------------------- */
 /* Forward Declarations                                                       */
@@ -92,9 +92,10 @@ static void GCODE_PrintStartupBanner(void)
 /* -------------------------------------------------------------------------- */
 static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue)
 {
+    extern APP_DATA appData;
+    
     STEPPER_DisableAll();
     
-    extern APP_DATA appData;
     UART_SoftReset(&appData, cmdQueue);
 
     okPending = false;
@@ -108,7 +109,7 @@ static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue)
     memset(rxBuffer, 0, sizeof(rxBuffer));
 
     /* Mark steppers to be re-enabled automatically on first G0/G1/G2/G3 */
-   // stepperEnablePending = true;
+    //stepperEnablePending = true;
 
     GCODE_PrintStartupBanner();
 }
