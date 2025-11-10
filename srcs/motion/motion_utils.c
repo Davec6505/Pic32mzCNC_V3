@@ -1,7 +1,8 @@
 #include "motion_utils.h"
 #include "definitions.h"
+#include "utils/utils.h"  // For g_axis_config with function pointers
 
-// ✅ GPIO Pin Arrays indexed by E_AXIS enum
+// Legacy GPIO_PIN arrays - kept for compatibility but function pointers preferred
 // Uses Harmony GPIO_PIN constants (e.g., DirX_PIN, EnX_PIN, StepX_PIN)
 // These are used with GPIO_PinSet(), GPIO_PinClear(), GPIO_PinRead() functions
 
@@ -41,17 +42,19 @@ void MOTION_UTILS_SetDirection(E_AXIS axis, bool forward, uint8_t invert_mask)
 {
     if(axis >= AXIS_COUNT) return;
     
-    // Check if this axis direction should be inverted
+    // Check if this axis direction should be inverted (from settings $3 mask)
     bool inverted = (invert_mask >> axis) & 0x01;
     
-    // Apply inversion if configured
-    bool actual_state = inverted ? !forward : forward;
+    // Apply inversion logic:
+    // Normal: forward=true → pin HIGH, forward=false → pin LOW
+    // Inverted: forward=true → pin LOW, forward=false → pin HIGH  
+    bool pin_state = inverted ? !forward : forward;
     
-    // Set GPIO pin using Harmony inline function
-    if(actual_state){
-        GPIO_PinSet(DIR_PINS[axis]);
+    // Set GPIO pin to computed state using atomic functions (zero overhead)
+    if(pin_state) {
+        AXIS_DirSet(axis);      // Pin HIGH
     } else {
-        GPIO_PinClear(DIR_PINS[axis]);
+        AXIS_DirClear(axis);    // Pin LOW
     }
 }
 
@@ -59,22 +62,28 @@ void MOTION_UTILS_SetDirection(E_AXIS axis, bool forward, uint8_t invert_mask)
  * @param axis: E_AXIS enum (AXIS_X, AXIS_Y, AXIS_Z, AXIS_A)
  * @param enable: true = enable motor, false = disable (idle)
  * @param invert_mask: Enable inversion mask from settings ($4)
+ * 
+ * GRBL $4 Logic:
+ * $4=0 (bit clear): Active-LOW enable (pin LOW = motor enabled)  ← Most common
+ * $4=1 (bit set):   Active-HIGH enable (pin HIGH = motor enabled)
  */
 void MOTION_UTILS_EnableAxis(E_AXIS axis, bool enable, uint8_t invert_mask)
 {
     if(axis >= AXIS_COUNT) return;
     
-    // Check if enable signal should be inverted
-    bool inverted = (invert_mask >> axis) & 0x01;
+    // Check if this axis uses active-HIGH enable (inverted from normal active-LOW)
+    bool active_high = (invert_mask >> axis) & 0x01;
     
-    // Apply inversion if configured
-    bool actual_state = inverted ? !enable : enable;
+    // Determine pin state:
+    // Active-LOW ($4 bit=0):  enable=true → pin LOW,  enable=false → pin HIGH
+    // Active-HIGH ($4 bit=1): enable=true → pin HIGH, enable=false → pin LOW
+    bool pin_state = active_high ? enable : !enable;
     
-    // Set GPIO pin using Harmony inline function
-    if(actual_state){
-        GPIO_PinSet(EN_PINS[axis]);
+    // Set GPIO pin to computed state using atomic functions (zero overhead)
+    if(pin_state) {
+        AXIS_EnableSet(axis);    // Pin HIGH
     } else {
-        GPIO_PinClear(EN_PINS[axis]);
+        AXIS_EnableClear(axis);  // Pin LOW
     }
 }
 
@@ -99,7 +108,8 @@ void MOTION_UTILS_DisableAllAxes(uint8_t invert_mask)
 
 /* Read step pin state for diagnostics
  * @param axis: E_AXIS enum (AXIS_X, AXIS_Y, AXIS_Z, AXIS_A)
- * @return: true = pin high, false = pin low
+ * @return: true = pin high, false = pin low (raw GPIO state, no inversion)
+ * NOTE: Step pins are typically inputs connected to OC modules
  */
 bool MOTION_UTILS_ReadStepPin(E_AXIS axis)
 {
@@ -110,40 +120,18 @@ bool MOTION_UTILS_ReadStepPin(E_AXIS axis)
 /* Check all hard limit switches (GRBL v1.1 implementation)
  * @param invert_mask: Limit pins inversion mask from settings ($5)
  * @return: true if ANY limit switch is triggered
- * 
- * NOTE: Limit switch pin names (to be added to plib_gpio.h):
- * X_Min, X_Max, Y_Min, Y_Max, Z_Min, Z_Max, A_Min, A_Max
+ * Uses array-based limit configuration for better performance
  */
 bool MOTION_UTILS_CheckHardLimits(uint8_t invert_mask)
 {
-    // Read all limit switches (will be defined in plib_gpio.h)
-    // For now, using placeholder names - will compile once pins are defined
+    // Array-based limit checking (replaces switch statements and manual pins)
+    for (uint8_t axis = 0; axis < AXIS_COUNT; axis++) {
+        if (LIMIT_CheckAxis((E_AXIS)axis, invert_mask)) {
+            return true;  // Any limit triggered
+        }
+    }
     
-    #ifdef X_Min_Get  // Only compile if limit pins are defined
-    bool x_min = X_Min_Get();
-    bool x_max = X_Max_Get();
-    bool y_min = Y_Min_Get();
-    bool y_max = Y_Max_Get();
-    bool z_min = Z_Min_Get();
-    bool z_max = Z_Max_Get();
-    bool a_min = A_Min_Get();
-    bool a_max = A_Max_Get();
-    
-    // Apply inversion mask (bit-mapped per axis)
-    // GRBL uses active-low switches by default (triggered = low)
-    bool x_inv = (invert_mask & 0x01) ? true : false;
-    bool y_inv = (invert_mask & 0x02) ? true : false;
-    bool z_inv = (invert_mask & 0x04) ? true : false;
-    bool a_inv = (invert_mask & 0x08) ? true : false;
-    
-    // Check if any limit is triggered (XOR with invert to get actual state)
-    if((x_min ^ x_inv) || (x_max ^ x_inv)) return true;
-    if((y_min ^ y_inv) || (y_max ^ y_inv)) return true;
-    if((z_min ^ z_inv) || (z_max ^ z_inv)) return true;
-    if((a_min ^ a_inv) || (a_max ^ a_inv)) return true;
-    #endif
-    
-    return false;  // No limits triggered (or pins not defined yet)
+    return false;  // No limits triggered
 }
 
 /* Check specific axis limit switches
@@ -155,22 +143,6 @@ bool MOTION_UTILS_CheckAxisLimits(E_AXIS axis, uint8_t invert_mask)
 {
     if(axis >= AXIS_COUNT) return false;
     
-    #ifdef X_Min_Get  // Only compile if limit pins are defined
-    bool inverted = (invert_mask >> axis) & 0x01;
-    
-    switch(axis) {
-        case AXIS_X:
-            return (X_Min_Get() ^ inverted) || (X_Max_Get() ^ inverted);
-        case AXIS_Y:
-            return (Y_Min_Get() ^ inverted) || (Y_Max_Get() ^ inverted);
-        case AXIS_Z:
-            return (Z_Min_Get() ^ inverted) || (Z_Max_Get() ^ inverted);
-        case AXIS_A:
-            return (A_Min_Get() ^ inverted) || (A_Max_Get() ^ inverted);
-        default:
-            return false;
-    }
-    #else
-    return false;  // Pins not defined yet
-    #endif
+    // Use array-based limit checking from utils module
+    return LIMIT_CheckAxis(axis, invert_mask);
 }

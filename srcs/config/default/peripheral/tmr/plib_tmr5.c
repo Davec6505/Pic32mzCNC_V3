@@ -1,23 +1,23 @@
 /*******************************************************************************
-  Data Type definition of Timer PLIB
+  TMR Peripheral Library Interface Source File
 
-  Company:
+  Company
     Microchip Technology Inc.
 
-  File Name:
-    plib_tmr2.h
+  File Name
+    plib_tmr5.c
 
-  Summary:
-    Data Type definition of the Timer Peripheral Interface Plib.
+  Summary
+    TMR5 peripheral library source file.
 
-  Description:
-    This file defines the Data Types for the Timer Plib.
-
-  Remarks:
-    None.
+  Description
+    This file implements the interface to the TMR peripheral library.  This
+    library provides access to and control of the associated peripheral
+    instance.
 
 *******************************************************************************/
 
+// DOM-IGNORE-BEGIN
 /*******************************************************************************
 * Copyright (C) 2019 Microchip Technology Inc. and its subsidiaries.
 *
@@ -40,64 +40,110 @@
 * ANY WAY RELATED TO THIS SOFTWARE WILL NOT EXCEED THE AMOUNT OF FEES, IF ANY,
 * THAT YOU HAVE PAID DIRECTLY TO MICROCHIP FOR THIS SOFTWARE.
 *******************************************************************************/
+// DOM-IGNORE-END
 
-#ifndef PLIB_TMR2_H
-#define PLIB_TMR2_H
 
-#include <stddef.h>
-#include <stdint.h>
-#include <stdbool.h>
+// *****************************************************************************
+// *****************************************************************************
+// Section: Included Files
+// *****************************************************************************
+// *****************************************************************************
+
 #include "device.h"
-#include "plib_tmr_common.h"
-
-// DOM-IGNORE-BEGIN
-#ifdef __cplusplus  // Provide C++ Compatibility
-
-    extern "C" {
-
-#endif
-// DOM-IGNORE-END
-
-// *****************************************************************************
-// *****************************************************************************
-// Section: Data Types
-// *****************************************************************************
-// *****************************************************************************
-
-// *****************************************************************************
-// *****************************************************************************
-// Section: Interface Routines
-// *****************************************************************************
-// *****************************************************************************
+#include "plib_tmr5.h"
+#include "interrupts.h"
 
 
-// *****************************************************************************
-void TMR2_Initialize(void);
-
-void TMR2_Start(void);
-
-void TMR2_Stop(void);
-
-void TMR2_PeriodSet(uint16_t period);
-
-uint16_t TMR2_PeriodGet(void);
-
-uint16_t TMR2_CounterGet(void);
-
-uint32_t TMR2_FrequencyGet(void);
-
-void TMR2_InterruptEnable(void);
-
-void TMR2_InterruptDisable(void);
-
-void TMR2_CallbackRegister( TMR_CALLBACK callback_fn, uintptr_t context );
+static volatile TMR_TIMER_OBJECT tmr5Obj;
 
 
-// DOM-IGNORE-BEGIN
-#ifdef __cplusplus  // Provide C++ Compatibility
+void TMR5_Initialize(void)
+{
+    /* Disable Timer */
+    T5CONCLR = _T5CON_ON_MASK;
 
+    /*
+    SIDL = 0
+    TCKPS =0
+    T32   = 0
+    TCS = 0
+    */
+    T5CONSET = 0x0;
+
+    /* Clear counter */
+    TMR5 = 0x0;
+
+    /*Set period */
+    PR5 = 149U;
+
+    /* Enable TMR Interrupt */
+    IEC0SET = _IEC0_T5IE_MASK;
+
+}
+
+
+void TMR5_Start(void)
+{
+    T5CONSET = _T5CON_ON_MASK;
+}
+
+
+void TMR5_Stop (void)
+{
+    T5CONCLR = _T5CON_ON_MASK;
+}
+
+void TMR5_PeriodSet(uint16_t period)
+{
+    PR5  = period;
+}
+
+uint16_t TMR5_PeriodGet(void)
+{
+    return (uint16_t)PR5;
+}
+
+uint16_t TMR5_CounterGet(void)
+{
+    return (uint16_t)(TMR5);
+}
+
+
+uint32_t TMR5_FrequencyGet(void)
+{
+    return (50000000);
+}
+
+
+void __attribute__((used)) TIMER_5_InterruptHandler (void)
+{
+    uint32_t status  = 0U;
+    status = IFS0bits.T5IF;
+    IFS0CLR = _IFS0_T5IF_MASK;
+
+    if((tmr5Obj.callback_fn != NULL))
+    {
+        uintptr_t context = tmr5Obj.context;
+        tmr5Obj.callback_fn(status, context);
     }
-#endif
-// DOM-IGNORE-END
+}
 
-#endif /* PLIB_TMR2_H */
+
+void TMR5_InterruptEnable(void)
+{
+    IEC0SET = _IEC0_T5IE_MASK;
+}
+
+
+void TMR5_InterruptDisable(void)
+{
+    IEC0CLR = _IEC0_T5IE_MASK;
+}
+
+
+void TMR5_CallbackRegister( TMR_CALLBACK callback_fn, uintptr_t context )
+{
+    /* Save callback_fn and context in local memory */
+    tmr5Obj.callback_fn = callback_fn;
+    tmr5Obj.context = context;
+}

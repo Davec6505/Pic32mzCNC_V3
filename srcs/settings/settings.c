@@ -2,12 +2,13 @@
 #include "peripheral/nvm/plib_nvm.h"
 #include "peripheral/uart/plib_uart3.h"
 #include "peripheral/coretimer/plib_coretimer.h"  // ✅ For CORETIMER_DelayMs/Us
+#include "utils/uart_utils.h"  // ✅ For non-blocking UART_Printf()
 #include "definitions.h"
 #include <string.h>
 #include <stdio.h>
 
 // Global settings instance (loaded at startup)
-static GRBL_Settings current_settings;
+static CNC_Settings current_settings;
 
 // ✅ CRITICAL: Cache-aligned buffer for NVM operations (Harmony pattern)
 // PIC32MZ requires cache-aligned buffers for flash read/write operations
@@ -27,7 +28,7 @@ static void eventHandler(uintptr_t context)
 }
 
 // Default settings values
-static const GRBL_Settings default_settings = {
+static const CNC_Settings default_settings = {
     .signature = SETTINGS_SIGNATURE,
     .version = SETTINGS_VERSION,
     .padding = 0,
@@ -76,6 +77,23 @@ static const GRBL_Settings default_settings = {
     .homing_debounce = 25,
     .homing_pull_off = 2.0f,
     
+    // Junction deviation for smooth cornering  
+    .junction_deviation = 0.01f,   // GRBL default: 0.01mm
+    
+    // Work coordinate systems (G54-G59) - all initialized to zero
+    .wcs_g54_x = 0.0f, .wcs_g54_y = 0.0f, .wcs_g54_z = 0.0f,
+    .wcs_g55_x = 0.0f, .wcs_g55_y = 0.0f, .wcs_g55_z = 0.0f,
+    .wcs_g56_x = 0.0f, .wcs_g56_y = 0.0f, .wcs_g56_z = 0.0f,
+    .wcs_g57_x = 0.0f, .wcs_g57_y = 0.0f, .wcs_g57_z = 0.0f,
+    .wcs_g58_x = 0.0f, .wcs_g58_y = 0.0f, .wcs_g58_z = 0.0f,
+    .wcs_g59_x = 0.0f, .wcs_g59_y = 0.0f, .wcs_g59_z = 0.0f,
+    
+    // G92 coordinate offset - initialized to zero
+    .g92_offset_x = 0.0f, .g92_offset_y = 0.0f, .g92_offset_z = 0.0f,
+    
+    // Tool length offset - initialized to zero
+    .tool_length_offset = 0.0f,
+    
     // Arc configuration
     .mm_per_arc_segment = 0.1f,    // GRBL default: 0.1mm per arc segment
     
@@ -83,12 +101,12 @@ static const GRBL_Settings default_settings = {
 };
 
 /* Calculate CRC32 checksum for settings validation */
-uint32_t SETTINGS_CalculateCRC32(const GRBL_Settings* settings)
+uint32_t SETTINGS_CalculateCRC32(const CNC_Settings* settings)
 {
     // Simple CRC32 implementation
     uint32_t crc = 0xFFFFFFFF;
     const uint8_t* data = (const uint8_t*)settings;
-    size_t length = sizeof(GRBL_Settings) - sizeof(uint32_t); // Exclude checksum field
+    size_t length = sizeof(CNC_Settings) - sizeof(uint32_t); // Exclude checksum field
     
     for (size_t i = 0; i < length; i++) {
         crc ^= data[i];
@@ -112,7 +130,7 @@ void SETTINGS_Initialize(void)
 }
 
 /* Load settings from NVM flash */
-bool SETTINGS_LoadFromFlash(GRBL_Settings* settings)
+bool SETTINGS_LoadFromFlash(CNC_Settings* settings)
 {
     if (!settings) return false;
     
@@ -120,8 +138,8 @@ bool SETTINGS_LoadFromFlash(GRBL_Settings* settings)
     NVM_Read(writeData, sizeof(writeData), SETTINGS_READ_ADDRESS);
     
     // ✅ CRITICAL: Validate BEFORE copying to settings (don't corrupt defaults!)
-    GRBL_Settings temp_settings;
-    memcpy(&temp_settings, writeData, sizeof(GRBL_Settings));
+    CNC_Settings temp_settings;
+    memcpy(&temp_settings, writeData, sizeof(CNC_Settings));
     
     // Validate signature first
     if (temp_settings.signature != SETTINGS_SIGNATURE) {
@@ -135,23 +153,23 @@ bool SETTINGS_LoadFromFlash(GRBL_Settings* settings)
     }
     
     // ✅ Only copy if validation passed
-    memcpy(settings, &temp_settings, sizeof(GRBL_Settings));
+    memcpy(settings, &temp_settings, sizeof(CNC_Settings));
     
     return true;
 }
 
 /* Save settings to NVM flash */
-bool SETTINGS_SaveToFlash(const GRBL_Settings* settings)
+bool SETTINGS_SaveToFlash(const CNC_Settings* settings)
 {
     if (!settings) return false;
     
     // ✅ CRITICAL: Calculate checksum first
-    GRBL_Settings temp_settings;
-    memcpy(&temp_settings, settings, sizeof(GRBL_Settings));
+    CNC_Settings temp_settings;
+    memcpy(&temp_settings, settings, sizeof(CNC_Settings));
     temp_settings.checksum = SETTINGS_CalculateCRC32(&temp_settings);
     
     // ✅ CRITICAL: Populate cache-aligned buffer (Harmony pattern)
-    memcpy(writeData, &temp_settings, sizeof(GRBL_Settings));
+    memcpy(writeData, &temp_settings, sizeof(CNC_Settings));
     
     // ✅ Harmony pattern variables
     uint32_t address = SETTINGS_NVM_ADDRESS;
@@ -180,7 +198,7 @@ bool SETTINGS_SaveToFlash(const GRBL_Settings* settings)
     }
     
     // ✅ Write data row-by-row (Harmony pattern)
-    for (i = 0; i < sizeof(GRBL_Settings); i+= NVM_FLASH_ROWSIZE)
+    for (i = 0; i < sizeof(CNC_Settings); i+= NVM_FLASH_ROWSIZE)
     {
         // Program a row of data
         NVM_RowWrite((uint32_t *)writePtr, address);
@@ -203,16 +221,16 @@ bool SETTINGS_SaveToFlash(const GRBL_Settings* settings)
 }
 
 /* Restore default settings */
-void SETTINGS_RestoreDefaults(GRBL_Settings* settings)
+void SETTINGS_RestoreDefaults(CNC_Settings* settings)
 {
     if (!settings) return;
     
-    memcpy(settings, &default_settings, sizeof(GRBL_Settings));
+    memcpy(settings, &default_settings, sizeof(CNC_Settings));
     settings->checksum = SETTINGS_CalculateCRC32(settings);
 }
 
 /* Set a settings value by parameter number */
-bool SETTINGS_SetValue(GRBL_Settings* settings, uint32_t parameter, float value)
+bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
 {
     if (!settings) return false;
     
@@ -224,6 +242,9 @@ bool SETTINGS_SetValue(GRBL_Settings* settings, uint32_t parameter, float value)
         case 3: settings->step_direction_invert = (uint8_t)value; break;
         case 4: settings->step_enable_invert = (uint8_t)value; break;
         case 5: settings->limit_pins_invert = (uint8_t)value; break;
+        
+        // Junction deviation
+        case 11: settings->junction_deviation = value; break;
         
         // Arc configuration
         case 12: settings->mm_per_arc_segment = value; break;
@@ -271,7 +292,7 @@ bool SETTINGS_SetValue(GRBL_Settings* settings, uint32_t parameter, float value)
 }
 
 /* Get a settings value by parameter number */
-float SETTINGS_GetValue(const GRBL_Settings* settings, uint32_t parameter)
+float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
 {
     if (!settings) return 0.0f;
     
@@ -283,6 +304,7 @@ float SETTINGS_GetValue(const GRBL_Settings* settings, uint32_t parameter)
         case 4: return (float)settings->step_enable_invert;
         case 5: return (float)settings->limit_pins_invert;
         
+        case 11: return settings->junction_deviation;
         case 12: return settings->mm_per_arc_segment;
         
         case 100: return settings->steps_per_mm_x;
@@ -320,121 +342,185 @@ float SETTINGS_GetValue(const GRBL_Settings* settings, uint32_t parameter)
 }
 
 /* Print all settings (GRBL $$ command) */
-void SETTINGS_PrintAll(const GRBL_Settings* settings)
+void SETTINGS_PrintAll(const CNC_Settings* settings)
 {
     if (!settings) return;
     
-    char buffer[128];
+    // ✅ Buffer entire settings response for reliable transmission
+    // Non-blocking UART_Printf() drops messages when TX buffer full
+    static char settings_buffer[2048];  // Large enough for all 29 settings + formatting
+    int len = 0;
     
     // Format: $<param>=<value> (lowercase 'ok' per GRBL protocol)
-    // ✅ Use %u for uint32_t on XC32 compiler
-    sprintf(buffer, "$0=%u\r\n", (unsigned int)settings->step_pulse_time);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$1=%u\r\n", (unsigned int)settings->step_idle_delay);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$2=%u\r\n", settings->step_pulse_invert);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$3=%u\r\n", settings->step_direction_invert);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$4=%u\r\n", settings->step_enable_invert);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$5=%u\r\n", settings->limit_pins_invert);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$12=%.3f\r\n", settings->mm_per_arc_segment);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$100=%.3f\r\n", settings->steps_per_mm_x);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$101=%.3f\r\n", settings->steps_per_mm_y);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$102=%.3f\r\n", settings->steps_per_mm_z);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$103=%.3f\r\n", settings->steps_per_mm_a);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$110=%.3f\r\n", settings->max_rate_x);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$111=%.3f\r\n", settings->max_rate_y);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$112=%.3f\r\n", settings->max_rate_z);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$113=%.3f\r\n", settings->max_rate_a);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$120=%.3f\r\n", settings->acceleration_x);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$121=%.3f\r\n", settings->acceleration_y);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$122=%.3f\r\n", settings->acceleration_z);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$123=%.3f\r\n", settings->acceleration_a);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$130=%.3f\r\n", settings->max_travel_x);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$131=%.3f\r\n", settings->max_travel_y);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$132=%.3f\r\n", settings->max_travel_z);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$30=%.3f\r\n", settings->spindle_max_rpm);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$31=%.3f\r\n", settings->spindle_min_rpm);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$22=%u\r\n", settings->homing_enable);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$23=%u\r\n", settings->homing_dir_mask);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$24=%.3f\r\n", settings->homing_feed_rate);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$25=%.3f\r\n", settings->homing_seek_rate);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
-    
-    sprintf(buffer, "$26=%u\r\n", (unsigned int)settings->homing_debounce);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
+    len += sprintf(&settings_buffer[len], "$0=%u\r\n", (unsigned int)settings->step_pulse_time);
+    len += sprintf(&settings_buffer[len], "$1=%u\r\n", (unsigned int)settings->step_idle_delay);
+    len += sprintf(&settings_buffer[len], "$2=%u\r\n", settings->step_pulse_invert);
+    len += sprintf(&settings_buffer[len], "$3=%u\r\n", settings->step_direction_invert);
+    len += sprintf(&settings_buffer[len], "$4=%u\r\n", settings->step_enable_invert);
+    len += sprintf(&settings_buffer[len], "$5=%u\r\n", settings->limit_pins_invert);
+    len += sprintf(&settings_buffer[len], "$11=%.3f\r\n", settings->junction_deviation);
+    len += sprintf(&settings_buffer[len], "$12=%.3f\r\n", settings->mm_per_arc_segment);
 
-    sprintf(buffer, "$27=%.3f\r\n", settings->homing_pull_off);
-    UART3_Write((uint8_t*)buffer, strlen(buffer));
+        
+    len += sprintf(&settings_buffer[len], "$22=%u\r\n", settings->homing_enable);
+    len += sprintf(&settings_buffer[len], "$23=%u\r\n", settings->homing_dir_mask);
+    len += sprintf(&settings_buffer[len], "$24=%.3f\r\n", settings->homing_feed_rate);
+    len += sprintf(&settings_buffer[len], "$25=%.3f\r\n", settings->homing_seek_rate);
+    len += sprintf(&settings_buffer[len], "$26=%u\r\n", (unsigned int)settings->homing_debounce);
+    len += sprintf(&settings_buffer[len], "$27=%.3f\r\n", settings->homing_pull_off);
 
-    // ✅ GRBL protocol uses lowercase "ok"
-    UART3_Write((uint8_t*)"ok\r\n", 4);
+    len += sprintf(&settings_buffer[len], "$30=%.3f\r\n", settings->spindle_max_rpm);
+    len += sprintf(&settings_buffer[len], "$31=%.3f\r\n", settings->spindle_min_rpm);
+    
+    len += sprintf(&settings_buffer[len], "$100=%.3f\r\n", settings->steps_per_mm_x);
+    len += sprintf(&settings_buffer[len], "$101=%.3f\r\n", settings->steps_per_mm_y);
+    len += sprintf(&settings_buffer[len], "$102=%.3f\r\n", settings->steps_per_mm_z);
+    len += sprintf(&settings_buffer[len], "$103=%.3f\r\n", settings->steps_per_mm_a);
+    
+    len += sprintf(&settings_buffer[len], "$110=%.3f\r\n", settings->max_rate_x);
+    len += sprintf(&settings_buffer[len], "$111=%.3f\r\n", settings->max_rate_y);
+    len += sprintf(&settings_buffer[len], "$112=%.3f\r\n", settings->max_rate_z);
+    len += sprintf(&settings_buffer[len], "$113=%.3f\r\n", settings->max_rate_a);
+    
+    len += sprintf(&settings_buffer[len], "$120=%.3f\r\n", settings->acceleration_x);
+    len += sprintf(&settings_buffer[len], "$121=%.3f\r\n", settings->acceleration_y);
+    len += sprintf(&settings_buffer[len], "$122=%.3f\r\n", settings->acceleration_z);
+    len += sprintf(&settings_buffer[len], "$123=%.3f\r\n", settings->acceleration_a);
+    
+    len += sprintf(&settings_buffer[len], "$130=%.3f\r\n", settings->max_travel_x);
+    len += sprintf(&settings_buffer[len], "$131=%.3f\r\n", settings->max_travel_y);
+    len += sprintf(&settings_buffer[len], "$132=%.3f\r\n", settings->max_travel_z);
+    
+
+
+
+    // ✅ GRBL protocol: blank line + ok
+    len += sprintf(&settings_buffer[len], "\r\nok\r\n");
+    
+    // ✅ Write to PLIB TX ring buffer (1024 bytes)
+    // Non-blocking - ISR handles transmission in background
+    UART3_Write((uint8_t*)settings_buffer, len);
 }
 
 /* Print build info (GRBL $I command) */
 void SETTINGS_PrintBuildInfo(void)
 {
-    const char* build_info = 
-        "[VER:1.1h.20251102 PIC32MZ CNC Controller]\r\n"
-        "[OPT:VHM,35,1024,4]\r\n"  // V=variable spindle, H=homing, M=mist, 35=buffer size, 1024=rx buffer, 4=axis count
-        "ok\r\n";
-
-    UART3_Write((uint8_t*)build_info, strlen(build_info));
+    // ✅ GRBL v1.1 format - UGS expects specific format!
+    // Format: [VER:version] [OPT:options,blockbuffersize,rxbuffersize]
+    const char build_info[] = "[VER:1.1h.20251102]\r\n[OPT:VHM,35,1024,4]\r\nok\r\n";
+    
+    // ✅ Write to PLIB TX ring buffer - ISR transmits in background
+    UART3_Write((uint8_t*)build_info, sizeof(build_info) - 1);  // -1 excludes null terminator
 }
 
 /* Get pointer to current settings */
-GRBL_Settings* SETTINGS_GetCurrent(void)
+CNC_Settings* SETTINGS_GetCurrent(void)
 {
     return &current_settings;
+}
+
+/* Get work coordinate system offset (G54=0, G55=1, ..., G59=5) */
+bool SETTINGS_GetWorkCoordinateSystem(uint8_t wcs_number, float* x, float* y, float* z) {
+    if (wcs_number > 5 || !x || !y || !z) return false;  // G54-G59 only
+    
+    switch (wcs_number) {
+        case 0:  // G54
+            *x = current_settings.wcs_g54_x;
+            *y = current_settings.wcs_g54_y;
+            *z = current_settings.wcs_g54_z;
+            break;
+        case 1:  // G55
+            *x = current_settings.wcs_g55_x;
+            *y = current_settings.wcs_g55_y;
+            *z = current_settings.wcs_g55_z;
+            break;
+        case 2:  // G56
+            *x = current_settings.wcs_g56_x;
+            *y = current_settings.wcs_g56_y;
+            *z = current_settings.wcs_g56_z;
+            break;
+        case 3:  // G57
+            *x = current_settings.wcs_g57_x;
+            *y = current_settings.wcs_g57_y;
+            *z = current_settings.wcs_g57_z;
+            break;
+        case 4:  // G58
+            *x = current_settings.wcs_g58_x;
+            *y = current_settings.wcs_g58_y;
+            *z = current_settings.wcs_g58_z;
+            break;
+        case 5:  // G59
+            *x = current_settings.wcs_g59_x;
+            *y = current_settings.wcs_g59_y;
+            *z = current_settings.wcs_g59_z;
+            break;
+    }
+    return true;
+}
+
+/* Set work coordinate system offset and save to flash */
+bool SETTINGS_SetWorkCoordinateSystem(uint8_t wcs_number, float x, float y, float z) {
+    if (wcs_number > 5) return false;  // G54-G59 only
+    
+    switch (wcs_number) {
+        case 0:  // G54
+            current_settings.wcs_g54_x = x;
+            current_settings.wcs_g54_y = y;
+            current_settings.wcs_g54_z = z;
+            break;
+        case 1:  // G55
+            current_settings.wcs_g55_x = x;
+            current_settings.wcs_g55_y = y;
+            current_settings.wcs_g55_z = z;
+            break;
+        case 2:  // G56
+            current_settings.wcs_g56_x = x;
+            current_settings.wcs_g56_y = y;
+            current_settings.wcs_g56_z = z;
+            break;
+        case 3:  // G57
+            current_settings.wcs_g57_x = x;
+            current_settings.wcs_g57_y = y;
+            current_settings.wcs_g57_z = z;
+            break;
+        case 4:  // G58
+            current_settings.wcs_g58_x = x;
+            current_settings.wcs_g58_y = y;
+            current_settings.wcs_g58_z = z;
+            break;
+        case 5:  // G59
+            current_settings.wcs_g59_x = x;
+            current_settings.wcs_g59_y = y;
+            current_settings.wcs_g59_z = z;
+            break;
+    }
+    
+    // Save to flash immediately
+    return SETTINGS_SaveToFlash(&current_settings);
+}
+
+/* Get G92 coordinate offset */
+void SETTINGS_GetG92Offset(float* x, float* y, float* z) {
+    if (x) *x = current_settings.g92_offset_x;
+    if (y) *y = current_settings.g92_offset_y;
+    if (z) *z = current_settings.g92_offset_z;
+}
+
+/* Set G92 coordinate offset */
+void SETTINGS_SetG92Offset(float x, float y, float z) {
+    current_settings.g92_offset_x = x;
+    current_settings.g92_offset_y = y;
+    current_settings.g92_offset_z = z;
+    // Note: G92 is typically not saved to flash (temporary offset)
+}
+
+/* Get tool length offset */
+float SETTINGS_GetToolLengthOffset(void) {
+    return current_settings.tool_length_offset;
+}
+
+/* Set tool length offset and save to flash */
+void SETTINGS_SetToolLengthOffset(float offset) {
+    current_settings.tool_length_offset = offset;
+    SETTINGS_SaveToFlash(&current_settings);  // Save TLO to flash
 }

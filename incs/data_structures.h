@@ -16,7 +16,7 @@ typedef struct {
 // Motion Queue Structures
 // ============================================================================
 
-#define MAX_MOTION_SEGMENTS 16  // Lookahead buffer size
+#define MAX_MOTION_SEGMENTS 16  // Lookahead buffer size (64 causes crash even with 128KB stack - needs investigation)
 
 // ✅ Number of axes (must match E_AXIS enum in data_structures.h)
 #define AXIS_COUNT 4
@@ -60,6 +60,10 @@ typedef struct {
     int32_t delta_x, delta_y, delta_z, delta_a;
     int32_t error_y, error_z, error_a;
     
+    // Dominant axis (pre-calculated during motion planning)
+    E_AXIS dominant_axis;        // Axis with largest delta (drives step timing)
+    int32_t dominant_delta;      // Largest absolute delta value
+    
     // Motion parameters
     uint32_t steps_remaining;
     uint32_t steps_completed;
@@ -85,9 +89,6 @@ typedef struct {
     float max_velocity;          // Maximum velocity for this segment (mm/sec)
     float end_velocity;          // Ending velocity for this segment (mm/sec)
     float acceleration;          // Acceleration/deceleration rate (mm/sec²)
-    
-    // Axis management
-    E_AXIS dominant_axis;        // Which axis drives the timing
 } MotionSegment;
 
 // ============================================================================
@@ -157,6 +158,7 @@ typedef struct {
     uint32_t modalSpindleRPM; // Last S value
     uint32_t modalToolNumber; // Last T value
     bool absoluteMode;        // G90/G91 state
+    uint8_t activeWCS;        // Active work coordinate system (0=G54, 1=G55, ..., 5=G59)
     uint8_t modalPlane;       // G17=0 (XY), G18=1 (XZ), G19=2 (YZ)
     
     // Alarm state (GRBL safety)
@@ -179,10 +181,14 @@ typedef struct {
     // ✅ Arc generation state (non-blocking incremental streaming)
     ArcGenState arcGenState;
     float arcTheta;                    // Current angle (radians)
+    float arcThetaStart;               // Initial start angle (radians, fixed)
     float arcThetaEnd;                 // Target angle (radians)
     float arcThetaIncrement;           // Angle step per segment (radians)
+    uint32_t arcSegmentCurrent;        // Current segment number (0-based)
+    uint32_t arcSegmentTotal;          // Total number of segments
     CoordinatePoint arcCenter;         // Arc center point (absolute)
     CoordinatePoint arcCurrent;        // Current position on arc
+    CoordinatePoint arcStartPoint;     // Initial arc start point (for Z/A interpolation)
     float arcRadius;                   // Arc radius (mm)
     bool arcClockwise;                 // G2=true, G3=false
     uint8_t arcPlane;                  // G17=0 (XY), G18=1 (XZ), G19=2 (YZ)

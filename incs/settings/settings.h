@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// GRBL v1.1 Settings (subset for CNC controller)
+// CNC Controller Settings Structure
 typedef struct {
     // Signature for validation
     uint32_t signature;  // 0x47524231 = "GRB1"
@@ -55,11 +55,23 @@ typedef struct {
     uint32_t homing_debounce;      // $26 - Homing switch debounce (ms)
     float homing_pull_off;         // $27 - Homing switch pull-off distance (mm)
     
-
+    // Junction deviation for smooth cornering
+    float junction_deviation;      // $11 - Junction deviation (mm)
+    
+    // Work coordinate systems (G54-G59, G92 offset, Tool length offset)
+    // GRBL v1.1 standard: 6 work coordinate systems + G92 offset + TLO
+    float wcs_g54_x, wcs_g54_y, wcs_g54_z;  // G54 work coordinate system
+    float wcs_g55_x, wcs_g55_y, wcs_g55_z;  // G55 work coordinate system  
+    float wcs_g56_x, wcs_g56_y, wcs_g56_z;  // G56 work coordinate system
+    float wcs_g57_x, wcs_g57_y, wcs_g57_z;  // G57 work coordinate system
+    float wcs_g58_x, wcs_g58_y, wcs_g58_z;  // G58 work coordinate system
+    float wcs_g59_x, wcs_g59_y, wcs_g59_z;  // G59 work coordinate system
+    float g92_offset_x, g92_offset_y, g92_offset_z;  // G92 coordinate offset
+    float tool_length_offset;                        // Tool length offset (TLO)
     
     // CRC32 checksum (for validation)
     uint32_t checksum;
-} GRBL_Settings;
+} CNC_Settings;
 
 // Default settings
 #define SETTINGS_SIGNATURE 0x47524231  // "GRB1"
@@ -83,14 +95,22 @@ typedef struct {
 
 // Function prototypes
 void SETTINGS_Initialize(void);
-bool SETTINGS_LoadFromFlash(GRBL_Settings* settings);
-bool SETTINGS_SaveToFlash(const GRBL_Settings* settings);
-void SETTINGS_RestoreDefaults(GRBL_Settings* settings);
-bool SETTINGS_SetValue(GRBL_Settings* settings, uint32_t parameter, float value);
-float SETTINGS_GetValue(const GRBL_Settings* settings, uint32_t parameter);
-void SETTINGS_PrintAll(const GRBL_Settings* settings);
+bool SETTINGS_LoadFromFlash(CNC_Settings* settings);
+bool SETTINGS_SaveToFlash(const CNC_Settings* settings);
+void SETTINGS_RestoreDefaults(CNC_Settings* settings);
+bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value);
+float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter);
+void SETTINGS_PrintAll(const CNC_Settings* settings);
 void SETTINGS_PrintBuildInfo(void);
-uint32_t SETTINGS_CalculateCRC32(const GRBL_Settings* settings);
-GRBL_Settings* SETTINGS_GetCurrent(void);
+uint32_t SETTINGS_CalculateCRC32(const CNC_Settings* settings);
+CNC_Settings* SETTINGS_GetCurrent(void);
+
+// Work coordinate system functions
+bool SETTINGS_GetWorkCoordinateSystem(uint8_t wcs_number, float* x, float* y, float* z);  // Get WCS (0=G54, 1=G55, etc.)
+bool SETTINGS_SetWorkCoordinateSystem(uint8_t wcs_number, float x, float y, float z);     // Set WCS and save to flash
+void SETTINGS_GetG92Offset(float* x, float* y, float* z);                                // Get G92 offset
+void SETTINGS_SetG92Offset(float x, float y, float z);                                   // Set G92 offset
+float SETTINGS_GetToolLengthOffset(void);                                                // Get TLO
+void SETTINGS_SetToolLengthOffset(float offset);                                         // Set TLO
 
 #endif // SETTINGS_H

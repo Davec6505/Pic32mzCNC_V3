@@ -2,25 +2,48 @@
 #include "common.h"
 #include "settings.h"
 #include "motion_utils.h"
+#include "utils/utils.h"  // For AxisConfig and AXIS_xxx inline helpers
 #include "definitions.h"
 #include "../config/default/peripheral/tmr/plib_tmr4.h"  // TMR4 access (16-bit)
-#include "../config/default/peripheral/ocmp/plib_ocmp1.h"  // OC1 master timer
+#include "../config/default/peripheral/tmr/plib_tmr5.h"  // TMR5 pulse width timer
+#include "../config/default/peripheral/ocmp/plib_ocmp1.h"  // OC1 virtual axis timer
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>  // abs()
 
 // ============================================================================
-// ARCHITECTURE: Single OC1 Master Timer + GPIO Step Pulses (GRBL Pattern)
+// ARCHITECTURE: Single OC1 Master Timer + GPIO Step Pulses + TMR5 Pulse Width
 // ============================================================================
 // - OC1 generates periodic interrupts at step rate (continuous pulse mode)
 // - TMR4 (16-bit) provides time base, PR4 controls step rate
 // - ISR runs Bresenham + sets GPIO pins HIGH for axes needing steps
-// - GPIO pins cleared after pulse width delay (~5µs)
-// - No multi-axis OC coordination - simple and reliable!
+// - TMR5 one-shot clears GPIO pins after pulse width (~3µs)
+// - Priority: OC1=5, TMR5=4 sub=1 (TMR5 slightly lower to avoid nesting)
+// - No blocking delays in ISR - hardware-driven pulse timing!
+//
+// ============================================================================
+// MCC RECONFIGURATION NOTES (if changing OC module or GPIO pins):
+// ============================================================================
+// 1. OC Module (currently OC1):
+//    - Change #include above: plib_ocmp1.h → plib_ocmp2.h, etc.
+//    - Update all OCMP1_xxx calls → OCMP2_xxx throughout this file
+//    - Update OC1R/OC1RS register names → OC2R/OC2RS
+//    - Update callback registration in STEPPER_Initialize()
+//    - Update ISR function name: OCP1_ISR → OCP2_ISR
+//
+// 2. GPIO Pins (Step/Dir/Enable per axis):
+//    - Edit srcs/utils/utils.c in UTILS_InitAxisConfig() function
+//    - Update wrapper function assignments for each axis
+//    - GPIO abstraction handles all pin access via AXIS_xxx() inline helpers
+//
+// 3. PPS (Peripheral Pin Select):
+//    - Reconfigure in MCC to route OC module output to desired pin
+//    - Example: RPD5R = 12 routes OC1 to RD5 (see plib_gpio.c)
 // ============================================================================
 
-// Forward declaration of OC1 ISR
+// Forward declarations
 void OCP1_ISR(uintptr_t context);
+void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context);
 
 // ============================================================================
 // Static Data - Motion Control State
@@ -43,10 +66,12 @@ static StepperPosition stepper_pos = {
 static volatile uint8_t direction_bits = 0x0F;  // Default all forward
 
 // Bresenham error accumulators (persist across ISR calls)
+static volatile int32_t error_x = 0;  // Added for array indexing
 static volatile int32_t error_y = 0;
 static volatile int32_t error_z = 0;
 static volatile int32_t error_a = 0;
 static volatile int32_t dominant_delta = 0;
+static volatile E_AXIS dominant_axis = AXIS_X;  // Pre-calculated dominant axis
 
 // Segment deltas (loaded when new segment starts)
 static volatile int32_t delta_x = 0;
@@ -54,37 +79,38 @@ static volatile int32_t delta_y = 0;
 static volatile int32_t delta_z = 0;
 static volatile int32_t delta_a = 0;
 
-// Pulse width configuration (from settings)
-static uint32_t pulse_width_cycles = 1000;  // Default ~5µs @ 200MHz CPU
+// ✅ Pre-built arrays for ISR iteration (ZERO stack overhead - static storage)
+// These replace local array creation on every ISR call (was 32 bytes/call)
+static volatile int32_t* const error_ptrs[NUM_AXIS] = {&error_x, &error_y, &error_z, &error_a};
+static volatile int32_t* const delta_ptrs[NUM_AXIS] = {&delta_x, &delta_y, &delta_z, &delta_a};
 
 // Settings cache for ISR performance
 static uint8_t step_pulse_invert_mask = 0;
 static uint8_t direction_invert_mask = 0;
 static uint8_t enable_invert = 0;
 
+static bool steppers_enabled = false;
+
 void STEPPER_Initialize(APP_DATA* appData) {
     // Store reference for ISR access
     app_data_ref = appData;
     
     // Load settings from flash
-    GRBL_Settings* settings = SETTINGS_GetCurrent();
+    CNC_Settings* settings = SETTINGS_GetCurrent();
     
     // Cache frequently used settings for ISR performance
     step_pulse_invert_mask = settings->step_pulse_invert;
     direction_invert_mask = settings->step_direction_invert;
     enable_invert = settings->step_enable_invert;
     
-    // Calculate pulse width in CPU cycles for delay loop
-    // settings->step_pulse_time is in microseconds
-    // At 200MHz CPU: 1µs = 200 cycles, but loop overhead ~5 cycles per iteration
-    pulse_width_cycles = (uint32_t)(settings->step_pulse_time * 200.0f / 5.0f);
-    if (pulse_width_cycles < 100) pulse_width_cycles = 100;  // Minimum 2.5µs
-    
     // Update steps_per_mm from settings
     stepper_pos.steps_per_mm_x = settings->steps_per_mm_x;
     stepper_pos.steps_per_mm_y = settings->steps_per_mm_y;
     stepper_pos.steps_per_mm_z = settings->steps_per_mm_z;
     stepper_pos.steps_per_deg_a = settings->steps_per_mm_a;
+    
+    // Register TMR5 callback for step pulse width (clears GPIO after 3µs)
+    TMR5_CallbackRegister(TMR5_PulseWidthCallback, (uintptr_t)NULL);
     
     // Register OC1 callback (master timer)
     OCMP1_CallbackRegister(OCP1_ISR, (uintptr_t)NULL);
@@ -98,6 +124,19 @@ void STEPPER_Initialize(APP_DATA* appData) {
     
     // Enable all stepper drivers
     MOTION_UTILS_EnableAllAxes(true, enable_invert);
+    
+    steppers_enabled = true;
+    
+    // ✅ DEBUG: Verify enable pins are set correctly after enabling
+    DEBUG_PRINT_STEPPER("[STEPPER_Init] Enable invert mask: 0x%02X\r\n", enable_invert);
+    DEBUG_EXEC_STEPPER(
+        int enx_state = EnX_Get();
+        int eny_state = EnY_Get();
+        int enz_state = EnZ_Get();
+        int ena_state = EnA_Get();
+    );
+    DEBUG_PRINT_STEPPER("[STEPPER_Init] EnX=%d EnY=%d EnZ=%d EnA=%d (0=low/enabled for active-low)\r\n",
+        enx_state, eny_state, enz_state, ena_state);
 }
 
 // ============================================================================
@@ -106,18 +145,32 @@ void STEPPER_Initialize(APP_DATA* appData) {
 
 void STEPPER_LoadSegment(MotionSegment* segment) {
     if (segment == NULL) return;
-    
+ 
+    // Handles soft reset (ox18), emergency stop, or other disabling instructions.
+    if(!steppers_enabled){
+        STEPPER_EnableAll();
+    }
+
+    // ✅ CRITICAL: Ensure OC1 is enabled for motion after soft reset or complete stop
+    // TMR4_Stop() might have disabled OC1 interrupt generation
+    // Check OC1CON ON bit before enabling to avoid unnecessary register writes
+    if(!(OC1CON & _OC1CON_ON_MASK)) {
+        OCMP1_Enable();
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] OC1 enabled for motion\r\n");
+    } else {
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] OC1 already enabled\r\n");
+    }
+
     // Load deltas for Bresenham
     delta_x = segment->delta_x;
     delta_y = segment->delta_y;
     delta_z = segment->delta_z;
     delta_a = segment->delta_a;
     
-    // Calculate dominant delta (largest absolute value)
-    dominant_delta = abs(delta_x);
-    if (abs(delta_y) > dominant_delta) dominant_delta = abs(delta_y);
-    if (abs(delta_z) > dominant_delta) dominant_delta = abs(delta_z);
-    if (abs(delta_a) > dominant_delta) dominant_delta = abs(delta_a);
+    // Use pre-calculated dominant axis and delta from motion planning
+    // (Calculated once in KINEMATICS_LinearMove, not recalculated here)
+    dominant_axis = segment->dominant_axis;
+    dominant_delta = segment->dominant_delta;
     
     // Initialize Bresenham errors
     error_y = dominant_delta / 2;
@@ -131,30 +184,49 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     if (delta_z >= 0) direction_bits |= (1 << AXIS_Z);
     if (delta_a >= 0) direction_bits |= (1 << AXIS_A);
     
-    // Update GPIO direction pins
-    MOTION_UTILS_SetDirection(AXIS_X, (delta_x >= 0), direction_invert_mask);
-    MOTION_UTILS_SetDirection(AXIS_Y, (delta_y >= 0), direction_invert_mask);
-    MOTION_UTILS_SetDirection(AXIS_Z, (delta_z >= 0), direction_invert_mask);
-    MOTION_UTILS_SetDirection(AXIS_A, (delta_a >= 0), direction_invert_mask);
+    // Update GPIO direction pins using array-based approach
+    int32_t deltas[NUM_AXIS] = {delta_x, delta_y, delta_z, delta_a};
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        MOTION_UTILS_SetDirection(axis, (deltas[axis] >= 0), direction_invert_mask);
+    }
     
     // Set initial step rate (PR4 controls OC1 period in 16-bit mode)
     uint16_t period = (uint16_t)segment->initial_rate;  // Ensure 16-bit value
     if (period > 65535) period = 65535;  // Clamp to 16-bit max
+    
+    // ✅ CRITICAL: Ensure period is large enough for pulse width requirements
+    // Need minimum 7 ticks: 5 for rising edge offset + 2 for pulse width
+    const uint16_t MIN_PERIOD_FOR_PULSE = 7;
+    if (period < MIN_PERIOD_FOR_PULSE) period = MIN_PERIOD_FOR_PULSE;
+    
     TMR4_PeriodSet(period);
     
+    // ✅ DEBUG: Print segment loading details
+    // Timer frequency from MCC configuration: TMR4_FrequencyGet() returns actual Hz
+    DEBUG_PRINT_STEPPER("[STEPPER_Load] TMR4_Freq=%luHz, initial_rate=%lu, period=%u (%.1fµs), steps=%ld\r\n",
+        TMR4_FrequencyGet(), segment->initial_rate, period, 
+        (float)period * 1000000.0f / TMR4_FrequencyGet(), segment->steps_remaining);
+    
     // ✅ CRITICAL: Initialize OC1 compare registers for continuous pulse mode
-    // OCxR = Rising edge (near end of period)
+    // OCxR = Rising edge (pulse starts)
     // OCxRS = Falling edge (generates ISR on falling edge)
-    // MUST satisfy: OCxRS < PR4 (or compare never happens before TMR4 rollover!)
-    OCMP1_CompareValueSet(period - 80);              // OC1R: Rising edge
-    OCMP1_CompareSecondaryValueSet(period - 40);     // OC1RS: Falling edge (ISR trigger)
+    // MUST satisfy: PR4 ≥ OCxRS > OCxR (per datasheet Table 16-3)
+    // Pulse width: 2.5µs = 2 ticks @ 781.25kHz (1:64 prescaler)
+    // Period is guaranteed ≥ 7 ticks, so these values are always valid
+    
+    OCMP1_CompareValueSet(period - 5);                             // OCxR: Rising edge (pulse starts)
+    OCMP1_CompareSecondaryValueSet(period - 3);                   // OCxRS: Falling edge (ISR trigger)
     
     // ✅ START TMR4 to begin motion (only if not already running)
     // Check T4CON ON bit - if TMR4 already running from previous segment, don't restart!
     // TMR4 will keep running across multiple segments for smooth motion
     // It only stops when ALL motion is complete (queue empty in MOTION_Tasks)
+    // This also handles the case where TMR4 was stopped by soft reset or emergency stop
     if(!(T4CON & _T4CON_ON_MASK)) {
         TMR4_Start();
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] TMR4 started for motion\r\n");
+    } else {
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] TMR4 already running\r\n");
     }
 }
 
@@ -164,7 +236,7 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
 
 void STEPPER_SetStepRate(uint32_t rate_ticks) {
     // Enforce minimum rate to prevent TMR4 issues (16-bit mode)
-    const uint16_t MIN_RATE = 500;  // ~40µs minimum @ 12.5MHz
+    const uint16_t MIN_RATE = 7;  // Minimum for pulse width requirements (5 + 2 ticks)
     uint16_t period = (uint16_t)rate_ticks;
     if (period < MIN_RATE) period = MIN_RATE;
     if (period > 65535) period = 65535;  // Clamp to 16-bit max
@@ -175,23 +247,46 @@ void STEPPER_SetStepRate(uint32_t rate_ticks) {
     // ✅ CRITICAL: Update OC1R/OC1RS to maintain valid compare relationship
     // OCxR near end of period, OCxRS = OCxR + pulse_width
     // This ensures OCxRS < PR4 so compare fires before TMR4 rollover
-    OCMP1_CompareValueSet(period - 80);              // OC1R: Rising edge
-    OCMP1_CompareSecondaryValueSet(period - 40);     // OC1RS: Falling edge
+    // Pulse width: 2.5µs = 2 ticks @ 781.25kHz (1:64 prescaler)
+    // Period is guaranteed ≥ 7 ticks, so these values are always valid
+    
+    OCMP1_CompareValueSet(period - 5);                             // OCxR: Rising edge
+    OCMP1_CompareSecondaryValueSet(period - 3);                   // OCxRS: falling edge
 }
 
-void STEPPER_DisableAll(void) {
-    // Emergency stop - disable OC1 and stepper drivers
-    OCMP1_Disable();
-    TMR4_Stop();
-
-    // Disable stepper drivers (cut power)
-    GRBL_Settings* settings = SETTINGS_GetCurrent();
-    MOTION_UTILS_EnableAllAxes(false, settings->step_enable_invert);
-}
-
-StepperPosition* STEPPER_GetPosition(void)
+bool STEPPER_IsEnabled(void)
 {
-    return &stepper_pos;
+    return steppers_enabled;
+}
+
+void STEPPER_EnableAll(void)
+{
+    if (steppers_enabled) return;
+
+    // Re-read enable invert setting in case it changed via $4 command
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+    enable_invert = settings->step_enable_invert;
+    
+    // Use MOTION_UTILS to properly apply inversion logic
+    MOTION_UTILS_EnableAllAxes(true, enable_invert);
+    
+    steppers_enabled = true;
+    DEBUG_PRINT_STEPPER("[STEPPER] Enabled all drivers (invert=0x%02X)\r\n", enable_invert);
+}
+
+void STEPPER_DisableAll(void)
+{
+    if (!steppers_enabled) return;
+
+    // Re-read enable invert setting in case it changed
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+    enable_invert = settings->step_enable_invert;
+    
+    // Use MOTION_UTILS to properly apply inversion logic
+    MOTION_UTILS_DisableAllAxes(enable_invert);
+    
+    steppers_enabled = false;
+    DEBUG_PRINT_STEPPER("[STEPPER] Disabled all drivers (invert=0x%02X)\r\n", enable_invert);
 }
 
 // ============================================================================
@@ -219,108 +314,132 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 // ============================================================================
 
 void OCP1_ISR(uintptr_t context) {
-    // ===== DOMINANT AXIS STEP (ALWAYS) =====
-    // Determine which axis has the largest delta (dominant)
-    E_AXIS dom_axis = AXIS_X;  // Default
-    int32_t max_delta = abs(delta_x);
-    if (abs(delta_y) > max_delta) { dom_axis = AXIS_Y; max_delta = abs(delta_y); }
-    if (abs(delta_z) > max_delta) { dom_axis = AXIS_Z; max_delta = abs(delta_z); }
-    if (abs(delta_a) > max_delta) { dom_axis = AXIS_A; max_delta = abs(delta_a); }
+    // ✅ CRITICAL DEBUG: Toggle LED to confirm ISR fires
+    LED1_Toggle();
     
-    // Pulse dominant axis GPIO pin
-    switch(dom_axis) {
-        case AXIS_X:
-            LATCSET = (1 << 1);  // RC1 HIGH
-            if (direction_bits & (1 << AXIS_X)) {
-                stepper_pos.x_steps++;
-            } else {
-                stepper_pos.x_steps--;
-            }
-            break;
-        case AXIS_Y:
-            LATCSET = (1 << 2);  // RC2 HIGH
-            if (direction_bits & (1 << AXIS_Y)) {
-                stepper_pos.y_steps++;
-            } else {
-                stepper_pos.y_steps--;
-            }
-            break;
-        case AXIS_Z:
-            LATCSET = (1 << 3);  // RC3 HIGH
-            if (direction_bits & (1 << AXIS_Z)) {
-                stepper_pos.z_steps++;
-            } else {
-                stepper_pos.z_steps--;
-            }
-            break;
-        case AXIS_A:
-            LATCSET = (1 << 4);  // RC4 HIGH
-            if (direction_bits & (1 << AXIS_A)) {
-                stepper_pos.a_steps++;
-            } else {
-                stepper_pos.a_steps--;
-            }
-            break;
-        default:
-            break;
+    // ===== DOMINANT AXIS STEP (ALWAYS) =====
+    // Use pre-calculated dominant_axis (set during STEPPER_LoadSegment)
+    // Eliminates 4 abs() calls + 3 comparisons per ISR (significant overhead reduction!)
+    
+    // Atomic GPIO step pulse - single instruction, zero overhead!
+    AXIS_StepSet(dominant_axis);
+    
+    // ✅ CRITICAL DEBUG: Read back GPIO state immediately after Set
+    // This confirms if AXIS_StepSet actually toggles the pin
+    DEBUG_EXEC_STEPPER({
+        static uint32_t debug_counter = 0;
+        if (++debug_counter >= 100) {  // Print every 100th step to avoid UART flood
+            debug_counter = 0;
+            LED2_Toggle();  // Visual confirmation of debug execution
+        }
+    });
+    
+    // Update step counter based on direction (inline, zero overhead)
+    if (direction_bits & (1 << dominant_axis)) {
+        AXIS_IncrementSteps(dominant_axis);
+    } else {
+        AXIS_DecrementSteps(dominant_axis);
     }
     
     // ===== BRESENHAM FOR SUBORDINATE AXES =====
+    // Use pre-built static arrays - ZERO stack overhead (no local array creation)
     
-    // Y-axis (if not dominant)
-    if (dom_axis != AXIS_Y && delta_y != 0) {
-        error_y += abs(delta_y);
-        if (error_y >= dominant_delta) {
-            LATCSET = (1 << 2);  // RC2 HIGH
-            if (direction_bits & (1 << AXIS_Y)) {
-                stepper_pos.y_steps++;
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        // Skip dominant axis and axes with zero delta
+        if (axis == dominant_axis || *delta_ptrs[axis] == 0) continue;
+        
+        // Bresenham error accumulation
+        *error_ptrs[axis] += abs(*delta_ptrs[axis]);
+        if (*error_ptrs[axis] >= dominant_delta) {
+            // Atomic GPIO step pulse - single instruction!
+            AXIS_StepSet(axis);
+            
+            // Update step counter (inline, zero overhead)
+            if (direction_bits & (1 << axis)) {
+                AXIS_IncrementSteps(axis);
             } else {
-                stepper_pos.y_steps--;
+                AXIS_DecrementSteps(axis);
             }
-            error_y -= dominant_delta;
+            
+            *error_ptrs[axis] -= dominant_delta;
         }
     }
     
-    // Z-axis (if not dominant)
-    if (dom_axis != AXIS_Z && delta_z != 0) {
-        error_z += abs(delta_z);
-        if (error_z >= dominant_delta) {
-            LATCSET = (1 << 3);  // RC3 HIGH
-            if (direction_bits & (1 << AXIS_Z)) {
-                stepper_pos.z_steps++;
-            } else {
-                stepper_pos.z_steps--;
-            }
-            error_z -= dominant_delta;
-        }
-    }
+    // ===== START TMR5 FOR PULSE WIDTH =====
+    // TMR5 pre-configured to fire after 3µs (PR5=149, PBCLK3=50MHz, prescaler 1:1)
+    // TMR5 period is FIXED at 3µs - do NOT change it!
+    TMR5_Start();
     
-    // A-axis (if not dominant)
-    if (dom_axis != AXIS_A && delta_a != 0) {
-        error_a += abs(delta_a);
-        if (error_a >= dominant_delta) {
-            LATCSET = (1 << 4);  // RC4 HIGH
-            if (direction_bits & (1 << AXIS_A)) {
-                stepper_pos.a_steps++;
-            } else {
-                stepper_pos.a_steps--;
-            }
-            error_a -= dominant_delta;
-        }
-    }
-    
-    // ===== PULSE WIDTH DELAY =====
-    // Manual delay for ~5µs pulse width (adjust pulse_width_cycles as needed)
-    for(volatile uint32_t i = 0; i < pulse_width_cycles; i++);
-    
-    // ===== CLEAR ALL STEP PINS =====
-    LATCCLR = (1<<1) | (1<<2) | (1<<3) | (1<<4);
-    
-    // ===== SIGNAL MAIN LOOP =====
+    // ===== SCHEDULE NEXT STEP (CRITICAL!) =====
+    // TMR4 rolls over at PR4, so we use RELATIVE compare values
+    // This is what makes the motion continue - without this, only ONE step occurs!
     if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
+        uint32_t step_interval = app_data_ref->currentSegment->step_interval;  // Ticks between steps
+        
+        // ✅ CRITICAL: Ensure period is large enough for pulse width requirements
+        const uint16_t MIN_PERIOD_FOR_PULSE = 7;  // 5 for rising edge offset + 2 for pulse width
+        uint16_t period = (uint16_t)step_interval;
+        if (period < MIN_PERIOD_FOR_PULSE) period = MIN_PERIOD_FOR_PULSE;
+        
+        // ✅ CRITICAL: Set TMR4 period AND OC1 compare values for continuous pulses
+        // Per datasheet 16.3.2.5: PR4 must be ≥ OC1RS > OC1R
+        // OC1R fires first (rising edge), OC1RS fires second (falling edge + ISR)
+        // Pulse width: 2.5µs = 2 ticks @ 781.25kHz (1:64 prescaler)
+        TMR4_PeriodSet(period);                                             // Timer period (controls step rate)
+        OCMP1_CompareValueSet(period - 5);                                  // Rising edge (pulse starts)
+        OCMP1_CompareSecondaryValueSet(period - 3);                         // Falling edge (ISR trigger)
+
+        // Update step counter and signal main loop for velocity updates
         app_data_ref->currentSegment->steps_completed++;
         app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;
     }
+}
+
+// ============================================================================
+// TMR5 Callback - Clears Step Pins After 3µs Pulse Width
+// ============================================================================
+
+void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context) {
+    // ✅ DEBUG: Toggle LED2 to confirm TMR5 callback fires
+    LED2_Toggle();
+    
+    // Stop TMR5 (one-shot mode)
+    TMR5_Stop();
+    
+    // Clear all step pins using axis configuration (not hardcoded!)
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        AXIS_StepClear(axis);
+    }
+}
+
+
+StepperPosition* STEPPER_GetPosition(void)
+{
+    static StepperPosition snap;
+
+    // Defaults
+    snap.x_steps = snap.y_steps = snap.z_steps = snap.a_steps = 0;
+    snap.steps_per_mm_x = snap.steps_per_mm_y = snap.steps_per_mm_z = 1.0f;
+    snap.steps_per_deg_a = 1.0f;
+
+    // Live step counters (from axis config pointers)
+    if (g_axis_config[AXIS_X].step_count) snap.x_steps = *g_axis_config[AXIS_X].step_count;
+    if (g_axis_config[AXIS_Y].step_count) snap.y_steps = *g_axis_config[AXIS_Y].step_count;
+    if (g_axis_config[AXIS_Z].step_count) snap.z_steps = *g_axis_config[AXIS_Z].step_count;
+    if (g_axis_config[AXIS_A].step_count) snap.a_steps = *g_axis_config[AXIS_A].step_count;
+
+    // Steps/mm (used by status/MPos→mm conversion)
+    if (g_axis_config[AXIS_X].steps_per_mm) snap.steps_per_mm_x = *g_axis_config[AXIS_X].steps_per_mm;
+    if (g_axis_config[AXIS_Y].steps_per_mm) snap.steps_per_mm_y = *g_axis_config[AXIS_Y].steps_per_mm;
+    if (g_axis_config[AXIS_Z].steps_per_mm) snap.steps_per_mm_z = *g_axis_config[AXIS_Z].steps_per_mm;
+
+    return &snap;
+}
+
+// Get pointer to LIVE position counters (for g_axis_config initialization)
+StepperPosition* STEPPER_GetPositionPointer(void)
+{
+    return &stepper_pos;
 }
 
 // End of stepper.c

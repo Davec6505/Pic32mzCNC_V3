@@ -212,11 +212,6 @@
 #define StepX_GetLatch()          ((LATD >> 4) & 0x1U)
 #define StepX_PIN                  GPIO_PIN_RD4
 
-/*** Macros for master_control pin ***/
-#define master_control_Get()               ((PORTD >> 5) & 0x1U)
-#define master_control_GetLatch()          ((LATD >> 5) & 0x1U)
-#define master_control_PIN                  GPIO_PIN_RD5
-
 /*** Macros for StepY pin ***/
 #define StepY_Set()               (LATFSET = (1U<<0))
 #define StepY_Clear()             (LATFCLR = (1U<<0))

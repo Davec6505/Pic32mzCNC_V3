@@ -10,7 +10,10 @@
 #include "stepper.h"      // Include stepper.h BEFORE motion.h to ensure STEPPER_SetDirection is declared
 #include "motion.h"
 #include "kinematics.h"
+#include "spindle.h"      // Spindle PWM control
+#include "homing.h"       // Homing system control
 #include "settings.h"
+#include "utils/utils.h"       // For AxisConfig and UTILS_GetAxisConfig
 #include "utils/uart_utils.h"  // Required for DEBUG_PRINT_XXX macros
 #include "../config/default/peripheral/tmr/plib_tmr4.h"  // TMR4 PLIB access (16-bit timer for OC1)
 #include "../config/default/peripheral/gpio/plib_gpio.h"  // Required for DEBUG_EXEC_XXX LED toggles
@@ -204,20 +207,45 @@ void MOTION_Tasks(APP_DATA* appData) {
     if(appData->currentSegment != NULL) {
         MotionSegment* seg = appData->currentSegment;
         
-        // Simple velocity profiling (can be enhanced with real trapezoid later)
-        uint32_t new_rate = seg->nominal_rate;  // For now, use constant cruise rate
+        // ✅ TRAPEZOIDAL VELOCITY PROFILING
+        uint32_t new_rate;
         
-        // TODO: Implement acceleration/deceleration based on steps_completed
-        // if (seg->steps_completed < seg->accelerate_until) {
-        //     new_rate = calculate_accel_rate(seg);
-        // } else if (seg->steps_completed > seg->decelerate_after) {
-        //     new_rate = calculate_decel_rate(seg);
-        // }
+        if(seg->steps_completed < seg->accelerate_until) {
+            // ✅ ACCELERATION PHASE
+            // Rate decreases (interval gets shorter, speed increases)
+            // new_rate = initial_rate - (steps_completed * rate_delta)
+            new_rate = seg->initial_rate - ((int32_t)seg->steps_completed * abs(seg->rate_delta));
+            
+            // Clamp to nominal rate (don't overshoot)
+            if(new_rate < seg->nominal_rate) {
+                new_rate = seg->nominal_rate;
+            }
+            
+        } else if(seg->steps_completed > seg->decelerate_after) {
+            // ✅ DECELERATION PHASE
+            // Rate increases (interval gets longer, speed decreases)
+            uint32_t decel_steps = seg->steps_completed - seg->decelerate_after;
+            new_rate = seg->nominal_rate + ((int32_t)decel_steps * abs(seg->rate_delta));
+            
+            // Clamp to final rate (don't slow below minimum)
+            if(new_rate > seg->final_rate) {
+                new_rate = seg->final_rate;
+            }
+            
+        } else {
+            // ✅ CRUISE PHASE (constant velocity)
+            new_rate = seg->nominal_rate;
+        }
         
         // Update PR2 if rate changed (non-blocking, single register write)
         if(new_rate != appData->currentStepInterval) {
             STEPPER_SetStepRate(new_rate);
             appData->currentStepInterval = new_rate;
+            
+            DEBUG_PRINT_MOTION("[MOTION] Rate update: %lu (steps=%lu, phase=%s)\r\n", 
+                             new_rate, seg->steps_completed,
+                             (seg->steps_completed < seg->accelerate_until) ? "ACCEL" :
+                             (seg->steps_completed > seg->decelerate_after) ? "DECEL" : "CRUISE");
         }
     }
     
@@ -250,21 +278,19 @@ void MOTION_Tasks(APP_DATA* appData) {
 void MOTION_Arc(APP_DATA* appData) {
     // Only generate if arc is active and motion queue has space
     if(appData->arcGenState != ARC_GEN_ACTIVE || appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+        DEBUG_PRINT_MOTION("[ARC] Blocked: state=%d, queueCount=%d\r\n", 
+                          appData->arcGenState, appData->motionQueueCount);
         return;
     }
     
-    // Increment angle for next segment
-    appData->arcTheta += appData->arcThetaIncrement;
+    DEBUG_PRINT_MOTION("[ARC] Generating segment: seg=%lu/%lu, theta=%.3f\r\n",
+                      appData->arcSegmentCurrent, appData->arcSegmentTotal, appData->arcTheta);
     
     CoordinatePoint next;
     bool is_last_segment = false;
     
-    // Determine if this is the final segment
-    if(appData->arcClockwise) {
-        is_last_segment = (appData->arcTheta <= appData->arcThetaEnd);
-    } else {
-        is_last_segment = (appData->arcTheta >= appData->arcThetaEnd);
-    }
+    // Check if this is the last segment based on segment counter
+    is_last_segment = (appData->arcSegmentCurrent >= (appData->arcSegmentTotal - 1));
     
     if(is_last_segment) {
         // Use exact end point to prevent accumulated error
@@ -272,36 +298,32 @@ void MOTION_Arc(APP_DATA* appData) {
         appData->arcGenState = ARC_GEN_IDLE;
         
     } else {
-        // Calculate intermediate point using sin/cos (FPU accelerated)
+        // Calculate intermediate point using CURRENT theta
         next.x = appData->arcCenter.x + appData->arcRadius * cosf(appData->arcTheta);
         next.y = appData->arcCenter.y + appData->arcRadius * sinf(appData->arcTheta);
         
         // Linear interpolation for Z and A axes (helical motion)
-        float start_angle = atan2f(appData->arcCurrent.y - appData->arcCenter.y,
-                                   appData->arcCurrent.x - appData->arcCenter.x);
-        float end_angle = atan2f(appData->arcEndPoint.y - appData->arcCenter.y,
-                                 appData->arcEndPoint.x - appData->arcCenter.x);
+        // Calculate progress based on segment count (more reliable than angles)
+        float progress = (float)appData->arcSegmentCurrent / (float)(appData->arcSegmentTotal - 1);
         
-        float total_angle;
-        if(appData->arcClockwise) {
-            total_angle = (start_angle >= end_angle) ? 
-                         (start_angle - end_angle) : 
-                         (start_angle - end_angle + 2.0f * M_PI);
-        } else {
-            total_angle = (end_angle >= start_angle) ? 
-                         (end_angle - start_angle) : 
-                         (end_angle - start_angle + 2.0f * M_PI);
-        }
+        // Interpolate Z and A from start to end
+        next.z = appData->arcStartPoint.z + (appData->arcEndPoint.z - appData->arcStartPoint.z) * progress;
+        next.a = appData->arcStartPoint.a + (appData->arcEndPoint.a - appData->arcStartPoint.a) * progress;
         
-        float progress = fabsf(appData->arcTheta - start_angle) / total_angle;
-        
-        next.z = appData->arcCurrent.z + (appData->arcEndPoint.z - appData->arcCurrent.z) * progress;
-        next.a = appData->arcCurrent.a + (appData->arcEndPoint.a - appData->arcCurrent.a) * progress;
+        // Increment angle for next segment
+        appData->arcTheta += appData->arcThetaIncrement;
     }
     
-    // Generate motion segment for this arc increment
+    // Generate motion segment for this arc increment with smooth junction planning
     MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-    KINEMATICS_LinearMove(appData->arcCurrent, next, appData->arcFeedrate, segment);
+    
+    // Arc segments should maintain higher velocities for smoothness
+    float feedrate_mm_sec = appData->arcFeedrate / 60.0f;  // Convert mm/min to mm/sec
+    float arc_velocity = feedrate_mm_sec * 0.8f;  // Use 80% of feedrate for smooth arcs
+    
+    // Use junction planning for smoother arc execution
+    KINEMATICS_LinearMove(appData->arcCurrent, next, appData->arcFeedrate, segment, 
+                         arc_velocity, arc_velocity);
     
     // Add to motion queue
     appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
@@ -309,6 +331,9 @@ void MOTION_Arc(APP_DATA* appData) {
     
     // Update current position
     appData->arcCurrent = next;
+    
+    // Increment segment counter
+    appData->arcSegmentCurrent++;
     
     // Update work coordinates when arc completes
     if(appData->arcGenState == ARC_GEN_IDLE) {
@@ -364,7 +389,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             
             // ✅ SOFT LIMIT CHECK - TEMPORARILY DISABLED FOR DEBUG
             /*
-            GRBL_Settings* settings = SETTINGS_GetCurrent();
+            CNC_Settings* settings = SETTINGS_GetCurrent();
             bool limit_violation = false;
             
             if(!isnan(settings->max_travel_x) && !isnan(settings->max_travel_y) && !isnan(settings->max_travel_z)) {
@@ -398,8 +423,67 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             DEBUG_PRINT_MOTION("[MOTION] Calling KINEMATICS_LinearMove: start=(%.2f,%.2f), end=(%.2f,%.2f), F=%.1f\r\n",
                               start.x, start.y, end.x, end.y, feedrate);
             
-            // Convert to motion segment
-            KINEMATICS_LinearMove(start, end, feedrate, segment);
+            // ===== JUNCTION PLANNING: Calculate entry and exit velocities =====
+            float entry_velocity = 8.33f;  // Default: start from minimum speed (500 mm/min)
+            float exit_velocity = 8.33f;   // Default: decelerate to stop
+            
+            // Check if we can apply junction deviation with previous segment
+            if (appData->motionQueueCount > 0) {
+                // Get previous segment for junction analysis
+                uint32_t prev_index = (appData->motionQueueHead - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+                MotionSegment* prev_segment = &appData->motionQueue[prev_index];
+                
+                // Calculate normalized direction vectors
+                if (prev_segment->dominant_delta > 0) {
+                    CoordinatePoint prev_dir = {
+                        .x = (float)prev_segment->delta_x / (float)prev_segment->dominant_delta,
+                        .y = (float)prev_segment->delta_y / (float)prev_segment->dominant_delta,
+                        .z = (float)prev_segment->delta_z / (float)prev_segment->dominant_delta,
+                        .a = (float)prev_segment->delta_a / (float)prev_segment->dominant_delta
+                    };
+                    
+                    // We need current segment's direction, so do a preview calculation
+                    float dx_mm = end.x - start.x;
+                    float dy_mm = end.y - start.y; 
+                    float dz_mm = end.z - start.z;
+                    float da_mm = end.a - start.a;
+                    
+                    float distance = sqrtf(dx_mm*dx_mm + dy_mm*dy_mm + dz_mm*dz_mm + da_mm*da_mm);
+                    
+                    if (distance > 0.001f) {  // Avoid division by zero
+                        CoordinatePoint curr_dir = {
+                            .x = dx_mm / distance,
+                            .y = dy_mm / distance,
+                            .z = dz_mm / distance,
+                            .a = da_mm / distance
+                        };
+                        
+                        // Get settings for junction calculation
+                        CNC_Settings* settings = SETTINGS_GetCurrent();
+                        const AxisConfig* axis_cfg = UTILS_GetAxisConfig(AXIS_X);  // Use X axis for junction accel
+                        if (axis_cfg && settings) {
+                            float junction_speed = KINEMATICS_CalculateJunctionSpeed(prev_dir, curr_dir, 
+                                                                                    settings->junction_deviation,
+                                                                                    *(axis_cfg->acceleration));
+                            
+                            // Limit junction speed to reasonable maximum (feedrate / 60)
+                            float max_junction = feedrate / 60.0f;  // Convert mm/min to mm/sec
+                            if (junction_speed > max_junction) {
+                                junction_speed = max_junction;
+                            }
+                            
+                            // Update previous segment's exit velocity for smoother transition
+                            entry_velocity = junction_speed;
+                            
+                            DEBUG_PRINT_MOTION("[JUNCTION] Junction speed: %.1f mm/sec (entry to current segment)\r\n", 
+                                             junction_speed);
+                        }
+                    }
+                }
+            }
+            
+            // Convert to motion segment with junction velocities
+            KINEMATICS_LinearMove(start, end, feedrate, segment, entry_velocity, exit_velocity);
 
             DEBUG_PRINT_MOTION("[MOTION] Segment: steps=%lu, dx=%ld, dy=%ld, dz=%ld\r\n",
                               segment->steps_remaining, segment->delta_x, segment->delta_y, segment->delta_z);
@@ -482,20 +566,30 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // Initialize arc state
             appData->arcGenState = ARC_GEN_ACTIVE;
             appData->arcTheta = start_angle;
+            appData->arcThetaStart = start_angle;  // Store initial angle for progress calculation
             appData->arcThetaEnd = end_angle;
             appData->arcCenter.x = center.x;
             appData->arcCenter.y = center.y;
             appData->arcCurrent = start;
+            appData->arcStartPoint = start;  // Store initial position for Z/A interpolation
             appData->arcEndPoint = end;
             appData->arcRadius = r_start;
             appData->arcClockwise = event->data.arcMove.clockwise;
             appData->arcPlane = appData->modalPlane;
             appData->arcFeedrate = event->data.arcMove.feedrate;
             
-            GRBL_Settings* settings = SETTINGS_GetCurrent();
+            // ✅ CRITICAL: Reset step accumulators when starting new arc
+            // This prevents fractional steps from previous moves affecting arc accuracy
+            KINEMATICS_ResetAccumulators();
+            
+            CNC_Settings* settings = SETTINGS_GetCurrent();
             float arc_length = r_start * total_angle;
             uint32_t num_segments = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
             if(num_segments < 1) num_segments = 1;
+            
+            appData->arcSegmentCurrent = 0;      // Start at segment 0
+            appData->arcSegmentTotal = num_segments;  // Store total for termination check
+            
             appData->arcThetaIncrement = total_angle / (float)num_segments;
             if(!event->data.arcMove.clockwise) {
                 appData->arcThetaIncrement = fabsf(appData->arcThetaIncrement);
@@ -508,12 +602,13 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
         
         case GCODE_EVENT_SPINDLE_ON:
             appData->modalSpindleRPM = event->data.spindle.rpm;
-            // TODO: Spindle hardware control
+            SPINDLE_SetSpeed(event->data.spindle.rpm);
+            SPINDLE_Start();
             return true;
             
         case GCODE_EVENT_SPINDLE_OFF:
             appData->modalSpindleRPM = 0;
-            // TODO: Spindle hardware control
+            SPINDLE_Stop();
             return true;
             
         case GCODE_EVENT_SET_ABSOLUTE:
@@ -524,76 +619,79 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             appData->absoluteMode = false;
             return true;
             
-        case GCODE_EVENT_SET_WORK_OFFSET:
+        case GCODE_EVENT_SET_WCS:
         {
-            // G92 - Set work coordinate offset so current machine position = specified work position
-            // Formula: offset = MPos - desired_WPos
-            // Example: If MPos=(29.975, 7.500) and we want WPos=(0,0), then offset=(29.975, 7.500)
-            // Note: Only updates axes that are specified (non-NaN values)
-            
-            StepperPosition* pos = STEPPER_GetPosition();
-            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-            
-            // Get current machine position
-            float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
-            float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
-            float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
-            
-            // Calculate new offsets (only for specified axes)
-            float offset_x = wcs->offset.x;  // Keep existing
-            float offset_y = wcs->offset.y;  // Keep existing
-            float offset_z = wcs->offset.z;  // Keep existing
-            
-            // Update work position and offset for each specified axis
-            if (!isnan(event->data.setWorkOffset.x)) {
-                offset_x = mpos_x - event->data.setWorkOffset.x;
-                appData->currentX = event->data.setWorkOffset.x;
+            // G54-G59 - Select active work coordinate system
+            uint8_t wcs_number = event->data.setWCS.wcs_number;
+            if (wcs_number <= 5) {  // G54=0 through G59=5
+                appData->activeWCS = wcs_number;
+                // No need to save to flash - modal state persists during session only
             }
-            if (!isnan(event->data.setWorkOffset.y)) {
-                offset_y = mpos_y - event->data.setWorkOffset.y;
-                appData->currentY = event->data.setWorkOffset.y;
-            }
-            if (!isnan(event->data.setWorkOffset.z)) {
-                offset_z = mpos_z - event->data.setWorkOffset.z;
-                appData->currentZ = event->data.setWorkOffset.z;
-            }
-            if (!isnan(event->data.setWorkOffset.a)) {
-                appData->currentA = event->data.setWorkOffset.a;
-            }
-            
-            // Set the work coordinate offset
-            KINEMATICS_SetWorkCoordinates(offset_x, offset_y, offset_z);
-            
             return true;
         }
             
+        case GCODE_EVENT_SET_WORK_OFFSET:
+        {
+            // G10 L2/L20 or G92 - Set work coordinate system offset
+            StepperPosition* pos = STEPPER_GetPosition();
+            CNC_Settings* settings = SETTINGS_GetCurrent();
+            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
+            
+            float mpos_x = (float)pos->x_steps / settings->steps_per_mm_x;
+            float mpos_y = (float)pos->y_steps / settings->steps_per_mm_y;
+            float mpos_z = (float)pos->z_steps / settings->steps_per_mm_z;
+            
+            // Set work offset: work_offset = machine_pos - desired_work_pos
+            if (!isnan(event->data.workOffset.x)) {
+                wcs->offset.x = mpos_x - event->data.workOffset.x;
+                appData->currentX = event->data.workOffset.x;
+            }
+            
+            if (!isnan(event->data.workOffset.y)) {
+                wcs->offset.y = mpos_y - event->data.workOffset.y;
+                appData->currentY = event->data.workOffset.y;
+            }
+            
+            if (!isnan(event->data.workOffset.z)) {
+                wcs->offset.z = mpos_z - event->data.workOffset.z;
+                appData->currentZ = event->data.workOffset.z;
+            }
+            
+            return true;
+        }
+        
         case GCODE_EVENT_SET_FEEDRATE:
-            appData->modalFeedrate = event->data.setFeedrate.feedrate;
+            // Feedrate is handled in modal state
             return true;
             
         case GCODE_EVENT_SET_SPINDLE_SPEED:
+            // Update modal spindle speed and apply if running
             appData->modalSpindleRPM = event->data.setSpindleSpeed.rpm;
+            SPINDLE_SetSpeed(event->data.setSpindleSpeed.rpm);
             return true;
             
-        case GCODE_EVENT_SET_TOOL:
-            appData->modalToolNumber = event->data.setTool.toolNumber;
-            // TODO: Tool change logic
-            return true;
-            
+        case GCODE_EVENT_HOMING:
+        {
+            // Start homing cycle
+            if (HOMING_Start(appData, event->data.homing.axes_mask)) {
+                DEBUG_PRINT_MOTION("[MOTION] Homing cycle started for axes mask: 0x%02X\r\n", 
+                                  event->data.homing.axes_mask);
+                return true;
+            } else {
+                DEBUG_PRINT_MOTION("[MOTION] Homing cycle failed to start\r\n");
+                return false;
+            }
+        }
+        
         case GCODE_EVENT_DWELL:
-            // TODO: Implement dwell
-            return true;
-            
         case GCODE_EVENT_COOLANT_ON:
-            // TODO: Coolant control
-            return true;
-            
         case GCODE_EVENT_COOLANT_OFF:
-            // TODO: Coolant control
-            return true;
-            
+        case GCODE_EVENT_SET_TOOL:
         case GCODE_EVENT_NONE:
         default:
-            return true;  // Ignore unknown events
+            // Not yet implemented or no action needed
+            return true;
     }
+    
+    return true;
 }

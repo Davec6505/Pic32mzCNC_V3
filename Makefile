@@ -52,8 +52,8 @@ USE_SHARED_LIB ?= 0
 
 # Memory configuration for dynamic allocation
 # These control heap and stack sizes for the PIC32MZ application
-HEAP_SIZE  := 65536    # 64KB heap for dynamic memory allocation
-STACK_SIZE := 65536    # 64KB stack for function calls and local variables
+HEAP_SIZE  := 65536     # 64KB heap for dynamic memory allocation
+STACK_SIZE := 131072    # 128KB stack (increased for 64-segment motion queue)
 
 # Compiler location and DFP (Device Family Pack) location
 # The compiler location is expected to be the path to the xc32-gcc compiler.
@@ -132,7 +132,7 @@ platform:
 	cd srcs && $$(BUILD) platform COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE)
 
 clean:
-	@echo "####### CLEANING OUTPUTS #######"
+	@echo "####### CLEANING OUTPUTS ($(BUILD_CONFIG)) #######"
 ifeq ($(OS),Windows_NT)
 	@powershell -NoProfile -Command "cd srcs; make clean DRY_RUN=$(DRY_RUN) BUILD_CONFIG=$(BUILD_CONFIG)"
 else

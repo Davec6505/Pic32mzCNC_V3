@@ -19,7 +19,9 @@
 /* GCODE State Machine */
 typedef enum {
     GCODE_STATE_IDLE,
-    GCODE_STATE_CONTROL_CHAR,
+    GCODE_STATE_CONTROL_CHAR,      // Real-time control chars: ?, ~, !, 0x18
+    GCODE_STATE_QUERY_CHARS,       // Query commands: $, $$, $I, $G, etc.
+    GCODE_STATE_GCODE_COMMAND,
     GCODE_STATE_ERROR
 } GCODE_State;
 
@@ -42,7 +44,9 @@ typedef enum {
     GCODE_EVENT_SET_FEEDRATE,       // Standalone F command (modal)
     GCODE_EVENT_SET_SPINDLE_SPEED,  // Standalone S command (modal)
     GCODE_EVENT_SET_TOOL,           // Standalone T command (modal)
-    GCODE_EVENT_SET_WORK_OFFSET     // G92 - Set work coordinate system
+    GCODE_EVENT_SET_WORK_OFFSET,    // G92 - Set work coordinate system
+    GCODE_EVENT_SET_WCS,            // G54-G59 - Select work coordinate system
+    GCODE_EVENT_HOMING              // $H - Homing cycle
 } GCODE_EventType;
 
 typedef struct {
@@ -81,14 +85,26 @@ typedef struct {
         } setTool;
         
         struct {
-            float x, y, z, a;       // Work offset coordinates (G92)
-        } setWorkOffset;
+            float x, y, z, a;       // Work offset coordinates (G92 or G10)
+            uint32_t l_value;       // L parameter (2 or 20 for G10)
+        } workOffset;
+        
+        struct {
+            uint8_t wcs_number;     // Work coordinate system (0=G54, 1=G55, ..., 5=G59)
+        } setWCS;
+        
+        struct {
+            uint32_t axes_mask;     // Bitmap of axes to home (bit 0=X, 1=Y, 2=Z, 3=A)
+        } homing;
     } data;
 } GCODE_Event;
 
 /* GCODE USART function prototypes */
 void GCODE_USART_Initialize(uint32_t RD_thresholds);
-void GCODE_Tasks(GCODE_CommandQueue* commandQueue);
+void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue);
+
+// Soft reset function (handles Ctrl+X/0x18) - consolidates all reset logic
+void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue);
 bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event);
 
 #endif // GCODE_PARSER_H

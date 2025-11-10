@@ -1,75 +1,62 @@
 /**
  * @file uart_utils.c
- * @brief Non-blocking UART communication utilities implementation
+ * @brief UART communication utilities - PLIB ring buffer wrapper
+ * @note PLIB TX ring buffer (1024 bytes) handles transmission in background via ISR
+ * 
+ * Architecture:
+ * - UART3_Write() copies data to 1024-byte TX ring buffer (non-blocking)
+ * - Returns immediately - ISR handles actual transmission
+ * - Can check UART3_WriteCountGet() to monitor buffer usage
+ * - Can use callbacks to refill buffer when transmission completes
  */
 
 #include "utils/uart_utils.h"
 #include "config/default/peripheral/uart/plib_uart3.h"
+#include "data_structures.h"
+#include "common.h"
 #include <stdio.h>
 #include <string.h>
-
-/* ========== TX READY FLAG ========== */
-
-volatile bool uart3TxReady = true;  // Initially ready
-
-/* ========== UART WRITE CALLBACK ========== */
-
-/**
- * @brief UART3 write event callback - sets TX ready flag when buffer empty
- */
-static void usartWriteEventHandler(UART_EVENT event, uintptr_t context) {
-    if (event == UART_EVENT_WRITE_THRESHOLD_REACHED) {
-        uart3TxReady = true;  // Ready for next transmission
-    }
-}
+#include <stdarg.h>
 
 /* ========== INITIALIZATION ========== */
 
+static char buffer[512];  // Static to avoid stack overflow
+
 void UART_Initialize(void) {
-    // Register write callback
-    UART3_WriteCallbackRegister(usartWriteEventHandler, (uintptr_t)NULL);
-    
-    // Set a low write threshold and enable notifications so callback fires on TX drain
-    // Threshold of 1 ensures we'll be notified as soon as there is any free space
-    UART3_WriteThresholdSet(1);
-    UART3_WriteNotificationEnable(true, true);
-    
-    uart3TxReady = true;  // Initially ready
+    // ✅ PLIB ring buffer handles TX/RX automatically via ISR
+    // No callbacks needed for normal operation (1024-byte buffer is large enough)
+    // For streaming large data, register callback via UART3_WriteCallbackRegister()
 }
 
-/* ========== NON-BLOCKING OUTPUT FUNCTIONS ========== */
+/* ========== FIRE-AND-FORGET OUTPUT FUNCTIONS ========== */
 
 bool UART_Write(const uint8_t* msg, size_t len) {
     if (msg == NULL || len == 0) {
         return false;  // Invalid parameters
     }
-    // Always attempt a non-blocking write; PLIB returns 0 if no space
     size_t written = UART3_Write((uint8_t*)msg, len);
-    return (written > 0);
+    return (written == len);  // True if all bytes copied to ring buffer
 }
 
 bool UART_Printf(const char* format, ...) {
     if (format == NULL) {
-        return false;  // Invalid format
+        return false;
     }
-    
-    static char buffer[256];  // Static to avoid stack overflow
     va_list args;
     va_start(args, format);
     int len = vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
-    
     if (len <= 0 || len >= (int)sizeof(buffer)) {
-        return false;  // Format error or buffer overflow
+        return false;
     }
-    
     return UART_Write((uint8_t*)buffer, (size_t)len);
 }
 
 /* ========== GRBL PROTOCOL MESSAGE HELPERS ========== */
 
 bool UART_SendOK(void) {
-    return UART_Write((uint8_t*)"OK\r\n", 4);
+    UART3_Write((uint8_t*)"ok\r\n", 4);
+    return true;
 }
 
 bool UART_SendGrblStatus(const char* state, 
@@ -79,17 +66,13 @@ bool UART_SendGrblStatus(const char* state,
     if (state == NULL) {
         return false;
     }
-    
-    static char buffer[256];
     int len = snprintf(buffer, sizeof(buffer),
-        "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%u>\r\n",
-        state, mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z,
-        feedrate, spindle_rpm);
-    
+                       "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%u>\r\n",
+                       state, mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z,
+                       feedrate, (unsigned)spindle_rpm);
     if (len <= 0 || len >= (int)sizeof(buffer)) {
         return false;
     }
-    
     return UART_Write((uint8_t*)buffer, (size_t)len);
 }
 
@@ -107,3 +90,16 @@ bool UART_SendMessage(const char* msg) {
     }
     return UART_Write((uint8_t*)msg, strlen(msg));
 }
+
+void UART_PrintHelp(void)
+{
+    UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $X $H $SLP $C $J=line $RST=x]\r\n", 52);
+    UART3_Write((uint8_t*)"[HLP:G0 G1 G2 G3 G4 G17 G18 G19 G20 G21 G28 G30 G90 G91 G92 G93 G94]\r\n", 69);
+    UART3_Write((uint8_t*)"[HLP:M0 M2 M3 M4 M5 M7 M8 M9 M30]\r\n", 35);
+    UART3_Write((uint8_t*)"[HLP:F S T]\r\n", 13);
+    UART_SendOK();
+}
+
+/* ========== SOFT RESET (Ctrl+X) ========================================== */
+/* NOTE: Soft reset logic has been consolidated into GCODE_SoftReset() in gcode_parser.c */
+/* This eliminates the circular dependency and keeps all reset logic in one place */
