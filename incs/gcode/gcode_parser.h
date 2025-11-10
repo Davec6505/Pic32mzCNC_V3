@@ -45,6 +45,7 @@ typedef enum {
     GCODE_EVENT_SET_SPINDLE_SPEED,  // Standalone S command (modal)
     GCODE_EVENT_SET_TOOL,           // Standalone T command (modal)
     GCODE_EVENT_SET_WORK_OFFSET,    // G92 - Set work coordinate system
+    GCODE_EVENT_SET_WCS,            // G54-G59 - Select work coordinate system
     GCODE_EVENT_HOMING              // $H - Homing cycle
 } GCODE_EventType;
 
@@ -87,6 +88,10 @@ typedef struct {
             float x, y, z, a;       // Work offset coordinates (G92 or G10)
             uint32_t l_value;       // L parameter (2 or 20 for G10)
         } workOffset;
+        
+        struct {
+            uint8_t wcs_number;     // Work coordinate system (0=G54, 1=G55, ..., 5=G59)
+        } setWCS;
         
         struct {
             uint32_t axes_mask;     // Bitmap of axes to home (bit 0=X, 1=Y, 2=Z, 3=A)

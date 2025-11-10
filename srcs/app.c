@@ -115,6 +115,7 @@ void APP_Initialize ( void )
     appData.modalToolNumber = 0;       // No tool selected
     appData.absoluteMode = true;       // G90 absolute mode (GRBL default)
     appData.modalPlane = 0;            // G17 XY plane (GRBL default)
+    appData.activeWCS = 0;             // G54 default work coordinate system
     
     // ✅ Initialize alarm state
     appData.alarmCode = 0;             // No alarm

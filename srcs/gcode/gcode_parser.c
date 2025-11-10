@@ -291,6 +291,13 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         if (gnum == 90) { ev->type = GCODE_EVENT_SET_ABSOLUTE; return true; }
         if (gnum == 91) { ev->type = GCODE_EVENT_SET_RELATIVE; return true; }
 
+        // Work coordinate system selection (G54-G59)
+        if (gnum >= 54 && gnum <= 59) {
+            ev->type = GCODE_EVENT_SET_WCS;
+            ev->data.setWCS.wcs_number = gnum - 54;  // G54=0, G55=1, ..., G59=5
+            return true;
+        }
+
         if (gnum == 10) {
             char* pP = find_char((char*)cmd, 'P');
             char* pL = find_char((char*)cmd, 'L');
@@ -662,18 +669,31 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             send_ok = false;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == '#') {
-            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-            char buf[160];
+            // GRBL $# command: Report work coordinate systems and offsets
+            char buf[400];  // Increased buffer for all WCS data
             int p = 0;
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G54:%.3f,%.3f,%.3f]\r\n", wcs->offset.x, wcs->offset.y, wcs->offset.z);
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G55:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G56:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G57:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G58:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G59:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[G92:0.000,0.000,0.000]\r\n");
-            p += snprintf(&buf[p], sizeof(buf)-p, "[TLO:0.000]\r\n");
+            
+            // Report all work coordinate systems (G54-G59)
+            for (uint8_t wcs = 0; wcs < 6; wcs++) {
+                float x, y, z;
+                if (SETTINGS_GetWorkCoordinateSystem(wcs, &x, &y, &z)) {
+                    p += snprintf(&buf[p], sizeof(buf)-p, "[G%d:%.3f,%.3f,%.3f]\r\n", 
+                                 54 + wcs, x, y, z);
+                }
+            }
+            
+            // Report G92 coordinate offset
+            float g92_x, g92_y, g92_z;
+            SETTINGS_GetG92Offset(&g92_x, &g92_y, &g92_z);
+            p += snprintf(&buf[p], sizeof(buf)-p, "[G92:%.3f,%.3f,%.3f]\r\n", g92_x, g92_y, g92_z);
+            
+            // Report tool length offset
+            float tlo = SETTINGS_GetToolLengthOffset();
+            p += snprintf(&buf[p], sizeof(buf)-p, "[TLO:%.3f]\r\n", tlo);
+            
+            // Report probe position (currently not implemented - show zeros)
             p += snprintf(&buf[p], sizeof(buf)-p, "[PRB:0.000,0.000,0.000:0]\r\n");
+            
             UART3_Write((uint8_t*)buf, (uint32_t)p);
             handled = true;
         }
@@ -682,7 +702,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             int l = 0;
             l += sprintf(&state_buffer[l], "[GC:");
             l += sprintf(&state_buffer[l], "G0 ");
-            l += sprintf(&state_buffer[l], "G54 ");
+            l += sprintf(&state_buffer[l], "G%d ", 54 + appData->activeWCS);  // Dynamic WCS (G54-G59)
             l += sprintf(&state_buffer[l], "G%d ", appData->modalPlane == 0 ? 17 : (appData->modalPlane == 1 ? 18 : 19));
             l += sprintf(&state_buffer[l], "%s ", unitsInches ? "G20" : "G21");
             l += sprintf(&state_buffer[l], "G%d ", appData->absoluteMode ? 90 : 91);
