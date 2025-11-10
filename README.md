@@ -523,6 +523,121 @@ git push origin master
 git push origin patch1
 ```
 
+## 🔧 **Adding Additional Axes (5th, 6th, etc.)**
+
+The system uses **array-based axis control** architecture that makes adding new axes extremely simple. No switch statements to update - just expand the data structures!
+
+### **Quick Start: Adding B-Axis (5th Axis)**
+
+#### **Step 1: Update Axis Enum**
+**File:** `incs/data_structures.h`
+```c
+typedef enum {
+    AXIS_X = 0,
+    AXIS_Y,
+    AXIS_Z,
+    AXIS_A,
+    AXIS_B,     // ← ADD NEW AXIS HERE
+    NUM_AXIS    // Automatically becomes 5
+} E_AXIS;
+```
+
+#### **Step 2: Expand Coordinate Structure**
+**File:** `incs/data_structures.h`
+```c
+typedef struct {
+    float x, y, z, a, b;  // ← ADD NEW COORDINATE
+} CoordinatePoint;
+```
+
+#### **Step 3: Add Hardware Pins in MCC**
+- Open MCC (MPLAB Code Configurator)
+- Add GPIO pins for B-axis: `StepB`, `DirB`, `EnableB`
+- Generate code to create new MCC functions: `StepB_Set()`, `DirB_Set()`, etc.
+
+#### **Step 4: Add Settings Parameters**
+**File:** `incs/settings/settings.h`
+```c
+typedef struct {
+    // ... existing parameters ...
+    float steps_per_mm_b;
+    float max_rate_b;
+    float acceleration_b;
+    // ... other B-axis settings ...
+} CNC_Settings;
+```
+
+#### **Step 5: Initialize Hardware Array**
+**File:** `srcs/utils/utils.c` → `UTILS_InitAxisConfig()`
+```c
+// ===== B AXIS (AXIS_B = 4) =====
+g_axis_config[AXIS_B].step.Set = StepB_Set;
+g_axis_config[AXIS_B].step.Clear = StepB_Clear;
+g_axis_config[AXIS_B].dir.Set = DirB_Set;
+g_axis_config[AXIS_B].dir.Clear = DirB_Clear;
+g_axis_config[AXIS_B].enable.Set = EnableB_Set;
+g_axis_config[AXIS_B].enable.Clear = EnableB_Clear;
+g_axis_config[AXIS_B].steps_per_mm = &settings->steps_per_mm_b;
+g_axis_config[AXIS_B].max_rate = &settings->max_rate_b;
+g_axis_config[AXIS_B].acceleration = &settings->acceleration_b;
+g_axis_config[AXIS_B].step_count = &stepper_pos->b_steps;
+```
+
+#### **Step 6: Add Stepper Position Tracking**
+**File:** `incs/motion/stepper.h`
+```c
+typedef struct {
+    int32_t x_steps, y_steps, z_steps, a_steps, b_steps;  // ← ADD b_steps
+    float steps_per_mm_x, steps_per_mm_y, steps_per_mm_z, steps_per_deg_a, steps_per_deg_b;  // ← ADD b
+} StepperPosition;
+```
+
+### **🎉 What Automatically Works**
+
+Once you complete the above steps, **ALL motion control automatically supports the new axis**:
+
+✅ **Homing Operations**: `$H` command includes B-axis  
+✅ **Motion Planning**: `G1 X10 Y10 B45` commands work immediately  
+✅ **Coordinate Systems**: Work offsets, G92 positioning  
+✅ **Status Reporting**: Position tracking in `?` status queries  
+✅ **Limit Switches**: Hardware limit checking (add `g_limit_config[AXIS_B]`)  
+✅ **Emergency Stops**: Feed hold and soft reset handle all axes  
+
+### **Array-Based Magic**
+
+The system uses **coordinate array utilities** that treat `CoordinatePoint` as a `float[]` array:
+
+```c
+// These functions work automatically for ANY number of axes:
+SET_COORDINATE_AXIS(&target, AXIS_B, 90.0f);      // Set B to 90 degrees
+ADD_COORDINATE_AXIS(&position, AXIS_B, 15.0f);    // Move B by +15 degrees  
+float b_pos = GET_COORDINATE_AXIS(&current, AXIS_B); // Read B position
+```
+
+**No switch statements to update!** All motion logic uses array indexing:
+```c
+// This line automatically works for any axis (X, Y, Z, A, B, C...):
+ADD_COORDINATE_AXIS(&target, current_axis, move_distance);
+```
+
+### **Benefits of Array-Based Architecture**
+
+- **🚀 Zero Motion Logic Changes**: Homing, interpolation, kinematics work instantly
+- **🔧 Scalable**: Add 6th, 7th, 8th axes using the same pattern
+- **🛡️ Type Safe**: C struct layout guarantees prevent memory errors
+- **⚡ High Performance**: Direct array indexing vs conditional branches
+- **📏 Maintainable**: Single implementation for all axis operations
+
+### **Advanced: 6+ Axes**
+
+For more than 5 axes (B, C, D...), just continue the pattern:
+1. Add to `E_AXIS` enum: `AXIS_C`, `AXIS_D`, etc.
+2. Expand `CoordinatePoint`: `float x, y, z, a, b, c, d;`
+3. Add hardware initialization to `UTILS_InitAxisConfig()`
+4. **All motion control automatically scales!**
+
+The array-based design supports unlimited axes without architectural changes.
+
 ## 🎯 **Validated Performance**
 
 ### **Motion System**
