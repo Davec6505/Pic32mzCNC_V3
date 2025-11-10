@@ -10,6 +10,8 @@
 #include "stepper.h"      // Include stepper.h BEFORE motion.h to ensure STEPPER_SetDirection is declared
 #include "motion.h"
 #include "kinematics.h"
+#include "spindle.h"      // Spindle PWM control
+#include "homing.h"       // Homing system control
 #include "settings.h"
 #include "utils/uart_utils.h"  // Required for DEBUG_PRINT_XXX macros
 #include "../config/default/peripheral/tmr/plib_tmr4.h"  // TMR4 PLIB access (16-bit timer for OC1)
@@ -533,12 +535,13 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
         
         case GCODE_EVENT_SPINDLE_ON:
             appData->modalSpindleRPM = event->data.spindle.rpm;
-            // TODO: Spindle hardware control
+            SPINDLE_SetSpeed(event->data.spindle.rpm);
+            SPINDLE_Start();
             return true;
             
         case GCODE_EVENT_SPINDLE_OFF:
             appData->modalSpindleRPM = 0;
-            // TODO: Spindle hardware control
+            SPINDLE_Stop();
             return true;
             
         case GCODE_EVENT_SET_ABSOLUTE:
@@ -579,11 +582,32 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             return true;
         }
         
+        case GCODE_EVENT_SET_FEEDRATE:
+            // Feedrate is handled in modal state
+            return true;
+            
+        case GCODE_EVENT_SET_SPINDLE_SPEED:
+            // Update modal spindle speed and apply if running
+            appData->modalSpindleRPM = event->data.setSpindleSpeed.rpm;
+            SPINDLE_SetSpeed(event->data.setSpindleSpeed.rpm);
+            return true;
+            
+        case GCODE_EVENT_HOMING:
+        {
+            // Start homing cycle
+            if (HOMING_Start(appData, event->data.homing.axes_mask)) {
+                DEBUG_PRINT_MOTION("[MOTION] Homing cycle started for axes mask: 0x%02X\r\n", 
+                                  event->data.homing.axes_mask);
+                return true;
+            } else {
+                DEBUG_PRINT_MOTION("[MOTION] Homing cycle failed to start\r\n");
+                return false;
+            }
+        }
+        
         case GCODE_EVENT_DWELL:
         case GCODE_EVENT_COOLANT_ON:
         case GCODE_EVENT_COOLANT_OFF:
-        case GCODE_EVENT_SET_FEEDRATE:
-        case GCODE_EVENT_SET_SPINDLE_SPEED:
         case GCODE_EVENT_SET_TOOL:
         case GCODE_EVENT_NONE:
         default:

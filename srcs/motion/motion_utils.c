@@ -116,42 +116,18 @@ bool MOTION_UTILS_ReadStepPin(E_AXIS axis)
 /* Check all hard limit switches (GRBL v1.1 implementation)
  * @param invert_mask: Limit pins inversion mask from settings ($5)
  * @return: true if ANY limit switch is triggered
- * 
- * NOTE: Limit switch pin names (to be added to plib_gpio.h):
- * X_Min, X_Max, Y_Min, Y_Max, Z_Min, Z_Max, A_Min, A_Max
+ * Uses array-based limit configuration for better performance
  */
 bool MOTION_UTILS_CheckHardLimits(uint8_t invert_mask)
 {
-    // Read all limit switches (will be defined in plib_gpio.h)
-    // For now, using placeholder names - will compile once pins are defined
+    // Array-based limit checking (replaces switch statements and manual pins)
+    for (uint8_t axis = 0; axis < AXIS_COUNT; axis++) {
+        if (LIMIT_CheckAxis((E_AXIS)axis, invert_mask)) {
+            return true;  // Any limit triggered
+        }
+    }
     
-    #ifdef X_Min_Get  // Only compile if limit pins are defined
-    bool x_min = X_Min_Get();
-    bool x_max = X_Max_Get();
-    bool y_min = Y_Min_Get();
-    bool y_max = Y_Max_Get();
-    bool z_min = Z_Min_Get();
-    bool z_max = Z_Max_Get();
-    bool a_min = A_Min_Get();
-    bool a_max = A_Max_Get();
-    
-    // Apply inversion mask (bit-mapped per axis)
-    // GRBL uses active-low switches by default (triggered = low)
-    // Extract individual axis invert bits from mask
-    bool x_inv = (invert_mask >> AXIS_X) & 0x01;
-    bool y_inv = (invert_mask >> AXIS_Y) & 0x01;
-    bool z_inv = (invert_mask >> AXIS_Z) & 0x01;
-    bool a_inv = (invert_mask >> AXIS_A) & 0x01;
-    
-    // Check if any limit is triggered (XOR with invert to get actual state)
-    // Normal: triggered = LOW (0), Inverted: triggered = HIGH (1)
-    if((x_min ^ x_inv) || (x_max ^ x_inv)) return true;
-    if((y_min ^ y_inv) || (y_max ^ y_inv)) return true;
-    if((z_min ^ z_inv) || (z_max ^ z_inv)) return true;
-    if((a_min ^ a_inv) || (a_max ^ a_inv)) return true;
-    #endif
-    
-    return false;  // No limits triggered (or pins not defined yet)
+    return false;  // No limits triggered
 }
 
 /* Check specific axis limit switches
@@ -163,14 +139,6 @@ bool MOTION_UTILS_CheckAxisLimits(E_AXIS axis, uint8_t invert_mask)
 {
     if(axis >= AXIS_COUNT) return false;
     
-    #ifdef X_Min_Get  // Only compile if limit pins are defined
-    bool inverted = (invert_mask >> axis) & 0x01;
-    
-    // Array-based limit checking (replaces switch statement)
-    return (g_limit_config[axis].limit.GetMin() ^ inverted) || 
-           (g_limit_config[axis].limit.GetMax() ^ inverted);
-    
-    #else
-    return false;  // Pins not defined yet
-    #endif
+    // Use array-based limit checking from utils module
+    return LIMIT_CheckAxis(axis, invert_mask);
 }

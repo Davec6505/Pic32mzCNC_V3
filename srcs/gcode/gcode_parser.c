@@ -423,6 +423,17 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         if (mnum == 7) { ev->type = GCODE_EVENT_COOLANT_ON; return true; }
         if (mnum == 9) { ev->type = GCODE_EVENT_COOLANT_OFF; return true; }
     }
+    
+    // System commands ($H, $X, etc.)
+    if (cmd[0] == '$') {
+        if (cmd[1] == 'H' && (cmd[2] == '\0' || cmd[2] == '\n' || cmd[2] == '\r')) {
+            // $H - Home all axes command
+            ev->type = GCODE_EVENT_HOMING;
+            ev->data.homing.axes_mask = 0x0F; // Home all axes (XYZA = bits 0-3)
+            return true;
+        }
+    }
+    
     return false;
 }
 
@@ -683,6 +694,16 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             l += sprintf(&state_buffer[l], "S%u", appData->modalSpindleRPM);
             l += sprintf(&state_buffer[l], "]\r\n");
             UART3_Write((uint8_t*)state_buffer, (uint32_t)l);
+            handled = true;
+        }
+        else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'H') {
+            // $H - Homing cycle command
+            // Create homing event and add to command queue
+            if (cmdQueue->count < GCODE_MAX_COMMANDS) {
+                strcpy(cmdQueue->commands[cmdQueue->head].command, "$H");
+                cmdQueue->head = (cmdQueue->head + 1) % GCODE_MAX_COMMANDS;
+                cmdQueue->count++;
+            }
             handled = true;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'I') {

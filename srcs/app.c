@@ -20,6 +20,7 @@
 #include "settings.h"
 #include "kinematics.h"  // For KINEMATICS_LinearMove and CoordinatePoint
 #include "motion/homing.h"  // For homing state machine
+#include "motion/spindle.h"  // For spindle PWM control
 #include "motion_utils.h"  // For hard limit checking
 #include "config/default/peripheral/coretimer/plib_coretimer.h"  // For CORETIMER heartbeat counter
 #include "utils/uart_utils.h"  // Non-blocking UART utilities
@@ -150,6 +151,9 @@ void APP_Initialize ( void )
     
     // ✅ Initialize homing system
     HOMING_Initialize();
+    
+    // ✅ Initialize spindle PWM control (OC8/TMR6)
+    SPINDLE_Initialize();
 
 }
 

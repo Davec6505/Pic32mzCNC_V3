@@ -8,6 +8,8 @@ To ensure proper build configuration and output paths, always execute `make` com
 
 ## 🚀 Current Implementation Status (November 10, 2025)
 ### ✅ COMPLETED FEATURES
+- **COMPLETE HOMING & LIMIT SWITCH SYSTEM**: Professional GRBL v1.1 compatible homing with $H command, array-based limit configuration, hardware debouncing, and proper inversion logic (November 10, 2025)
+- **COMPLETE SPINDLE PWM CONTROL**: OC8/TMR6 PWM system with 3.338kHz frequency, RPM conversion, M3/M5/S command integration (November 10, 2025)
 - **ARRAY-BASED AXIS CONTROL**: Eliminated all switch statements for axis operations using coordinate array utilities (November 10, 2025)
 - **PRODUCTION-READY G-CODE PARSER**: Professional event-driven system with clean architecture (⚠️ CRITICAL: Do not modify gcode_parser.c - working perfectly!)
 - **ROBUST SOFT RESET RECOVERY**: UGS compatible soft reset with proper OC1/TMR4 restart logic (November 10, 2025)
@@ -219,6 +221,82 @@ ADD_COORDINATE_AXIS(&target, g_homing.current_axis, search_distance);
 // Read axis value
 float current_pos = GET_COORDINATE_AXIS(&position, axis);
 ```
+
+### 🔧 COMPLETE HOMING & LIMIT SWITCH SYSTEM (November 10, 2025) ⭐ NEW
+Module: `srcs/motion/homing.c`, `srcs/motion/motion_utils.c`, `srcs/utils/utils.c`
+
+**Purpose**: Professional GRBL v1.1 compatible homing system with array-based limit switch configuration and proper inversion logic.
+
+**Key Features**:
+- **$H Command Integration**: G-code parser handles `$H` system command with proper event generation
+- **Array-Based Limit Configuration**: Function pointers for Min/Max limit switches per axis
+- **4-Phase Homing Cycle**: GRBL-compatible seek → locate → pulloff → complete sequence  
+- **Hardware Debouncing**: Core timer-based debouncing for reliable limit switch detection
+- **Settings Integration**: Uses GRBL settings for direction, speeds, debounce, pulloff distance
+- **Inversion Logic**: Proper handling of active-high/low limit switches via settings mask
+
+**Hardware Pin Assignments** (from MCC configuration):
+```c
+X_Min: RA4    X_Max: RA7     // X-axis limit switches
+Y_Min: RD0    Y_Max: RE0     // Y-axis limit switches  
+Z_Min: RD13   Z_Max: RE1     // Z-axis limit switches
+A_Min: RA6    A_Max: RB1     // A-axis limit switches
+```
+
+**GRBL Settings Integration**:
+```c
+$22 = 1         // Enable homing cycle
+$23 = 0         // Homing direction mask (0=negative direction)
+$24 = 500       // Homing feed rate (slow precision approach) mm/min
+$25 = 2000      // Homing seek rate (fast initial search) mm/min
+$26 = 250       // Homing debounce delay (microseconds)
+$27 = 2.0       // Homing pull-off distance (mm)
+$5 = 0          // Limit pins invert mask (0=active-low switches)
+```
+
+**Implementation Architecture**:
+```c
+// Array-based limit configuration (utils.c)
+typedef struct {
+    GPIO_LimitControl limit;         // GetMin/GetMax function pointers
+    uint8_t* homing_enable;          // Pointer to settings->homing_enable
+    uint8_t* homing_dir_mask;        // Pointer to settings->homing_dir_mask
+    float* homing_feed_rate;         // Pointer to settings->homing_feed_rate
+    float* homing_seek_rate;         // Pointer to settings->homing_seek_rate
+    uint32_t* homing_debounce;       // Pointer to settings->homing_debounce
+    float* homing_pull_off;          // Pointer to settings->homing_pull_off
+} LimitConfig;
+
+extern LimitConfig g_limit_config[NUM_AXIS];
+
+// Zero-overhead inline limit checking
+static inline bool LIMIT_CheckAxis(E_AXIS axis, uint8_t invert_mask) {
+    bool inverted = (invert_mask >> axis) & 0x01;
+    return (LIMIT_GetMin(axis) ^ inverted) || (LIMIT_GetMax(axis) ^ inverted);
+}
+```
+
+**Homing Cycle Phases**:
+1. **SEEK**: Fast movement toward limit switch at homing_seek_rate until triggered
+2. **LOCATE**: Back off and slow approach at homing_feed_rate for precision
+3. **PULLOFF**: Move away from limit by homing_pull_off distance  
+4. **COMPLETE**: Set machine position to zero, move to next axis
+
+**Testing Commands**:
+```gcode
+$H              // Home all axes (XYZA sequence)
+$22=1           // Enable homing if disabled
+$?              // Check status during homing cycle
+$X              // Clear alarm if homing fails
+$$              // View all homing settings
+```
+
+**Benefits**:
+- **GRBL Compatibility**: Standard protocol support for existing CAM/sender software
+- **Array Performance**: Eliminated switch statements for better CPU efficiency
+- **Hardware Abstraction**: Clean separation between limit logic and GPIO implementation
+- **Configurable**: All timing, direction, and behavior controlled by persistent settings
+- **Reliable**: Hardware debouncing and proper alarm handling for production use
 
 ### 🔧 COMPILE-TIME DEBUG SYSTEM (November 7, 2025)
 Module: `incs/common.h`, `srcs/Makefile`, `docs/DEBUG_SYSTEM_TUTORIAL.md`
