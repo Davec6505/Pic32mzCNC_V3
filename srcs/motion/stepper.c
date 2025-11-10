@@ -143,6 +143,15 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
         STEPPER_EnableAll();
     }
 
+    // ✅ CRITICAL: Ensure OC1 is enabled for motion after soft reset or complete stop
+    // TMR4_Stop() might have disabled OC1 interrupt generation
+    // Check OC1CON ON bit before enabling to avoid unnecessary register writes
+    if(!(OC1CON & _OC1CON_ON_MASK)) {
+        OCMP1_Enable();
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] OC1 enabled for motion\r\n");
+    } else {
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] OC1 already enabled\r\n");
+    }
 
     // Load deltas for Bresenham
     delta_x = segment->delta_x;
@@ -176,26 +185,40 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     // Set initial step rate (PR4 controls OC1 period in 16-bit mode)
     uint16_t period = (uint16_t)segment->initial_rate;  // Ensure 16-bit value
     if (period > 65535) period = 65535;  // Clamp to 16-bit max
+    
+    // ✅ CRITICAL: Ensure period is large enough for pulse width requirements
+    // Need minimum 7 ticks: 5 for rising edge offset + 2 for pulse width
+    const uint16_t MIN_PERIOD_FOR_PULSE = 7;
+    if (period < MIN_PERIOD_FOR_PULSE) period = MIN_PERIOD_FOR_PULSE;
+    
     TMR4_PeriodSet(period);
     
     // ✅ DEBUG: Print segment loading details
-    DEBUG_PRINT_STEPPER("[STEPPER_Load] initial_rate=%lu, period=%u (%.2fms), steps=%ld\r\n",
-        segment->initial_rate, period, (float)period / 12500.0f, segment->steps_remaining);
+    // Timer frequency from MCC configuration: TMR4_FrequencyGet() returns actual Hz
+    DEBUG_PRINT_STEPPER("[STEPPER_Load] TMR4_Freq=%luHz, initial_rate=%lu, period=%u (%.1fµs), steps=%ld\r\n",
+        TMR4_FrequencyGet(), segment->initial_rate, period, 
+        (float)period * 1000000.0f / TMR4_FrequencyGet(), segment->steps_remaining);
     
     // ✅ CRITICAL: Initialize OC1 compare registers for continuous pulse mode
     // OCxR = Rising edge (pulse starts)
     // OCxRS = Falling edge (generates ISR on falling edge)
     // MUST satisfy: PR4 ≥ OCxRS > OCxR (per datasheet Table 16-3)
-    // Pulse width constants: 80 ticks for OC1R, 40 ticks for OC1RS
-    OCMP1_CompareValueSet(period - 80);              // OCxR: Rising edge (pulse starts)
-    OCMP1_CompareSecondaryValueSet(period - 40);     // OCxRS: Falling edge (ISR trigger)
+    // Pulse width: 2.5µs = 2 ticks @ 781.25kHz (1:64 prescaler)
+    // Period is guaranteed ≥ 7 ticks, so these values are always valid
+    
+    OCMP1_CompareValueSet(period - 5);                             // OCxR: Rising edge (pulse starts)
+    OCMP1_CompareSecondaryValueSet(period - 3);                   // OCxRS: Falling edge (ISR trigger)
     
     // ✅ START TMR4 to begin motion (only if not already running)
     // Check T4CON ON bit - if TMR4 already running from previous segment, don't restart!
     // TMR4 will keep running across multiple segments for smooth motion
     // It only stops when ALL motion is complete (queue empty in MOTION_Tasks)
+    // This also handles the case where TMR4 was stopped by soft reset or emergency stop
     if(!(T4CON & _T4CON_ON_MASK)) {
         TMR4_Start();
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] TMR4 started for motion\r\n");
+    } else {
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] TMR4 already running\r\n");
     }
 }
 
@@ -205,7 +228,7 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
 
 void STEPPER_SetStepRate(uint32_t rate_ticks) {
     // Enforce minimum rate to prevent TMR4 issues (16-bit mode)
-    const uint16_t MIN_RATE = 500;  // ~40µs minimum @ 12.5MHz
+    const uint16_t MIN_RATE = 7;  // Minimum for pulse width requirements (5 + 2 ticks)
     uint16_t period = (uint16_t)rate_ticks;
     if (period < MIN_RATE) period = MIN_RATE;
     if (period > 65535) period = 65535;  // Clamp to 16-bit max
@@ -216,8 +239,11 @@ void STEPPER_SetStepRate(uint32_t rate_ticks) {
     // ✅ CRITICAL: Update OC1R/OC1RS to maintain valid compare relationship
     // OCxR near end of period, OCxRS = OCxR + pulse_width
     // This ensures OCxRS < PR4 so compare fires before TMR4 rollover
-    OCMP1_CompareValueSet(period - 80);              // OCxR: Rising edge
-    OCMP1_CompareSecondaryValueSet(period - 40);     // OCxRS: Falling edge
+    // Pulse width: 2.5µs = 2 ticks @ 781.25kHz (1:64 prescaler)
+    // Period is guaranteed ≥ 7 ticks, so these values are always valid
+    
+    OCMP1_CompareValueSet(period - 5);                             // OCxR: Rising edge
+    OCMP1_CompareSecondaryValueSet(period - 3);                   // OCxRS: falling edge
 }
 
 bool STEPPER_IsEnabled(void)
@@ -328,13 +354,18 @@ void OCP1_ISR(uintptr_t context) {
     if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
         uint32_t step_interval = app_data_ref->currentSegment->step_interval;  // Ticks between steps
         
+        // ✅ CRITICAL: Ensure period is large enough for pulse width requirements
+        const uint16_t MIN_PERIOD_FOR_PULSE = 7;  // 5 for rising edge offset + 2 for pulse width
+        uint16_t period = (uint16_t)step_interval;
+        if (period < MIN_PERIOD_FOR_PULSE) period = MIN_PERIOD_FOR_PULSE;
+        
         // ✅ CRITICAL: Set TMR4 period AND OC1 compare values for continuous pulses
         // Per datasheet 16.3.2.5: PR4 must be ≥ OC1RS > OC1R
         // OC1R fires first (rising edge), OC1RS fires second (falling edge + ISR)
-        // Pulse width constants: 80 ticks for OC1R, 40 ticks for OC1RS
-        TMR4_PeriodSet((uint16_t)step_interval);                            // Timer period (controls step rate)
-        OCMP1_CompareValueSet((uint16_t)step_interval - 85);                // Rising edge (pulse starts)
-        OCMP1_CompareSecondaryValueSet((uint16_t)step_interval - 45);       // Falling edge (ISR trigger)
+        // Pulse width: 2.5µs = 2 ticks @ 781.25kHz (1:64 prescaler)
+        TMR4_PeriodSet(period);                                             // Timer period (controls step rate)
+        OCMP1_CompareValueSet(period - 5);                                  // Rising edge (pulse starts)
+        OCMP1_CompareSecondaryValueSet(period - 3);                         // Falling edge (ISR trigger)
 
         // Update step counter and signal main loop for velocity updates
         app_data_ref->currentSegment->steps_completed++;

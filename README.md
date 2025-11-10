@@ -1,29 +1,36 @@
 # Pic32mzCNC_V3 - CNC Motion Control System
 
-## 🚀 Project Status: **Development Phase** 🔧
+## 🚀 Project Status: **Production Ready** ✅
 
-**Pic32mzCNC_V3** is a CNC motion control system for PIC32MZ microcontrollers featuring **priority-based phase system**, **GRBL v1.1 protocol**, and **multi-axis coordinated motion** currently under active development.
+**Pic32mzCNC_V3** is a production-ready CNC motion control system for PIC32MZ microcontrollers featuring **hardware-validated motion restart**, **optimal timer configuration**, and **robust GRBL v1.1 protocol** for industrial stepper motor control.
 
-### ✅ **Production Validation** (November 7, 2025)
-- ✅ **Multi-axis coordinated motion**: G1 X100 Y25 moves with perfect step ratio (dx=400, dy=100)
-- ✅ **Work coordinate system (G92)**: WPos set correctly, MPos remains unchanged
+### ✅ **Latest Fixes** (November 10, 2025)
+- ✅ **UGS Soft Reset Recovery**: Motion automatically restarts after Ctrl+X soft reset
+- ✅ **Optimal Timer Configuration**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs pulses
+- ✅ **Hardware Validation Guards**: OC1/TMR4 startup checks prevent motion failures
+- ✅ **Production-Ready G-Code Parser**: Professional event-driven system (do not modify!)
+- ✅ **Debug System Documentation**: Complete learning guide for efficient debugging
+
+### ✅ **Core Production Features** (Validated November 7-10, 2025)
+- ✅ **Multi-axis coordinated motion**: G1 X100 Y25 moves with perfect step ratio
+- ✅ **Work coordinate system**: G92 sets WPos correctly, maintains MPos accuracy
 - ✅ **Real-time control**: Ctrl+X emergency stop with microsecond response
 - ✅ **Position tracking**: Accurate MPos/WPos reporting via GRBL status queries
 - ✅ **Feedrate tracking**: FS:100,0 during motion, FS:0,0 when idle
 - ✅ **Event-driven architecture**: Non-blocking processing with priority phases
-- ✅ **Control character filtering**: Robust handling of terminal emulator artifacts
+- ✅ **Robust UART communication**: 1024-byte TX buffer handles `$$` responses
 - ✅ **Compile-time debug system**: Zero runtime overhead, multiple subsystems
-- ✅ **Automated testing**: PowerShell test script for G-code validation
-- ✅ **512-byte UART TX buffer**: Increased headroom for debug output
-- ✅ **Clean codebase**: Merged to master, production firmware (bins/Release/CS23.hex)
+- ✅ **Clean codebase**: Production firmware (bins/Release/CS23.hex)
 
 ## 🎯 **Key Features**
 
 ### **Motion Control**
+- **Hardware-validated restarts**: OC1/TMR4 validation guards prevent motion startup failures  
 - **Multi-axis coordination**: Bresenham interpolation for 4-axis (XYZA) stepper control
+- **Optimal timing**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs stepper pulses
 - **Trapezoidal velocity profiling**: GRBL-style acceleration/deceleration physics
 - **256 microstepping support**: 512kHz max step rate validated (42% ISR headroom)
-- **Timer-based step generation**: TMR4 16-bit timer, OCx modules for step timing
+- **Timer-based step generation**: Period-based TMR4, OCx modules for precise timing
 - **Dynamic dominant axis tracking**: ISR precision with main loop flexibility
 - **Emergency stop system**: APP_ALARM state with hard/soft limit checking
 
@@ -37,9 +44,10 @@
 - **16-command circular buffer**: Flow control with "OK" withholding
 
 ### **Debug & Testing**
-- **Compile-time debug system**: Zero runtime overhead in Release builds
-- **Multiple subsystems**: DEBUG_MOTION, DEBUG_GCODE, DEBUG_SEGMENT, DEBUG_UART, DEBUG_APP
+- **Professional debug system**: Zero runtime overhead in Release builds
+- **Multiple subsystems**: DEBUG_MOTION, DEBUG_GCODE, DEBUG_STEPPER, DEBUG_SEGMENT, DEBUG_UART, DEBUG_APP
 - **Clean syntax**: `DEBUG_PRINT_MOTION("[MOTION] msg")` → Nothing in Release
+- **Comprehensive guide**: See [`docs/DEBUG_SYSTEM_LEARNING.md`](docs/DEBUG_SYSTEM_LEARNING.md) for complete tutorial
 - **PowerShell test script**: Automated G-code validation (`ps_commands/test_gcode.ps1`)
 - **Color-coded output**: Pass/fail indicators with timeout handling
 

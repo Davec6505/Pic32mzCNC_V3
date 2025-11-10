@@ -18,6 +18,7 @@
 
 #include "gcode_parser.h"
 #include "common.h"
+#include "app.h"              // For extern APP_DATA appData declaration
 #include "stepper.h"
 #include "motion.h"
 #include "kinematics.h"
@@ -31,7 +32,12 @@
 /* -------------------------------------------------------------------------- */
 /* Configuration                                                              */
 /* -------------------------------------------------------------------------- */
-#define ENABLE_STARTUP_BANNER
+#define ENABLE_STARTUP_BANNER     // Enable/disable startup banner
+                                  // G-code senders (UGS, bCNC) expect this banner
+                                  // Comment out to disable for debugging or custom ID
+
+// Banner message configured in common.h via STARTUP_BANNER_STRING macro
+
 #define MOTION_BUFFER_THRESHOLD 2
 
 /* -------------------------------------------------------------------------- */
@@ -60,8 +66,6 @@ static bool unitsInches = false;            /* false=mm (G21), true=inches (G20)
 /* -------------------------------------------------------------------------- */
 static inline bool is_control_char(uint8_t c){ return (c == '?' || c == '~' || c == '!' || c == 0x18); }
 GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t length, GCODE_CommandQueue* commandQueue);
-static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue);
-static void GCODE_PrintStartupBanner(void);
 
 
 static inline char* find_char(char* s, char key){
@@ -77,26 +81,48 @@ static float parse_float_after(char* start){
 }
 
 /* -------------------------------------------------------------------------- */
-/* Startup Banner                                                             */
+/* Centralized Soft Reset (PUBLIC FUNCTION)                                  */
 /* -------------------------------------------------------------------------- */
-static void GCODE_PrintStartupBanner(void)
+void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
 {
-#ifdef ENABLE_STARTUP_BANNER
-    /* GRBL-compatible startup banner expected by senders after Ctrl+X */
-    UART3_Write((uint8_t*)"Grbl 1.1h ['$' for help]\r\n", 26);
-#endif
-}
+    if (appData == NULL || cmdQueue == NULL) {
+        return;
+    }
 
-/* -------------------------------------------------------------------------- */
-/* Centralized Soft Reset                                                     */
-/* -------------------------------------------------------------------------- */
-static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue)
-{
+    /* 1. Stop all motion immediately */
     STEPPER_DisableAll();
-    
-    extern APP_DATA appData;
-    UART_SoftReset(&appData, cmdQueue);
 
+    /* 2. Flush any pending RX bytes to avoid processing pre-reset junk */
+    uint8_t scratch[64];
+    uint32_t rc;
+    while ((rc = UART3_ReadCountGet()) > 0U) {
+        uint32_t toRead = (rc > sizeof(scratch)) ? (uint32_t)sizeof(scratch) : rc;
+        (void)UART3_Read(scratch, toRead);
+    }
+
+    /* 3. Clear motion planner queue (planner and executor state) */
+    appData->motionQueueHead = 0;
+    appData->motionQueueTail = 0;
+    appData->motionQueueCount = 0;
+    appData->currentSegment   = NULL;
+
+    /* 4. Modal state to GRBL defaults: G17, G21, G90, G94, M5, M9, T0, F0, S0 */
+    appData->modalPlane       = 0;        /* 0->G17 (XY) as used by $G print */
+    appData->absoluteMode     = true;     /* G90 */
+    appData->modalFeedrate    = 0.0f;     /* F */
+    appData->modalSpindleRPM  = 0;        /* S */
+    appData->modalToolNumber  = 0;        /* T0 */
+
+    /* 5. Application state back to IDLE */
+    appData->state            = APP_IDLE;
+
+    /* 6. Reset G-code command queue */
+    cmdQueue->head  = 0;
+    cmdQueue->tail  = 0;
+    cmdQueue->count = 0;
+    cmdQueue->motionQueueCount = appData->motionQueueCount;
+
+    /* 7. Reset G-code parser state */
     okPending = false;
     grblAlarm = false;
     grblCheckMode = false;
@@ -107,10 +133,13 @@ static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue)
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
 
-    /* Mark steppers to be re-enabled automatically on first G0/G1/G2/G3 */
-   // stepperEnablePending = true;
+    /* 8. Mark steppers to be re-enabled automatically on first motion command */
+    // stepperEnablePending = true;
 
-    GCODE_PrintStartupBanner();
+    /* 9. Print GRBL startup banner (expected by senders after Ctrl+X) */
+#ifdef ENABLE_STARTUP_BANNER
+    UART_SEND_BANNER();  // Compile-time string and length from common.h
+#endif
 }
 
 /* -------------------------------------------------------------------------- */
@@ -120,7 +149,11 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
 {
     (void)RD_thresholds;
     UART_Initialize();
-    GCODE_PrintStartupBanner();
+    
+    /* Print GRBL startup banner (disable for custom firmware identification) */
+#ifdef ENABLE_STARTUP_BANNER
+    UART_SEND_BANNER();  // Compile-time string and length from common.h
+#endif
 
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
@@ -448,7 +481,7 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
         if (nBytesRead >= 4 &&
             rxBuffer[0] == '0' && rxBuffer[1] == 'x' &&
             rxBuffer[2] == '1' && rxBuffer[3] == '8') {
-            GCODE_HandleSoftReset(cmdQueue);
+            GCODE_SoftReset(&appData, cmdQueue);
             break;
         }
 
@@ -525,7 +558,6 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
                 float wpos_y = mpos_y - wcs->offset.y;
                 float wpos_z = mpos_z - wcs->offset.z;
 
-                extern APP_DATA appData;
                 const char* state = "Idle";
                 if (grblAlarm) state = "Alarm";
                 else if (feedHoldActive) state = "Hold";
@@ -563,8 +595,10 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
                 STEPPER_DisableAll();
                 break;
             case 0x18: /* Soft reset */
-                GCODE_HandleSoftReset(cmdQueue);
+            {
+                GCODE_SoftReset(&appData, cmdQueue);
                 break;
+            }
             default:
                 break;
         }
@@ -634,7 +668,6 @@ void GCODE_Tasks(GCODE_CommandQueue* commandQueue)
             handled = true;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'G') {
-            extern APP_DATA appData;
             char state_buffer[160];
             int l = 0;
             l += sprintf(&state_buffer[l], "[GC:");

@@ -113,12 +113,6 @@ bool UART_SendMessage(const char* msg);
  */
 void UART_PrintHelp(void);
 
-/**
- * * @brief Perform a soft reset of the UART (clear buffers, reset state)
- * 
- */
-void UART_SoftReset(APP_DATA* appData,GCODE_CommandQueue* cmd);
-
 #ifdef __cplusplus
 }
 #endif

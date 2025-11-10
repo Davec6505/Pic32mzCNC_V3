@@ -10,6 +10,7 @@
 #include "motion/motion_utils.h"
 #include "utils/utils.h"
 #include "settings/settings.h"
+#include "app.h"  // For extern APP_DATA appData declaration
 #include "../config/default/peripheral/coretimer/plib_coretimer.h"
 #include "../config/default/peripheral/gpio/plib_gpio.h"
 #include "common.h"
@@ -19,9 +20,6 @@
 
 // Global homing control
 HomingControl g_homing;
-
-// External reference to APP_DATA for motion queue access
-extern APP_DATA appData;
 
 // ===== INITIALIZATION =====
 

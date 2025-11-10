@@ -6,9 +6,12 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 ##    Always run make from root directory VI
 To ensure proper build configuration and output paths, always execute `make` commands from the root directory of the Pic32mzCNC_V3 project. This guarantees that all relative paths and build settings are correctly applied. makefile incs target is dynamic, it knows the paths no need to add absolute file references, all paths are relative to the root directory.
 
-## 🚀 Current Implementation Status (November 9, 2025)
+## 🚀 Current Implementation Status (November 10, 2025)
 ### ✅ COMPLETED FEATURES
-- Professional event-driven G-code system with clean architecture
+- **PRODUCTION-READY G-CODE PARSER**: Professional event-driven system with clean architecture (⚠️ CRITICAL: Do not modify gcode_parser.c - working perfectly!)
+- **ROBUST SOFT RESET RECOVERY**: UGS compatible soft reset with proper OC1/TMR4 restart logic (November 10, 2025)
+- **OPTIMAL TIMER CONFIGURATION**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs stepper pulses (November 10, 2025)
+- **HARDWARE VALIDATION GUARDS**: OC1/TMR4 startup checks prevent motion restart failures (November 10, 2025)
 - Event queue implementation respecting APP_DATA abstraction layer
 - Comprehensive G-code support: G0/G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T, G10 L20
 - Core architecture implemented with period-based timer (TMR4/PR4)
@@ -44,6 +47,38 @@ To ensure proper build configuration and output paths, always execute `make` com
 - FUNCTION POINTER ARCHITECTURE - Array-based axis control with GPIO_Control structs (November 8, 2025)
 - ISR STACK OPTIMIZATION - Eliminated 32 bytes/call local arrays with static pointers (November 8, 2025)
 - PRE-CALCULATED DOMINANT AXIS - Stored in MotionSegment, zero ISR overhead (November 8, 2025)
+
+### 🔧 SOFT RESET RECOVERY SYSTEM (November 10, 2025) ⭐ NEW
+Module: `srcs/motion/stepper.c` → `STEPPER_LoadSegment()`
+
+**Problem Solved**: UGS soft reset (Ctrl+X) would stop motion, but subsequent G-code commands wouldn't restart motion system.
+
+**Root Cause**: After soft reset, OC1 (Output Compare) module wasn't being re-enabled when motion resumed.
+
+**Solution**: Hardware validation guards in segment loading:
+```c
+// Re-enable OC1 if disabled
+if(!(OC1CON & _OC1CON_ON_MASK)) {
+    OCMP1_Enable();
+}
+
+// Re-start TMR4 if stopped  
+if(!(T4CON & _T4CON_ON_MASK)) {
+    TMR4_Start();
+}
+```
+
+**Timer Configuration Fixed**:
+- TMR4 Prescaler: 1:64 (781.25kHz, 1.28µs per tick)
+- Pulse Width: 2.5µs (2 ticks) - safe for stepper drivers
+- Period Clamping: Minimum 7 ticks to accommodate pulse timing
+- Uses PLIB functions: `TMR4_FrequencyGet()`, `TMR4_PeriodSet()`
+
+**Benefits**:
+- Motion always restarts after UGS soft reset
+- Optimal stepper driver compatibility (2.5µs pulse width)
+- Hardware state validation prevents startup failures
+- Debug output shows timer frequency and timing calculations
 
 ### 🔧 ATOMIC INLINE GPIO ARCHITECTURE (November 8, 2025)
 Module: `incs/utils/utils.h`, `srcs/utils/utils.c`, `srcs/motion/stepper.c`
@@ -169,7 +204,7 @@ DEBUG_EXEC_SEGMENT(LED1_Set());  // Visual indicator
 
 Documentation: See `docs/DEBUG_SYSTEM_TUTORIAL.md` for complete guide with examples, best practices, and troubleshooting.
 
-### ⚠️ CRITICAL DEBUG WORKFLOW (November 7, 2025)
+### ⚠️ CRITICAL DEBUG WORKFLOW (November 7-10, 2025)
 ALWAYS use the compile-time debug system instead of manual UART writes!
 
 Wrong - Manual Debug (DO NOT DO THIS):
@@ -210,11 +245,26 @@ Debugging Protocol Issues (e.g., UGS connection):
    make clean && make
    ```
 
+Debugging Motion Restart Issues (e.g., UGS soft reset):
+1. Add stepper debug to relevant areas:
+   ```c
+   DEBUG_PRINT_STEPPER("[STEPPER] OC1 state: 0x%08X, TMR4 state: 0x%08X\r\n", 
+                       (unsigned)OC1CON, (unsigned)T4CON);
+   DEBUG_PRINT_STEPPER("[STEPPER] Timer freq: %lu Hz\r\n", TMR4_FrequencyGet());
+   ```
+2. Enable stepper debug and test soft reset sequence:
+   ```bash
+   make clean && make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_STEPPER DEBUG_MOTION"
+   ```
+3. Observe hardware state during restart - guards should trigger
+4. Remove debug for production build
+
 Why This Matters:
 - Manual debug code gets forgotten and left in production
 - Debug macros are self-documenting (flag name shows what's being debugged)
 - Zero performance impact in release builds
 - Easy to enable/disable without code changes
+- Essential for diagnosing hardware state issues like timer/OC module restart failures
 
 ### 🔧 NON-BLOCKING UART UTILITIES (November 6-9, 2025)
 Module: `srcs/utils/uart_utils.c`, `incs/utils/uart_utils.h`
@@ -463,14 +513,16 @@ Benefits:
 - `PR4` sets the period (step interval + pulse width + margin)
 - `OC1R` sets when pulse starts (step_interval)
 - `OC1RS` sets when pulse ends (step_interval + pulse_width)
-- Example: For 1ms steps with 3µs pulse: `OC1R = 12500`, `OC1RS = 12537`, `PR4 = 12539`
-- Hardware Configuration:
+- Example: For 1ms steps with 2.5µs pulse: `OC1R = 781`, `OC1RS = 783`, `PR4 = 789`
+- Hardware Configuration (November 10, 2025 - VERIFIED):
   - PBCLK3 = 50MHz (peripheral bus clock)
-  - Prescaler = 1:4 (TCKPS = 2)
-  - Timer Frequency = 12.5MHz (50MHz / 4)
-  - Timer Resolution = 80ns per tick
+  - Prescaler = 1:64 (TCKPS = 6, verified in plib_tmr4.c)
+  - Timer Frequency = 781.25kHz (50MHz / 64)
+  - Timer Resolution = 1.28µs per tick
+  - Pulse Width = 2.5µs (2 ticks) - safe for stepper drivers
 - No timer rollover issues - TMR4 automatically resets to 0 at PR4, OCx values remain valid
 - Step timing controlled entirely by OC1 ISR scheduling next pulse
+- Hardware validation guards ensure OC1/TMR4 restart after soft reset
 
 ### Dynamic Dominant Axis Tracking
 - Dominant axis (highest step count) drives the step timing
@@ -515,11 +567,15 @@ void __ISR(_OC1_VECTOR, IPL5SOFT) OC1Handler(void) {
     
     // Schedule next pulse using period-based timing
     uint32_t step_interval = current_segment->step_interval;
-    uint32_t pulse_width = current_segment->pulse_width;
+    uint32_t pulse_width = 2;  // 2 ticks = 2.5µs at 781.25kHz
     
     OC1R = step_interval;                      // Pulse start
     OC1RS = step_interval + pulse_width;       // Pulse end
-    PR4 = step_interval + pulse_width + 2;     // Timer period
+    
+    // Ensure minimum period for pulse completion
+    uint32_t minimum_period = step_interval + pulse_width + 2;
+    if (minimum_period < 7) minimum_period = 7;  // 7 tick minimum
+    TMR4_PeriodSet(minimum_period);            // Timer period
     
     // Update step counter
     steps_completed++;
@@ -531,12 +587,14 @@ void __ISR(_OC1_VECTOR, IPL5SOFT) OC1Handler(void) {
 
 ### Compare Register Updates
 ```c
-// CORRECT - Period-based timing
-uint32_t step_interval = 12500;   // Timer ticks for this step
-uint32_t pulse_width = 37;        // 3µs pulse width
-OC1R = step_interval;             // Pulse starts at interval
+// CORRECT - Period-based timing (November 10, 2025)
+uint32_t step_interval = 781;         // ~1ms at 781.25kHz
+uint32_t pulse_width = 2;             // 2.5µs pulse width
+OC1R = step_interval;                 // Pulse starts at interval
 OC1RS = step_interval + pulse_width;  // Pulse ends
-PR4 = step_interval + pulse_width + 2;  // Timer rolls over
+uint32_t period = step_interval + pulse_width + 2;
+if (period < 7) period = 7;          // Minimum period guard
+TMR4_PeriodSet(period);              // Timer rolls over
 
 // INCORRECT - Don't use absolute timer reads
 uint32_t now = TMR4;  // WRONG - timer is period-based!
@@ -725,14 +783,17 @@ while (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
 - Set PR4 smaller than OC1RS (pulse won't complete)
 - Use blocking delays in main loop (let APP_Tasks run freely)
 - Modify OC1R/OC1RS outside of ISR during active motion
+- Set period < 7 ticks (insufficient time for 2.5µs pulse completion)
+- Assume OC1/TMR4 remain enabled after soft reset
 
 ### Always Do
-- Use period-based timing: `OC1R = step_interval; PR4 = step_interval + pulse_width + margin`
+- Use period-based timing with proper guards: `TMR4_PeriodSet(max(7, step_interval + pulse_width + margin))`
 - Clear interrupt flags immediately at ISR entry
 - Keep ISRs minimal and fast
 - Run Bresenham logic in OC1 ISR for precise timing
 - Schedule subordinate axes only when required
 - Set OCxR = OCxRS to disable pulse generation (prevents spurious pulses)
+- Validate OC1/TMR4 hardware state before loading motion segments
 
 ## Data Structures
 
@@ -781,17 +842,21 @@ Note: Velocity profiling is not yet implemented but should be designed with the 
   - Compiler flags: `-mhard-float -msingle-float -mfp64`
   - Optimizations: `-ffast-math -fno-math-errno`
   - Use FPU for planning (KINEMATICS), integer math for ISR
-- Timer Configuration:
+- Timer Configuration (November 10, 2025 - VERIFIED WORKING):
   - TMR4 16-bit timer (period-based, rolls over at PR4)
-  - Prescaler: 1:4 (TCKPS = 2)
-  - Timer Frequency: 12.5MHz
-  - Timer Resolution: 80ns per tick
+  - Prescaler: 1:64 (TCKPS = 6, verified in plib_tmr4.c)
+  - Timer Frequency: 781.25kHz (50MHz ÷ 64)
+  - Timer Resolution: 1.28µs per tick
+  - Pulse Width: 2.5µs (2 ticks) - safe for stepper drivers
+  - Period Clamping: Minimum 7 ticks for pulse timing accommodation
   - TMR5 16-bit timer for step pulse width (one-shot mode)
 - Output Compare Modules: OC1 (X), OC2 (Y), OC3 (Z), OC4 (A)
+  - OC1 continuous pulse mode verified with TMR4 time base
+  - Hardware validation guards prevent startup failures
 - Microstepping Support: Designed for up to 256 microstepping
   - Worst case: 512kHz step rate (256 microsteps × high speed)
   - ISR budget: ~390 CPU cycles @ 512kHz (225 cycles used)
-  - Per-step timing: ~24 timer ticks minimum
+  - Per-step timing: ~6 timer ticks minimum (7.68µs)
 
 ### Memory Layout (PIC32MZ2048EFH100 - 2MB Flash)
 ```

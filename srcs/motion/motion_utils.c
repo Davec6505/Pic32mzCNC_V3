@@ -42,17 +42,19 @@ void MOTION_UTILS_SetDirection(E_AXIS axis, bool forward, uint8_t invert_mask)
 {
     if(axis >= AXIS_COUNT) return;
     
-    // Check if this axis direction should be inverted
+    // Check if this axis direction should be inverted (from settings $3 mask)
     bool inverted = (invert_mask >> axis) & 0x01;
     
-    // Apply inversion if configured
-    bool actual_state = inverted ? !forward : forward;
+    // Apply inversion logic:
+    // Normal: forward=true → pin HIGH, forward=false → pin LOW
+    // Inverted: forward=true → pin LOW, forward=false → pin HIGH  
+    bool pin_state = inverted ? !forward : forward;
     
-    // Use inline atomic functions - single instruction, zero overhead!
-    if(actual_state){
-        AXIS_DirSet(axis);
+    // Set GPIO pin to computed state using atomic functions (zero overhead)
+    if(pin_state) {
+        AXIS_DirSet(axis);      // Pin HIGH
     } else {
-        AXIS_DirClear(axis);
+        AXIS_DirClear(axis);    // Pin LOW
     }
 }
 
@@ -65,17 +67,19 @@ void MOTION_UTILS_EnableAxis(E_AXIS axis, bool enable, uint8_t invert_mask)
 {
     if(axis >= AXIS_COUNT) return;
     
-    // Check if enable signal should be inverted
+    // Check if enable signal should be inverted (from settings $4 mask)
     bool inverted = (invert_mask >> axis) & 0x01;
     
-    // Apply inversion if configured
-    bool actual_state = inverted ? !enable : enable;
+    // Apply inversion logic:
+    // Normal: enable=true → pin HIGH, enable=false → pin LOW
+    // Inverted: enable=true → pin LOW, enable=false → pin HIGH
+    bool pin_state = inverted ? !enable : enable;
     
-    // Use inline atomic functions - single instruction, zero overhead!
-    if(actual_state){
-        AXIS_EnableSet(axis);
+    // Set GPIO pin to computed state using atomic functions (zero overhead)
+    if(pin_state) {
+        AXIS_EnableSet(axis);    // Pin HIGH
     } else {
-        AXIS_EnableClear(axis);
+        AXIS_EnableClear(axis);  // Pin LOW
     }
 }
 
@@ -100,7 +104,8 @@ void MOTION_UTILS_DisableAllAxes(uint8_t invert_mask)
 
 /* Read step pin state for diagnostics
  * @param axis: E_AXIS enum (AXIS_X, AXIS_Y, AXIS_Z, AXIS_A)
- * @return: true = pin high, false = pin low
+ * @return: true = pin high, false = pin low (raw GPIO state, no inversion)
+ * NOTE: Step pins are typically inputs connected to OC modules
  */
 bool MOTION_UTILS_ReadStepPin(E_AXIS axis)
 {
@@ -132,12 +137,14 @@ bool MOTION_UTILS_CheckHardLimits(uint8_t invert_mask)
     
     // Apply inversion mask (bit-mapped per axis)
     // GRBL uses active-low switches by default (triggered = low)
-    bool x_inv = (invert_mask & 0x01) ? true : false;
-    bool y_inv = (invert_mask & 0x02) ? true : false;
-    bool z_inv = (invert_mask & 0x04) ? true : false;
-    bool a_inv = (invert_mask & 0x08) ? true : false;
+    // Extract individual axis invert bits from mask
+    bool x_inv = (invert_mask >> AXIS_X) & 0x01;
+    bool y_inv = (invert_mask >> AXIS_Y) & 0x01;
+    bool z_inv = (invert_mask >> AXIS_Z) & 0x01;
+    bool a_inv = (invert_mask >> AXIS_A) & 0x01;
     
     // Check if any limit is triggered (XOR with invert to get actual state)
+    // Normal: triggered = LOW (0), Inverted: triggered = HIGH (1)
     if((x_min ^ x_inv) || (x_max ^ x_inv)) return true;
     if((y_min ^ y_inv) || (y_max ^ y_inv)) return true;
     if((z_min ^ z_inv) || (z_max ^ z_inv)) return true;
