@@ -204,7 +204,7 @@ void HOMING_StartSeek(APP_DATA* appData) {
     // Generate motion segment at seek rate
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMove(current, target, *limit_cfg->homing_seek_rate, segment);
+        KINEMATICS_LinearMoveSimple(current, target, *limit_cfg->homing_seek_rate, segment);
         
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
@@ -242,7 +242,7 @@ void HOMING_StartLocate(APP_DATA* appData) {
     // Generate backoff motion segment at slow rate
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMove(current, target, *limit_cfg->homing_feed_rate, segment);
+        KINEMATICS_LinearMoveSimple(current, target, *limit_cfg->homing_feed_rate, segment);
         
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
@@ -256,7 +256,7 @@ void HOMING_StartLocate(APP_DATA* appData) {
     
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMove(current, target, *limit_cfg->homing_feed_rate, segment);
+        KINEMATICS_LinearMoveSimple(current, target, *limit_cfg->homing_feed_rate, segment);
         
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
@@ -288,7 +288,7 @@ void HOMING_StartPulloff(APP_DATA* appData) {
     // Generate pulloff motion segment
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMove(current, target, *limit_cfg->homing_feed_rate, segment);
+        KINEMATICS_LinearMoveSimple(current, target, *limit_cfg->homing_feed_rate, segment);
         
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
