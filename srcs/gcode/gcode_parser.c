@@ -53,7 +53,7 @@ static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
 static bool unitsInches = false;            /* false=mm (G21), true=inches (G20) */
 
 /* ADDED: After soft reset steppers remain disabled; enable on first motion */
-static bool stepperEnablePending = false;
+/* static bool stepperEnablePending = false;*/
 
 /* -------------------------------------------------------------------------- */
 /* Forward Declarations                                                       */
@@ -93,6 +93,7 @@ static void GCODE_PrintStartupBanner(void)
 static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue)
 {
     STEPPER_DisableAll();
+    
     extern APP_DATA appData;
     UART_SoftReset(&appData, cmdQueue);
 
@@ -107,7 +108,7 @@ static void GCODE_HandleSoftReset(GCODE_CommandQueue* cmdQueue)
     memset(rxBuffer, 0, sizeof(rxBuffer));
 
     /* Mark steppers to be re-enabled automatically on first G0/G1/G2/G3 */
-    stepperEnablePending = true;
+   // stepperEnablePending = true;
 
     GCODE_PrintStartupBanner();
 }
@@ -312,13 +313,13 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         }
 
         // If this is the first motion after a soft reset, re-enable steppers
-        if (stepperEnablePending &&
+      /*  if (stepperEnablePending &&
             (ev->type == GCODE_EVENT_LINEAR_MOVE || ev->type == GCODE_EVENT_ARC_MOVE)) {
             STEPPER_EnableAll();
             stepperEnablePending = false;
             DEBUG_PRINT_GCODE("[GCODE] Steppers re-enabled after soft reset\r\n");
         }
-
+      */
         char* pX = find_char((char*)cmd, 'X');
         char* pY = find_char((char*)cmd, 'Y');
         char* pZ = find_char((char*)cmd, 'Z');

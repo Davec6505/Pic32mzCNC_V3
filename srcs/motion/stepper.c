@@ -137,7 +137,13 @@ void STEPPER_Initialize(APP_DATA* appData) {
 
 void STEPPER_LoadSegment(MotionSegment* segment) {
     if (segment == NULL) return;
-    
+ 
+    // Handles soft reset (ox18), emergency stop, or other disabling instructions.
+    if(!steppers_enabled){
+        STEPPER_EnableAll();
+    }
+
+
     // Load deltas for Bresenham
     delta_x = segment->delta_x;
     delta_y = segment->delta_y;
@@ -353,7 +359,6 @@ void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context) {
     }
 }
 
-#include "utils.h"  // for g_axis_config and E_AXIS
 
 StepperPosition* STEPPER_GetPosition(void)
 {
