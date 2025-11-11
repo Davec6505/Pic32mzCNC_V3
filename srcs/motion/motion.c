@@ -277,6 +277,9 @@ void MOTION_Tasks(APP_DATA* appData) {
     }
 }
 void MOTION_Arc(APP_DATA* appData) {
+    DEBUG_PRINT_MOTION("[ARC] Entry: state=%d, queueCount=%d\r\n", 
+                      appData->arcGenState, appData->motionQueueCount);
+    
     // Only generate if arc is active and motion queue has space
     if(appData->arcGenState != ARC_GEN_ACTIVE || appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
         DEBUG_PRINT_MOTION("[ARC] Blocked: state=%d, queueCount=%d\r\n", 
@@ -305,7 +308,10 @@ void MOTION_Arc(APP_DATA* appData) {
         
         // Linear interpolation for Z and A axes (helical motion)
         // Calculate progress based on segment count (more reliable than angles)
-        float progress = (float)appData->arcSegmentCurrent / (float)(appData->arcSegmentTotal - 1);
+        float progress = 0.0f;
+        if (appData->arcSegmentTotal > 1) {
+            progress = (float)appData->arcSegmentCurrent / (float)(appData->arcSegmentTotal - 1);
+        }
         
         // Interpolate Z and A from start to end
         next.z = appData->arcStartPoint.z + (appData->arcEndPoint.z - appData->arcStartPoint.z) * progress;
@@ -315,16 +321,16 @@ void MOTION_Arc(APP_DATA* appData) {
         appData->arcTheta += appData->arcThetaIncrement;
     }
     
-    // Generate motion segment for this arc increment with smooth junction planning
+    // Generate motion segment for this arc increment
     MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
     
-    // Arc segments should maintain higher velocities for smoothness
-    float feedrate_mm_sec = appData->arcFeedrate / 60.0f;  // Convert mm/min to mm/sec
-    float arc_velocity = feedrate_mm_sec * 0.8f;  // Use 80% of feedrate for smooth arcs
+    // DEBUG_PRINT_MOTION("[ARC] Before LinearMoveSimple: current=(%.2f,%.2f), next=(%.2f,%.2f)\r\n",
+    //                   appData->arcCurrent.x, appData->arcCurrent.y, next.x, next.y);
     
-    // Use junction planning for smoother arc execution
-    KINEMATICS_LinearMove(appData->arcCurrent, next, appData->arcFeedrate, segment, 
-                         arc_velocity, arc_velocity);
+    // Use simple linear move for arc segments (no junction planning needed for smooth arcs)
+    KINEMATICS_LinearMoveSimple(appData->arcCurrent, next, appData->arcFeedrate, segment);
+    
+    // DEBUG_PRINT_MOTION("[ARC] After LinearMoveSimple\r\n");
     
     // Add to motion queue
     appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
@@ -372,8 +378,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             
             // Check if motion queue has space before processing
             if(appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
-                DEBUG_PRINT_MOTION("[MOTION] Queue full!\r\n");
-                return false;  // Queue full - try again later
+                DEBUG_PRINT_MOTION("[MOTION] Queue full! Skipping segment (will be lost)\r\n");
+                return false;  // Queue full - event already consumed, segment lost
             }
             
             // Build start and end coordinates
@@ -552,6 +558,9 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                                (end.y - center.y) * (end.y - center.y));
             
             if(fabsf(r_start - r_end) > 0.005f) {
+                DEBUG_PRINT_MOTION("[MOTION] ⚠️ ARC RADIUS ERROR: r_start=%.3f, r_end=%.3f, diff=%.3f\r\n",
+                                  r_start, r_end, fabsf(r_start - r_end));
+                UART_Printf("error:33\r\n");  // GRBL error code for arc radius error
                 appData->alarmCode = 33;  // Arc radius error
                 appData->state = APP_ALARM;
                 return false;
@@ -592,7 +601,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             CNC_Settings* settings = SETTINGS_GetCurrent();
             float arc_length = r_start * total_angle;
             uint32_t num_segments = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
-            if(num_segments < 1) num_segments = 1;
+            if(num_segments < 2) num_segments = 2;  // Minimum 2 segments to prevent division by zero
             
             appData->arcSegmentCurrent = 0;      // Start at segment 0
             appData->arcSegmentTotal = num_segments;  // Store total for termination check

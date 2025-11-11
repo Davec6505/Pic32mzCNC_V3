@@ -8,28 +8,18 @@ To ensure proper build configuration and output paths, always execute `make` com
 
 ## 🚀 Current Implementation Status (November 10, 2025)
 
-### ⚠️ ACTIVE ISSUES (November 11, 2025 EOD)
-**UGS File Streaming Flow Control Issue**:
-- **Symptom**: UGS file streaming stops after 6-7 moves, machine halts mid-path
-- **Example**: Double rectangle test (8 moves total) stops at move 7, position (20,10) instead of completing to (0,0)
-- **Root Cause**: Deferred "ok" response not sent when motion buffer drains
-- **Flow Control Logic**:
-  - Buffer fills to 14+ segments → `okPending = true`, "ok" withheld
-  - Segments execute and buffer drains to <14 segments
-  - **BUG**: Deferred "ok" check only at `GCODE_Tasks()` entry, not during idle loop
-  - UGS waits indefinitely for "ok", never sends remaining commands
-- **Fix Applied (November 11)**:
-  - Added second `CheckAndSendDeferredOk()` call in IDLE state when `nBytesRead == 0`
-  - Now checks for deferred "ok" even when no new UART data arriving
-  - File: `srcs/gcode/gcode_parser.c` line ~600
-- **Testing Required**: Flash and verify double rectangle completes all 8 moves to (0,0)
+### ⚠️ ACTIVE ISSUES
+**None - All major issues resolved!**
 
-**Previous Issues RESOLVED**:
+**Recently RESOLVED Issues (November 11, 2025)**:
+- ✅ **UGS Visualization Delay** - Fixed with startup OK deferral (2 motion commands)
+- ✅ **UGS File Streaming Stalls** - Fixed with deferred "ok" check in IDLE loop
 - ✅ Flash save hanging - Fixed with NVM_IsBusy() polling (November 10)
 - ✅ Motion speed slow (98 mm/min) - Fixed, now ~8000 mm/min (November 10)
 - ✅ Settings persistence - Working correctly (November 10)
 
 ### ✅ COMPLETED FEATURES
+- **STARTUP OK DEFERRAL FOR UGS VISUALIZATION**: Withholds first 2 motion command OKs until 2nd motion received, preventing UGS premature "Finished" state (November 11, 2025)
 - **SINGLE AUTHORITATIVE COUNT ARCHITECTURE**: Eliminated stale count copies, all flow control reads `appData->motionQueueCount` directly (November 11, 2025)
 - **IMPROVED FLOW CONTROL**: Deferred "ok" check in IDLE loop prevents UGS streaming stalls (November 11, 2025)
 - **MOTION PIPELINE VALIDATED**: Segments execute correctly, position tracking accurate, ISR operates properly (November 11, 2025)
@@ -154,6 +144,131 @@ Benefits:
 - ✅ Deferred "ok" sent during idle loop when buffer drains
 - ✅ UGS file streaming completes full programs
 - ✅ Cleaner architecture - single source of truth
+
+### 🔧 STARTUP OK DEFERRAL FOR UGS VISUALIZATION (November 11, 2025) ⭐ NEW
+Module: `srcs/gcode/gcode_parser.c` → Startup deferral state machine
+
+**Problem Solved**: UGS (Universal G-Code Sender) would receive all "ok" responses before motion started, mark file as "Finished", and stop automatic status polling. Motion wouldn't visualize until manual `?` query sent.
+
+**Root Cause**: Setup commands (G21, G90, G17, G92, G1F500) received "ok" immediately. By the time first motion command executed, UGS had all expected "ok" responses and considered file complete.
+
+**Solution**: Startup OK Deferral with Motion Detection
+- Withholds first 2 **motion command** "ok" responses
+- Flushes both OKs together after 2nd motion command received
+- UGS sees motion start before receiving all OKs → continues automatic polling
+
+**Implementation Architecture**:
+```c
+// Static state variables (gcode_parser.c lines 62-64)
+static bool startupDeferralActive = false;
+static uint8_t startupDeferralRemaining = 0;  // Counts down from 2
+static uint8_t startupDeferredOkCredits = 0;  // Accumulates withheld OKs
+
+// Motion detection function (lines 549-585)
+static bool LineHasMotionWord(const char* line, uint32_t len) {
+    // Two-stage check:
+    // 1. Find G0/G1/G2/G3 (excluding G10, G17, G21, etc.)
+    // 2. Verify at least one axis parameter (X/Y/Z/A) present
+    
+    // Stage 1: Scan for G followed by 0-3
+    bool found_g_code = false;
+    for (uint32_t i = 0; i < len - 1; i++) {
+        char c = line[i];
+        if (c == 'G' || c == 'g') {
+            char next = line[i+1];
+            if (next >= '0' && next <= '3') {
+                // Exclude G10, G17, G21, G28, G30, etc.
+                if (i+2 < len && line[i+2] >= '0' && line[i+2] <= '9') {
+                    continue;  // Skip G10+
+                }
+                found_g_code = true;
+                break;
+            }
+        }
+    }
+    if (!found_g_code) return false;
+    
+    // Stage 2: Verify axis parameters exist
+    // Prevents false positives like "G1F500" (feedrate only, no movement)
+    for (uint32_t i = 0; i < len; i++) {
+        char c = line[i];
+        if (c == 'X' || c == 'x' || c == 'Y' || c == 'y' || 
+            c == 'Z' || c == 'z' || c == 'A' || c == 'a') {
+            return true;  // Motion command with axis movement
+        }
+    }
+    return false;  // G-code present but no axis parameters
+}
+```
+
+**Deferral Logic** (lines 715-743 IDLE, 1045-1070 GCODE_COMMAND):
+```c
+bool isMotion = LineHasMotionWord(rxBuffer, terminator_pos);
+
+// Arm deferral on first motion command
+if (!startupDeferralActive && isMotion) {
+    startupDeferralActive = true;
+    startupDeferralRemaining = 2;
+    startupDeferredOkCredits = 0;
+}
+
+// Withhold OKs for first 2 motion commands
+if (startupDeferralActive && isMotion && startupDeferralRemaining > 0) {
+    startupDeferralRemaining--;
+    startupDeferredOkCredits++;
+    
+    // Flush both OKs when 2nd motion command received
+    if (startupDeferralRemaining == 0) {
+        while (startupDeferredOkCredits > 0) {
+            UART_SendOK();
+            startupDeferredOkCredits--;
+        }
+        startupDeferralActive = false;
+    }
+} else {
+    SendOrDeferOk(appData, cmdQueue);  // Normal flow control
+}
+```
+
+**Critical Design Details**:
+- **Two-Stage Motion Detection**: Prevents false positives from:
+  - G17/G18/G19 (plane selection)
+  - G21/G20 (units)
+  - G90/G91 (distance mode)
+  - **G1F500** (feedrate setting with no axis movement)
+- **Axis Parameter Requirement**: Only commands with X/Y/Z/A trigger deferral
+- **Inline OK Flushing**: Both OKs sent together when `remaining==0`
+- **No Hardware Dependencies**: Pure protocol-level solution, no motion system coupling
+
+**Typical Execution Sequence**:
+```gcode
+G21          → OK (setup, no deferral)
+G90          → OK (setup, no deferral)
+G17          → OK (setup, no deferral)
+G92X0Y0Z0    → OK (setup, G92 not motion)
+G1F500       → OK (feedrate only, no X/Y/Z/A parameters!)
+             → OK (blank line)
+G1X20Y0      → Deferral armed, OK withheld (1st motion, remaining=1)
+G1X20Y10     → OK, OK flushed together (2nd motion, remaining=0)
+             → UGS sees Run state, continues automatic polling
+G1X0Y10      → OK (normal flow control)
+G1X0Y0       → OK (normal flow control)
+```
+
+**Benefits**:
+- ✅ UGS automatically polls during motion (no manual `?` needed)
+- ✅ Real-time visualization without protocol hacks
+- ✅ GRBL-compatible behavior pattern
+- ✅ Robust motion detection (no false positives)
+- ✅ Works with any G-code sender expecting GRBL protocol
+
+**Testing**:
+Rectangle test shows complete success:
+- Setup commands receive immediate OKs
+- First 2 motion commands withheld
+- Motion starts, UGS sees `<Run|MPos:...>` updates
+- Complete path execution with continuous visualization
+- Clean `<Idle|...>` return when finished
 
 ### 🔧 ATOMIC INLINE GPIO ARCHITECTURE (November 8, 2025)
 Module: `incs/utils/utils.h`, `srcs/utils/utils.c`, `srcs/motion/stepper.c`

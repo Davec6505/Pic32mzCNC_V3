@@ -238,29 +238,40 @@ void APP_Tasks ( void )
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
             // Flow control uses appData.motionQueueCount directly (no sync needed)
 
-            
-            // Read bytes, tokenize, and queue commands continuously
-            GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
+            // ⚠️ CRITICAL: Don't process new G-code if in alarm state
+            if(appData.state != APP_ALARM) {
+                // Read bytes, tokenize, and queue commands continuously
+                GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
 
-            // Convert one queued command into a motion event and enqueue segment(s)
-            // Doing this BEFORE motion ensures new segments can load immediately this cycle
-            {
-                GCODE_Event event;
-                if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
-                    DEBUG_PRINT_GCODE("[APP] Event type=%d\r\n", event.type);
-                    MOTION_ProcessGcodeEvent(&appData, &event);
+                // Convert one queued command into a motion event and enqueue segment(s)
+                // Doing this BEFORE motion ensures new segments can load immediately this cycle
+                {
+                    GCODE_Event event;
+                    if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
+                        DEBUG_PRINT_GCODE("[APP] Event type=%d\r\n", event.type);
+                        
+                        // Process event - only consume if successful
+                        if (MOTION_ProcessGcodeEvent(&appData, &event)) {
+                            // Event processed successfully - consume it from queue
+                            GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
+                        }
+                        // If processing failed (queue full), leave event in queue for next iteration
+                    }
                 }
             }
 
             // ===== MOTION CONTROLLER (SIMPLIFIED - NO ROLLOVER NEEDED WITH PR2) =====
             MOTION_Tasks(&appData);
 
-            // ===== HOMING STATE MACHINE =====
-            HOMING_Tasks(&appData);
+            // ✅ CRITICAL: Check deferred OKs after motion tasks
+            // MOTION_Tasks may have started TMR4, need to release deferred OKs immediately
+            GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
 
             // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
             if(appData.arcGenState == ARC_GEN_ACTIVE) {
+                // DEBUG_PRINT_MOTION("[APP] Calling MOTION_Arc, state=%d\r\n", appData.arcGenState);
                 MOTION_Arc(&appData);
+                // DEBUG_PRINT_MOTION("[APP] MOTION_Arc returned\r\n");
             }
             
             // ===== HOMING STATE MACHINE (NON-BLOCKING) =====

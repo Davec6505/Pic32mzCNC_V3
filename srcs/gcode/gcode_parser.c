@@ -45,7 +45,7 @@
 /* Static Buffers / State                                                     */
 /* -------------------------------------------------------------------------- */
 static uint8_t txBuffer[250];
-static uint8_t rxBuffer[250];
+static uint8_t rxBuffer[512];  // Increased to match UART3 RX buffer size
 static volatile uint32_t nBytesRead = 0;
 
 GCODE_Data gcodeData = {
@@ -507,20 +507,37 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
 
     GCODE_Command* gc = &cmdQueue->commands[cmdQueue->tail];
     if (gc->command[0] == '\0') {
+        // Empty command - consume it and return false
         cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
         cmdQueue->count--;
         return false;
     }
 
     if (!parse_command_to_event(gc->command, event)) {
+        // Parse failed - consume command and return false
         cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
         cmdQueue->count--;
         return false;
     }
 
+    // ✅ SUCCESS: Event parsed, but DON'T consume yet!
+    // Event will be consumed after successful processing via GCODE_ConsumeEvent()
+    return true;
+}
+
+/**
+ * @brief Consume the current event from the queue after successful processing
+ * 
+ * CRITICAL: Only call this AFTER successfully processing the event from GCODE_GetNextEvent!
+ */
+void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue)
+{
+    if (!cmdQueue) return;
+    if (cmdQueue->count == 0) return;
+    
+    // Remove the event that was just processed
     cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
     cmdQueue->count--;
-    return true;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -549,16 +566,41 @@ static inline uint32_t Flow_Boundary(const GCODE_CommandQueue* q)
 static bool LineHasMotionWord(const uint8_t* buf, uint32_t len)
 {
     if (!buf || len == 0) return false;
+    
+    // Scan for motion commands: G0, G1, G2, G3 with actual axis parameters
+    bool foundGcode = false;
     for (uint32_t i = 0; i + 1 < len; i++) {
         char c0 = (char)buf[i];
         char c1 = (char)buf[i+1];
+        
         if (c0 == 'g' || c0 == 'G') {
+            // Check if it's G0, G1, G2, or G3
             if (c1 == '0' || c1 == '1' || c1 == '2' || c1 == '3') {
-                return true;
+                // Make sure next char is NOT a digit (to exclude G10, G21, etc.)
+                if (i + 2 < len) {
+                    char c2 = (char)buf[i+2];
+                    if (c2 >= '0' && c2 <= '9') {
+                        continue;  // This is G10, G17, G21, etc - skip it
+                    }
+                }
+                foundGcode = true;
+                // Don't return yet - need to verify there are axis parameters
             }
         }
     }
-    return false;
+    
+    if (!foundGcode) return false;
+    
+    // Now verify there's at least one axis parameter (X, Y, Z, A)
+    for (uint32_t i = 0; i < len; i++) {
+        char c = (char)buf[i];
+        if (c == 'X' || c == 'x' || c == 'Y' || c == 'y' || 
+            c == 'Z' || c == 'z' || c == 'A' || c == 'a') {
+            return true;  // Found motion command with axis parameter
+        }
+    }
+    
+    return false;  // G0/G1/G2/G3 without axis parameters (e.g., "G1 F500")
 }
 
 /**
@@ -570,23 +612,12 @@ static bool LineHasMotionWord(const uint8_t* buf, uint32_t len)
  * @param currentQueueCount Current motion queue count (from appData)
  * @param maxSegments Maximum motion queue size
  */
-static void CheckAndSendDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q)
-{
+void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
     const uint32_t boundary = Flow_Boundary(q);
     if (okPending && appData->motionQueueCount <= boundary) {
         if (UART_SendOK()) okPending = false;
     }
-
-    // Release any startup motion OKs once motion actually starts
-    if (startupDeferralActive && appData->motionActive) {
-        while (startupDeferredOkCredits > 0) {
-            UART_SendOK();
-            startupDeferredOkCredits--;
-        }
-        // Clear deferral state after releasing
-        startupDeferralActive = false;
-        startupDeferralRemaining = 0;
-    }
+    // Startup OKs now flushed inline when deferral count reaches 0
 }
 
 /**
@@ -603,6 +634,8 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
     if (appData->motionQueueCount < boundary) {
         (void)UART_SendOK();
     } else {
+        DEBUG_PRINT_GCODE("[FLOW] Buffer full (%lu>=%lu), deferring ok\r\n", 
+                          (unsigned long)appData->motionQueueCount, (unsigned long)boundary);
         okPending = true;
     }
 }
@@ -612,12 +645,20 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 /* -------------------------------------------------------------------------- */
 void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 {
+    static uint32_t call_counter = 0;
+    call_counter++;
+    
+    if ((call_counter % 10000) == 0) {
+        DEBUG_PRINT_GCODE("[GCODE_Tasks] Called %lu times, state=%d\r\n", 
+                         call_counter, gcodeData.state);
+    }
+    
     GCODE_CommandQueue* cmdQueue = commandQueue;
     uint32_t nBytesAvailable = 0;
 
     // ✅ CRITICAL: Check deferred "ok" ONCE at entry using FRESH count
     // If buffer drained and okPending, send "ok" immediately then continue processing
-    CheckAndSendDeferredOk(appData, cmdQueue);
+    GCODE_CheckDeferredOk(appData, cmdQueue);
 
     switch (gcodeData.state)
     {
@@ -635,7 +676,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 
         if (nBytesRead == 0) {
             // ✅ No new data - check if we should send deferred "ok" before exiting
-            CheckAndSendDeferredOk(appData, cmdQueue);
+            GCODE_CheckDeferredOk(appData, cmdQueue);
             break;
         }
 
@@ -692,19 +733,29 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 }
                 if (has_content) {
                     cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
-                    // ✅ Startup deferral: hold first 2 motion OKs until motion starts
-                    bool startingFromIdle = (!appData->motionActive && appData->motionQueueCount == 0 && appData->currentSegment == NULL);
+                    // ✅ Startup deferral: hold first 2 motion OKs (keeps UGS polling)
                     bool isMotion = LineHasMotionWord(rxBuffer, terminator_pos);
-                    if (!startupDeferralActive && startingFromIdle && isMotion) {
-                        // Arm deferral on the very first motion line from idle
+                    
+                    // Arm deferral on first motion line
+                    if (!startupDeferralActive && isMotion) {
                         startupDeferralActive = true;
                         startupDeferralRemaining = 2;  // Defer up to 2 initial motion OKs
                         startupDeferredOkCredits = 0;
                     }
+                    
                     if (startupDeferralActive && isMotion && startupDeferralRemaining > 0) {
                         // Consume a deferral slot and withhold OK
                         startupDeferralRemaining--;
                         startupDeferredOkCredits++;
+                        
+                        // If we've used up all deferrals, flush the OKs immediately
+                        if (startupDeferralRemaining == 0) {
+                            while (startupDeferredOkCredits > 0) {
+                                UART_SendOK();
+                                startupDeferredOkCredits--;
+                            }
+                            startupDeferralActive = false;
+                        }
                     } else {
                         // Normal flow control for non-motion or after using up deferrals
                         SendOrDeferOk(appData, cmdQueue);
@@ -727,7 +778,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     memset(rxBuffer, 0, sizeof(rxBuffer));
                 }
                 // After consuming a line, attempt to release any deferred ok now that we may have headroom
-                CheckAndSendDeferredOk(appData, cmdQueue);
+                GCODE_CheckDeferredOk(appData, cmdQueue);
                 break;
             }
         }
@@ -1020,18 +1071,28 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         }
         cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
         // ✅ Decide: send "ok" now or defer (startup or buffer-based)
-        bool startingFromIdle = (!appData->motionActive && appData->motionQueueCount == 0 && appData->currentSegment == NULL);
         bool isMotion = LineHasMotionWord(rxBuffer, cmd_end);
-        if (!startupDeferralActive && startingFromIdle && isMotion) {
-            // Arm on first motion line
+        
+        // Arm deferral on first motion line (keeps UGS polling while motion starts)
+        if (!startupDeferralActive && isMotion) {
             startupDeferralActive = true;
             startupDeferralRemaining = 2;
             startupDeferredOkCredits = 0;
         }
+        
         if (startupDeferralActive && isMotion && startupDeferralRemaining > 0) {
             // Withhold OK for this motion line
             startupDeferralRemaining--;
             startupDeferredOkCredits++;
+            
+            // If we've used up all deferrals, flush the OKs immediately
+            if (startupDeferralRemaining == 0) {
+                while (startupDeferredOkCredits > 0) {
+                    UART_SendOK();
+                    startupDeferredOkCredits--;
+                }
+                startupDeferralActive = false;
+            }
         } else {
             SendOrDeferOk(appData, cmdQueue);
         }

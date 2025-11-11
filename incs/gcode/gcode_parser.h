@@ -106,5 +106,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue);
 // Soft reset function (handles Ctrl+X/0x18) - consolidates all reset logic
 void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue);
 bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event);
+void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue);  // Consume event after successful processing
+
+// Check and send deferred "ok" responses (for flow control and startup deferral)
+void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* cmdQueue);
 
 #endif // GCODE_PARSER_H
