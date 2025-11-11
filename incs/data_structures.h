@@ -193,6 +193,10 @@ typedef struct {
     uint8_t arcPlane;                  // G17=0 (XY), G18=1 (XZ), G19=2 (YZ)
     float arcFeedrate;                 // Arc feedrate (mm/min)
     CoordinatePoint arcEndPoint;       // Final arc destination
+    
+    // Runtime motion state flag
+    // true when OC/TMR are running and motion is active; false when fully idle
+    bool motionActive;
 } APP_DATA;
 
 #endif // DATA_STRUCTURES_H

@@ -271,6 +271,7 @@ void MOTION_Tasks(APP_DATA* appData) {
             // Only stop when the complete distance has been reached (no more segments)
             if(appData->motionQueueCount == 0) {
                 TMR4_Stop();
+                appData->motionActive = false;  // Mark motion fully stopped
             }
         }
     }

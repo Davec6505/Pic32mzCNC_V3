@@ -228,6 +228,11 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     } else {
         DEBUG_PRINT_STEPPER("[STEPPER_Load] TMR4 already running\r\n");
     }
+
+    // Mark motion active when timer/OC are running
+    if (app_data_ref != NULL) {
+        app_data_ref->motionActive = true;
+    }
 }
 
 // ============================================================================

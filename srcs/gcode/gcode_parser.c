@@ -27,6 +27,7 @@
 #include "data_structures.h"
 #include "utils/uart_utils.h"
 #include "../config/default/peripheral/uart/plib_uart3.h"
+#include "definitions.h"                  // For T4CON/_T4CON_ON_MASK (hardware state)
 #include "../config/default/peripheral/gpio/plib_gpio.h"  // For LED debug
 
 /* -------------------------------------------------------------------------- */
@@ -58,8 +59,10 @@ static bool feedHoldActive = false;         /* '!' feed hold, '~' resume */
 static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
 static bool unitsInches = false;            /* false=mm (G21), true=inches (G20) */
 
-/* ADDED: After soft reset steppers remain disabled; enable on first motion */
-// static bool stepperEnablePending = false;
+/* Startup motion OK deferral: hold first 1-2 motion OKs until motion starts */
+static bool startupDeferralActive = false;      // Active when starting from idle
+static uint8_t startupDeferralRemaining = 0;    // Number of initial motion G-code OKs to withhold
+static uint8_t startupDeferredOkCredits = 0;    // Number of OKs to release once motion starts
 
 /* -------------------------------------------------------------------------- */
 /* Forward Declarations                                                       */
@@ -133,6 +136,14 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     unitsInches = false;
     gcodeData.state = GCODE_STATE_IDLE;
 
+    // Reset startup deferral state
+    startupDeferralActive = false;
+    startupDeferralRemaining = 0;
+    startupDeferredOkCredits = 0;
+
+    // Motion fully idle after reset
+    appData->motionActive = false;
+
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
 
@@ -176,6 +187,11 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
     grblCheckMode = false;
     grblAlarm = false;
     feedHoldActive = false;
+
+    // Reset startup deferral state
+    startupDeferralActive = false;
+    startupDeferralRemaining = 0;
+    startupDeferredOkCredits = 0;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -529,6 +545,22 @@ static inline uint32_t Flow_Boundary(const GCODE_CommandQueue* q)
          : 0U;
 }
 
+/* Detect if a line contains a motion command (G0, G1, G2, G3) */
+static bool LineHasMotionWord(const uint8_t* buf, uint32_t len)
+{
+    if (!buf || len == 0) return false;
+    for (uint32_t i = 0; i + 1 < len; i++) {
+        char c0 = (char)buf[i];
+        char c1 = (char)buf[i+1];
+        if (c0 == 'g' || c0 == 'G') {
+            if (c1 == '0' || c1 == '1' || c1 == '2' || c1 == '3') {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /**
  * @brief Check if we should send a deferred "ok" response
  * 
@@ -543,6 +575,17 @@ static void CheckAndSendDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q)
     const uint32_t boundary = Flow_Boundary(q);
     if (okPending && appData->motionQueueCount <= boundary) {
         if (UART_SendOK()) okPending = false;
+    }
+
+    // Release any startup motion OKs once motion actually starts
+    if (startupDeferralActive && appData->motionActive) {
+        while (startupDeferredOkCredits > 0) {
+            UART_SendOK();
+            startupDeferredOkCredits--;
+        }
+        // Clear deferral state after releasing
+        startupDeferralActive = false;
+        startupDeferralRemaining = 0;
     }
 }
 
@@ -649,8 +692,23 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 }
                 if (has_content) {
                     cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
-                    // ✅ Decide: send "ok" now or defer until buffer drains
-                    SendOrDeferOk(appData, cmdQueue);
+                    // ✅ Startup deferral: hold first 2 motion OKs until motion starts
+                    bool startingFromIdle = (!appData->motionActive && appData->motionQueueCount == 0 && appData->currentSegment == NULL);
+                    bool isMotion = LineHasMotionWord(rxBuffer, terminator_pos);
+                    if (!startupDeferralActive && startingFromIdle && isMotion) {
+                        // Arm deferral on the very first motion line from idle
+                        startupDeferralActive = true;
+                        startupDeferralRemaining = 2;  // Defer up to 2 initial motion OKs
+                        startupDeferredOkCredits = 0;
+                    }
+                    if (startupDeferralActive && isMotion && startupDeferralRemaining > 0) {
+                        // Consume a deferral slot and withhold OK
+                        startupDeferralRemaining--;
+                        startupDeferredOkCredits++;
+                    } else {
+                        // Normal flow control for non-motion or after using up deferrals
+                        SendOrDeferOk(appData, cmdQueue);
+                    }
                 } else {
                     // ✅ Blank line or whitespace-only: GRBL responds with ok to keep host streaming
                     // Some senders do not filter blank lines; failing to ack can stall streaming.
@@ -694,10 +752,15 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 float wpos_z = mpos_z - wcs->offset.z;
 
                 const char* state = "Idle";
-                if (grblAlarm) state = "Alarm";
-                else if (feedHoldActive) state = "Hold";
-                else if (appData->currentSegment != NULL &&
-                         appData->currentSegment->steps_completed < appData->currentSegment->steps_remaining) {
+                if (grblAlarm) {
+                    state = "Alarm";
+                } else if (feedHoldActive) {
+                    state = "Hold";
+                } else if ((T4CON & _T4CON_ON_MASK) != 0) {
+                    // Hardware timer running → motion in progress (or about to start)
+                    state = "Run";
+                } else if (appData->currentSegment != NULL &&
+                           appData->currentSegment->steps_completed < appData->currentSegment->steps_remaining) {
                     state = "Run";
                 } else if (appData->motionQueueCount > 0) {
                     state = "Run";
@@ -956,8 +1019,22 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             if (rxBuffer[i] == '\0') { cmd_end = i; break; }
         }
         cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
-        // ✅ Decide: send "ok" now or defer until buffer drains
-    SendOrDeferOk(appData, cmdQueue);
+        // ✅ Decide: send "ok" now or defer (startup or buffer-based)
+        bool startingFromIdle = (!appData->motionActive && appData->motionQueueCount == 0 && appData->currentSegment == NULL);
+        bool isMotion = LineHasMotionWord(rxBuffer, cmd_end);
+        if (!startupDeferralActive && startingFromIdle && isMotion) {
+            // Arm on first motion line
+            startupDeferralActive = true;
+            startupDeferralRemaining = 2;
+            startupDeferredOkCredits = 0;
+        }
+        if (startupDeferralActive && isMotion && startupDeferralRemaining > 0) {
+            // Withhold OK for this motion line
+            startupDeferralRemaining--;
+            startupDeferredOkCredits++;
+        } else {
+            SendOrDeferOk(appData, cmdQueue);
+        }
         nBytesRead = 0;
         memset(rxBuffer, 0, sizeof(rxBuffer));
         gcodeData.state = GCODE_STATE_IDLE;
