@@ -628,10 +628,24 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                        rxBuffer[0] == 'S' || rxBuffer[0] == 's') {
                 gcodeData.state = GCODE_STATE_GCODE_COMMAND;
             } else {
+                // Determine if line contains G-code content (ignore pure comments / whitespace)
                 bool has_content = false;
-                for (uint32_t i = 0; i < terminator_pos; i++) {
-                    char c = rxBuffer[i];
-                    if (c != ' ' && c != '\t' && c != 0) { has_content = true; break; }
+                // Find first non-whitespace character
+                uint32_t first_idx = 0;
+                while (first_idx < terminator_pos) {
+                    char c = rxBuffer[first_idx];
+                    if (c == ' ' || c == '\t') { first_idx++; continue; }
+                    break;
+                }
+                if (first_idx < terminator_pos) {
+                    char first = rxBuffer[first_idx];
+                    if (first == ';' || first == '(') {
+                        // Comment-only line → treat as blank, do not queue
+                        has_content = false;
+                    } else {
+                        // Any other non-whitespace, non-comment first char counts as content
+                        has_content = true;
+                    }
                 }
                 if (has_content) {
                     cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
