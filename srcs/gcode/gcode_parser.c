@@ -638,7 +638,8 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     // ✅ Decide: send "ok" now or defer until buffer drains
                     SendOrDeferOk(appData, cmdQueue);
                 } else {
-                    // ✅ Blank line - send "ok" immediately (GRBL behavior)
+                    // ✅ Blank line or whitespace-only: GRBL responds with ok to keep host streaming
+                    // Some senders do not filter blank lines; failing to ack can stall streaming.
                     UART_SendOK();
                 }
                 uint32_t skip_pos = terminator_pos + 1;
@@ -653,6 +654,8 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     nBytesRead = 0;
                     memset(rxBuffer, 0, sizeof(rxBuffer));
                 }
+                // After consuming a line, attempt to release any deferred ok now that we may have headroom
+                CheckAndSendDeferredOk(appData, cmdQueue);
                 break;
             }
         }
