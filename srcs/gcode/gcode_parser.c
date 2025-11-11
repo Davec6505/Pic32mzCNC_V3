@@ -511,27 +511,22 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
 /* Flow Control Helpers - Centralized OK Management                           */
 /* -------------------------------------------------------------------------- */
 
-/**
- * @brief Getter: Check if "ok" is currently pending (withheld)
- */
-static bool IsOkPending(void) {
-    return okPending;
-}
+/* Removed IsOkPending/SetOkPending/ClearOkPending helpers to avoid unused warnings;
+   logic now accesses okPending directly inside the flow-control helpers below. */
 
 /**
- * @brief Setter: Mark that we need to send a deferred "ok"
- * Called when command received but buffer is full
+ * @brief Compute flow-control boundary (high-water mark to start deferring ok)
+ *
+ * Boundary is maxSegments - MOTION_BUFFER_THRESHOLD, clamped to 0 if
+ * maxSegments <= MOTION_BUFFER_THRESHOLD. We keep a little headroom so
+ * segments can still be queued while motion drains.
  */
-static void SetOkPending(void) {
-    okPending = true;
-}
-
-/**
- * @brief Setter: Clear the pending "ok" flag
- * Called after we've sent the deferred "ok"
- */
-static void ClearOkPending(void) {
-    okPending = false;
+static inline uint32_t Flow_Boundary(const GCODE_CommandQueue* q)
+{
+    if (q == NULL) return 0U;
+    return (q->maxMotionSegments > MOTION_BUFFER_THRESHOLD)
+         ? (uint32_t)(q->maxMotionSegments - MOTION_BUFFER_THRESHOLD)
+         : 0U;
 }
 
 /**
@@ -543,13 +538,11 @@ static void ClearOkPending(void) {
  * @param currentQueueCount Current motion queue count (from appData)
  * @param maxSegments Maximum motion queue size
  */
-static void CheckAndSendDeferredOk(uint32_t currentQueueCount, uint32_t maxSegments) {
-    // Send deferred ok when queue drops below threshold
-    if (IsOkPending()) {
-        if (currentQueueCount < (maxSegments - MOTION_BUFFER_THRESHOLD)) {
-            UART_SendOK();
-            ClearOkPending();
-        }
+static void CheckAndSendDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q)
+{
+    const uint32_t boundary = Flow_Boundary(q);
+    if (okPending && appData->motionQueueCount <= boundary) {
+        if (UART_SendOK()) okPending = false;
     }
 }
 
@@ -561,11 +554,13 @@ static void CheckAndSendDeferredOk(uint32_t currentQueueCount, uint32_t maxSegme
  * @param currentQueueCount Current motion queue count
  * @param maxSegments Maximum motion queue size
  */
-static void SendOrDeferOk(uint32_t currentQueueCount, uint32_t maxSegments) {
-    if (currentQueueCount < (maxSegments - MOTION_BUFFER_THRESHOLD)) {
-        UART_SendOK();
+static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
+{
+    const uint32_t boundary = Flow_Boundary(q);
+    if (appData->motionQueueCount < boundary) {
+        (void)UART_SendOK();
     } else {
-        SetOkPending();  // Defer ok until buffer drains below threshold
+        okPending = true;
     }
 }
 
@@ -579,7 +574,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 
     // ✅ CRITICAL: Check deferred "ok" ONCE at entry using FRESH count
     // If buffer drained and okPending, send "ok" immediately then continue processing
-    CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+    CheckAndSendDeferredOk(appData, cmdQueue);
 
     switch (gcodeData.state)
     {
@@ -597,7 +592,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 
         if (nBytesRead == 0) {
             // ✅ No new data - check if we should send deferred "ok" before exiting
-            CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+            CheckAndSendDeferredOk(appData, cmdQueue);
             break;
         }
 
@@ -641,7 +636,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 if (has_content) {
                     cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
                     // ✅ Decide: send "ok" now or defer until buffer drains
-                    SendOrDeferOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+                    SendOrDeferOk(appData, cmdQueue);
                 } else {
                     // ✅ Blank line - send "ok" immediately (GRBL behavior)
                     UART_SendOK();
@@ -945,7 +940,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         }
         cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
         // ✅ Decide: send "ok" now or defer until buffer drains
-        SendOrDeferOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+    SendOrDeferOk(appData, cmdQueue);
         nBytesRead = 0;
         memset(rxBuffer, 0, sizeof(rxBuffer));
         gcodeData.state = GCODE_STATE_IDLE;
