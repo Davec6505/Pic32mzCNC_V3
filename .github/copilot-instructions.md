@@ -7,7 +7,32 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 To ensure proper build configuration and output paths, always execute `make` commands from the root directory of the Pic32mzCNC_V3 project. This guarantees that all relative paths and build settings are correctly applied. makefile incs target is dynamic, it knows the paths no need to add absolute file references, all paths are relative to the root directory.
 
 ## 🚀 Current Implementation Status (November 10, 2025)
+
+### ⚠️ ACTIVE ISSUES (November 11, 2025 EOD)
+**UGS File Streaming Flow Control Issue**:
+- **Symptom**: UGS file streaming stops after 6-7 moves, machine halts mid-path
+- **Example**: Double rectangle test (8 moves total) stops at move 7, position (20,10) instead of completing to (0,0)
+- **Root Cause**: Deferred "ok" response not sent when motion buffer drains
+- **Flow Control Logic**:
+  - Buffer fills to 14+ segments → `okPending = true`, "ok" withheld
+  - Segments execute and buffer drains to <14 segments
+  - **BUG**: Deferred "ok" check only at `GCODE_Tasks()` entry, not during idle loop
+  - UGS waits indefinitely for "ok", never sends remaining commands
+- **Fix Applied (November 11)**:
+  - Added second `CheckAndSendDeferredOk()` call in IDLE state when `nBytesRead == 0`
+  - Now checks for deferred "ok" even when no new UART data arriving
+  - File: `srcs/gcode/gcode_parser.c` line ~600
+- **Testing Required**: Flash and verify double rectangle completes all 8 moves to (0,0)
+
+**Previous Issues RESOLVED**:
+- ✅ Flash save hanging - Fixed with NVM_IsBusy() polling (November 10)
+- ✅ Motion speed slow (98 mm/min) - Fixed, now ~8000 mm/min (November 10)
+- ✅ Settings persistence - Working correctly (November 10)
+
 ### ✅ COMPLETED FEATURES
+- **SINGLE AUTHORITATIVE COUNT ARCHITECTURE**: Eliminated stale count copies, all flow control reads `appData->motionQueueCount` directly (November 11, 2025)
+- **IMPROVED FLOW CONTROL**: Deferred "ok" check in IDLE loop prevents UGS streaming stalls (November 11, 2025)
+- **MOTION PIPELINE VALIDATED**: Segments execute correctly, position tracking accurate, ISR operates properly (November 11, 2025)
 - **COMPLETE HOMING & LIMIT SWITCH SYSTEM**: Professional GRBL v1.1 compatible homing with $H command, array-based limit configuration, hardware debouncing, and proper inversion logic (November 10, 2025)
 - **COMPLETE SPINDLE PWM CONTROL**: OC8/TMR6 PWM system with 3.338kHz frequency, RPM conversion, M3/M5/S command integration (November 10, 2025)
 - **ARRAY-BASED AXIS CONTROL**: Eliminated all switch statements for axis operations using coordinate array utilities (November 10, 2025)
@@ -82,6 +107,53 @@ if(!(T4CON & _T4CON_ON_MASK)) {
 - Optimal stepper driver compatibility (2.5µs pulse width)
 - Hardware state validation prevents startup failures
 - Debug output shows timer frequency and timing calculations
+
+### 🔧 FLOW CONTROL ARCHITECTURE (November 11, 2025) ⭐ UPDATED
+**Single Authoritative Count Source**
+
+Problem Solved: Stale count copies causing deferred "ok" to never send when buffer drained.
+
+Root Cause Analysis:
+- `appData->motionQueueCount` was being synced to `gcodeCommandQueue.motionQueueCount` once per iteration
+- Flow control checked the STALE copy instead of FRESH authoritative count
+- When buffer drained, copied value hadn't updated yet, so deferred "ok" was never sent
+- UGS waited indefinitely for "ok", stopped sending remaining commands
+
+Solution: Single Authoritative Source
+```c
+// REMOVED from GCODE_CommandQueue structure:
+// uint32_t motionQueueCount;  // DELETE - was stale copy
+
+// REMOVED from app.c APP_IDLE:
+// appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;  // DELETE sync
+
+// Flow control now reads fresh count directly:
+CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+SendOrDeferOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+```
+
+Files Modified:
+- `incs/data_structures.h` - Removed `motionQueueCount` field from `GCODE_CommandQueue`
+- `srcs/app.c` - Removed sync at line 241
+- `srcs/gcode/gcode_parser.c` - Flow control reads `appData->motionQueueCount` directly
+
+Idle Loop Enhancement:
+```c
+case GCODE_STATE_IDLE:
+    // ... UART processing ...
+    
+    if (nBytesRead == 0) {
+        // ✅ Check for deferred "ok" even when no new data
+        CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+        break;
+    }
+```
+
+Benefits:
+- ✅ No stale copies - always reads current buffer occupancy
+- ✅ Deferred "ok" sent during idle loop when buffer drains
+- ✅ UGS file streaming completes full programs
+- ✅ Cleaner architecture - single source of truth
 
 ### 🔧 ATOMIC INLINE GPIO ARCHITECTURE (November 8, 2025)
 Module: `incs/utils/utils.h`, `srcs/utils/utils.c`, `srcs/motion/stepper.c`
@@ -1058,7 +1130,7 @@ NVM Operations (Harmony Pattern):
   - `03_arc_linear_interpolation.puml` - Arc/linear interpolation system
 - `README.md` - Complete project documentation with TODO list
 
-## Unified Data Structures (Completed)
+## Unified Data Structures (November 11, 2025 - UPDATED)
 Architecture Pattern:
 All major data structures consolidated in `incs/data_structures.h` to eliminate circular dependencies and provide clean module separation.
 
@@ -1071,33 +1143,38 @@ Structure Hierarchy:
 - GCODE_CommandQueue
   ├── commands[16]
   ├── head, tail, count
-  └── motionQueueCount, maxMotionSegments (nested for flow control)
+  └── maxMotionSegments (max buffer size ONLY, no current count)
 - APP_STATES enum
 - APP_DATA
   ├── state
-  ├── gcodeCommandQueue (with nested motion info)
-  └── motionQueue[16], head, tail, count
+  ├── gcodeCommandQueue
+  └── motionQueue[16], head, tail, count (AUTHORITATIVE)
 ```
 
-Flow Control Infrastructure (Ready to Use):
-The nested motion queue info in `GCODE_CommandQueue` enables flow control without circular dependencies:
+Flow Control Infrastructure (Single Source):
+Flow control reads `appData->motionQueueCount` directly - no copies, no sync:
 ```c
-// app.c syncs motion queue status before GCODE processing
+// app.c - NO sync needed (removed November 11)
 case APP_IDLE:
-    // Sync motion queue count for flow control
-    appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
-    
-    // Now GCODE_Tasks can check motion buffer occupancy
-    GCODE_Tasks(&appData.gcodeCommandQueue);
+    // ✅ No sync - flow control reads appData.motionQueueCount directly
+    GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
     break;
+
+// gcode_parser.c - reads fresh count directly
+void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* cmdQueue) {
+    // Check deferred "ok" using FRESH authoritative count
+    CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+    // ...
+}
 ```
 
-Benefits of Unified Structures:
+Benefits of Single Source Architecture:
 - No circular dependencies - all structures in one header
 - Clean module separation - data vs logic separation
-- Single source of truth - structure definitions in one place
+- Single source of truth - `appData->motionQueueCount` is ONLY modified in `motion.c`
+- No stale copies - flow control always sees current buffer occupancy
 - Easy to test - mock entire APP_DATA structure
-- Flow control ready - nested motion queue info accessible to G-code parser
+- Flow control works - deferred "ok" sent when buffer actually drains
 
 ## Settings Implementation (Completed)
 

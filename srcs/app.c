@@ -99,8 +99,7 @@ void APP_Initialize ( void )
     appData.gcodeCommandQueue.tail = 0;
     appData.gcodeCommandQueue.count = 0;
     
-    // ✅ Initialize nested motion queue info for flow control
-    appData.gcodeCommandQueue.motionQueueCount = 0;
+    // ✅ Initialize motion queue info for flow control (no sync needed - reads appData directly)
     appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
     
     // ✅ Initialize current position (work coordinates) to origin
@@ -237,9 +236,8 @@ void APP_Tasks ( void )
             // During motion, ISR toggles LED1 on each step (fast blink)
             // LED1 will blink at step rate, visible motion indicator
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
-            // Sync motion queue status for flow control BEFORE G-code processing
-            appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
-            appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
+            // ✅ No sync needed - flow control reads appData.motionQueueCount directly
+            // Single authoritative source: appData.motionQueueCount (managed by motion.c)
             
             // Read bytes, tokenize, and queue commands continuously
             GCODE_Tasks(&appData, &appData.gcodeCommandQueue);

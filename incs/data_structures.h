@@ -108,9 +108,8 @@ typedef struct {
     uint32_t tail;
     uint32_t count;
     
-    // ✅ Nested motion queue info for flow control (no circular dependency!)
-    // Updated by app.c before calling GCODE_Tasks()
-    uint32_t motionQueueCount;      // Current motion buffer occupancy
+    // ✅ Motion queue info for flow control (no circular dependency!)
+    // Flow control reads appData->motionQueueCount directly (single authoritative source)
     uint32_t maxMotionSegments;     // Maximum motion buffer size
 } GCODE_CommandQueue;
 

@@ -241,6 +241,11 @@ void STEPPER_SetStepRate(uint32_t rate_ticks) {
     if (period < MIN_RATE) period = MIN_RATE;
     if (period > 65535) period = 65535;  // Clamp to 16-bit max
     
+    // ✅ CRITICAL: Update segment's step_interval so ISR uses new rate
+    if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
+        app_data_ref->currentSegment->step_interval = period;
+    }
+    
     // Update PR4 - this changes the OC1 period
     TMR4_PeriodSet(period);
     
@@ -316,6 +321,11 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 void OCP1_ISR(uintptr_t context) {
     // ✅ CRITICAL DEBUG: Toggle LED to confirm ISR fires
     LED1_Toggle();
+    
+    // ✅ GUARD: No active segment - skip step generation but keep timer running
+    if (app_data_ref == NULL || app_data_ref->currentSegment == NULL) {
+        return;  // Main loop will load next segment or stop timer
+    }
     
     // ===== DOMINANT AXIS STEP (ALWAYS) =====
     // Use pre-calculated dominant_axis (set during STEPPER_LoadSegment)

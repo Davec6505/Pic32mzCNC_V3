@@ -358,6 +358,12 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
     
     DEBUG_PRINT_MOTION("[MOTION] ProcessEvent: type=%d\r\n", event->type);
     
+    // Handle non-motion events (G20/G21 units, etc.) - no motion generated
+    if (event->type == GCODE_EVENT_NONE) {
+        DEBUG_PRINT_MOTION("[MOTION] NONE event - no motion\r\n");
+        return true;  // Acknowledged, no motion needed
+    }
+    
     switch (event->type) {
         case GCODE_EVENT_LINEAR_MOVE:
         {

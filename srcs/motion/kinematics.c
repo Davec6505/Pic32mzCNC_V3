@@ -282,7 +282,9 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // Motion state initialization
     segment_buffer->steps_remaining = max_delta;
     segment_buffer->steps_completed = 0;
-    segment_buffer->step_interval = segment_buffer->initial_rate;
+    // ⚠️ TEMPORARY: Use nominal_rate (cruise speed) until velocity profiling is connected
+    // TODO: Implement proper acceleration by updating step_interval in MOTION_PHASE_VELOCITY
+    segment_buffer->step_interval = segment_buffer->nominal_rate;
     
     // Pulse width from settings (reuse existing calculation from stepper.c)
     segment_buffer->pulse_width = (uint32_t)(settings->step_pulse_time * 12.5f);  // µs to timer ticks

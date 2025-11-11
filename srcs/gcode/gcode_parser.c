@@ -27,6 +27,7 @@
 #include "data_structures.h"
 #include "utils/uart_utils.h"
 #include "../config/default/peripheral/uart/plib_uart3.h"
+#include "../config/default/peripheral/gpio/plib_gpio.h"  // For LED debug
 
 /* -------------------------------------------------------------------------- */
 /* Configuration                                                              */
@@ -50,7 +51,7 @@ GCODE_Data gcodeData = {
     .state = GCODE_STATE_IDLE,
 };
 
-static bool okPending = false;
+static bool okPending = false;              // Flow control: "ok" deferred when buffer full
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
 static bool feedHoldActive = false;         /* '!' feed hold, '~' resume */
@@ -122,7 +123,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     cmdQueue->head  = 0;
     cmdQueue->tail  = 0;
     cmdQueue->count = 0;
-    cmdQueue->motionQueueCount = appData->motionQueueCount;
+    /* ✅ No sync needed - flow control reads appData->motionQueueCount directly */
 
     /* 7. Reset G-code parser state */
     okPending = false;
@@ -138,7 +139,17 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     /* 8. Mark steppers to be re-enabled automatically on first motion command */
     // stepperEnablePending = true;
 
-    /* 9. Print GRBL startup banner (expected by senders after Ctrl+X) */
+    /* 9. Save current settings to flash (persist any changes made before reset) */
+    // Flash write now uses CORETIMER delays to prevent hangs
+    // CRITICAL: Clear G92 offset before saving - G92 is a temporary offset, not persistent!
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+    if (settings != NULL) {
+        SETTINGS_SetG92Offset(0.0f, 0.0f, 0.0f);  // Reset G92 to zero before saving
+        SETTINGS_SaveToFlash(settings);
+        DEBUG_PRINT_GCODE("[GCODE] Settings saved to flash during soft reset (G92 cleared)\r\n");
+    }
+
+    /* 10. Print GRBL startup banner (expected by senders after Ctrl+X) */
 #ifdef ENABLE_STARTUP_BANNER
     UART_SEND_BANNER();  // Compile-time string and length from common.h
 #endif
@@ -289,8 +300,11 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         char* pend = NULL;
         int gnum = (int)strtol(&cmd[1], &pend, 10);
 
-        if (gnum == 20) { unitsInches = true; return true; }
-        if (gnum == 21) { unitsInches = false; return true; }
+        // G20/G21 - Units (handled internally, no event needed)
+        if (gnum == 20) { unitsInches = true; ev->type = GCODE_EVENT_NONE; return true; }
+        if (gnum == 21) { unitsInches = false; ev->type = GCODE_EVENT_NONE; return true; }
+        
+        // G90/G91 - Positioning mode
         if (gnum == 90) { ev->type = GCODE_EVENT_SET_ABSOLUTE; return true; }
         if (gnum == 91) { ev->type = GCODE_EVENT_SET_RELATIVE; return true; }
 
@@ -382,14 +396,6 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             return false;
         }
 
-        // If this is the first motion after a soft reset, re-enable steppers
-      /*  if (stepperEnablePending &&
-            (ev->type == GCODE_EVENT_LINEAR_MOVE || ev->type == GCODE_EVENT_ARC_MOVE)) {
-            STEPPER_EnableAll();
-            stepperEnablePending = false;
-            DEBUG_PRINT_GCODE("[GCODE] Steppers re-enabled after soft reset\r\n");
-        }
-      */
         char* pX = find_char((char*)cmd, 'X');
         char* pY = find_char((char*)cmd, 'Y');
         char* pZ = find_char((char*)cmd, 'Z');
@@ -502,12 +508,78 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Flow Control Helpers - Centralized OK Management                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * @brief Getter: Check if "ok" is currently pending (withheld)
+ */
+static bool IsOkPending(void) {
+    return okPending;
+}
+
+/**
+ * @brief Setter: Mark that we need to send a deferred "ok"
+ * Called when command received but buffer is full
+ */
+static void SetOkPending(void) {
+    okPending = true;
+}
+
+/**
+ * @brief Setter: Clear the pending "ok" flag
+ * Called after we've sent the deferred "ok"
+ */
+static void ClearOkPending(void) {
+    okPending = false;
+}
+
+/**
+ * @brief Check if we should send a deferred "ok" response
+ * 
+ * This should be called ONCE at the entry of GCODE_Tasks.
+ * Sends "ok" when queue count drops below threshold after being deferred.
+ * 
+ * @param currentQueueCount Current motion queue count (from appData)
+ * @param maxSegments Maximum motion queue size
+ */
+static void CheckAndSendDeferredOk(uint32_t currentQueueCount, uint32_t maxSegments) {
+    // Send deferred ok when queue drops below threshold
+    if (IsOkPending()) {
+        if (currentQueueCount < (maxSegments - MOTION_BUFFER_THRESHOLD)) {
+            UART_SendOK();
+            ClearOkPending();
+        }
+    }
+}
+
+/**
+ * @brief Decide whether to send "ok" immediately or defer it
+ * 
+ * Called when a command is received.
+ * 
+ * @param currentQueueCount Current motion queue count
+ * @param maxSegments Maximum motion queue size
+ */
+static void SendOrDeferOk(uint32_t currentQueueCount, uint32_t maxSegments) {
+    if (currentQueueCount < (maxSegments - MOTION_BUFFER_THRESHOLD)) {
+        UART_SendOK();
+    } else {
+        SetOkPending();  // Defer ok until buffer drains below threshold
+    }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Main G-code / Protocol Tasks                                               */
 /* -------------------------------------------------------------------------- */
 void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 {
     GCODE_CommandQueue* cmdQueue = commandQueue;
     uint32_t nBytesAvailable = 0;
+
+    // ✅ CRITICAL: Check deferred "ok" ONCE at entry using FRESH count
+    // If buffer drained and okPending, send "ok" immediately then continue processing
+    CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
 
     switch (gcodeData.state)
     {
@@ -523,7 +595,11 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             }
         }
 
-        if (nBytesRead == 0) break;
+        if (nBytesRead == 0) {
+            // ✅ No new data - check if we should send deferred "ok" before exiting
+            CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+            break;
+        }
 
         /* Literal "0x18" typed by user */
         if (nBytesRead >= 4 &&
@@ -564,9 +640,11 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 }
                 if (has_content) {
                     cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
-                    if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-                        UART_SendOK();
-                    } else okPending = true;
+                    // ✅ Decide: send "ok" now or defer until buffer drains
+                    SendOrDeferOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+                } else {
+                    // ✅ Blank line - send "ok" immediately (GRBL behavior)
+                    UART_SendOK();
                 }
                 uint32_t skip_pos = terminator_pos + 1;
                 while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
@@ -579,9 +657,6 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 } else {
                     nBytesRead = 0;
                     memset(rxBuffer, 0, sizeof(rxBuffer));
-                }
-                if (okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-                    UART_SendOK(); okPending = false;
                 }
                 break;
             }
@@ -834,8 +909,19 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 handled = true;
             }
         }
+        else if (len >= 5 && cmd[0] == '$' && cmd[1] == 'S' && cmd[2] == 'A' && cmd[3] == 'V' && cmd[4] == 'E') {
+            // $SAVE - Explicitly save current settings to flash
+            CNC_Settings* settings = SETTINGS_GetCurrent();
+            if (settings != NULL && SETTINGS_SaveToFlash(settings)) {
+                UART3_Write((uint8_t*)"[MSG:Settings saved to flash]\r\n", 33);
+            } else {
+                UART3_Write((uint8_t*)"error:9\r\n", 10);  // Error 9: Flash write failed
+                send_ok = false;
+            }
+            handled = true;
+        }
         else if (len == 1 && cmd[0] == '$') {
-            UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $C $X $F $RST= $SLP]\r\n", 44);
+            UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $C $X $F $RST= $SAVE $SLP]\r\n", 50);
             handled = true;
         }
 
@@ -858,9 +944,8 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             if (rxBuffer[i] == '\0') { cmd_end = i; break; }
         }
         cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
-        if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-            UART_SendOK();
-        } else okPending = true;
+        // ✅ Decide: send "ok" now or defer until buffer drains
+        SendOrDeferOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
         nBytesRead = 0;
         memset(rxBuffer, 0, sizeof(rxBuffer));
         gcodeData.state = GCODE_STATE_IDLE;

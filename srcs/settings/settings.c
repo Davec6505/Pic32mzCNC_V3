@@ -181,32 +181,53 @@ bool SETTINGS_SaveToFlash(const CNC_Settings* settings)
         return false;  // Address not row-aligned!
     }
     
-    // ✅ Wait for NVM ready (Harmony pattern)
-    while(NVM_IsBusy() == true);
+    // ✅ Poll WR bit with timeout - prevents infinite hang on hardware fault
+    // Wait for any pending NVM operation to complete
+    uint32_t timeout = 1000000; // ~1 second timeout (100MHz core, 2 ticks per iteration)
+    while(NVM_IsBusy() && timeout > 0) {
+        timeout--;
+    }
+    if (timeout == 0) {
+        return false;  // Timeout waiting for NVM ready
+    }
     
-    // ✅ Erase the Page (Harmony pattern)
+    // ✅ Erase the Page
     NVM_PageErase(address);
     
-    // ✅ Wait for erase complete using callback flag
-    while(xferDone == false);
+    // ✅ Poll WR bit until erase complete (typically ~20ms worst case)
+    timeout = 10000000; // ~100ms timeout for page erase (100MHz core)
+    while(NVM_IsBusy() && timeout > 0) {
+        timeout--;
+    }
+    if (timeout == 0) {
+        return false;  // Timeout during page erase
+    }
     
-    xferDone = false;
+    // ✅ Small delay after erase for flash recovery
+    CORETIMER_DelayUs(100);
     
     // ✅ Check for erase errors
     if (NVM_ErrorGet() != NVM_ERROR_NONE) {
         return false;
     }
     
-    // ✅ Write data row-by-row (Harmony pattern)
+    // ✅ Write data row-by-row
     for (i = 0; i < sizeof(CNC_Settings); i+= NVM_FLASH_ROWSIZE)
     {
         // Program a row of data
         NVM_RowWrite((uint32_t *)writePtr, address);
 
-        // Wait for write complete using callback flag
-        while(xferDone == false);
+        // ✅ Poll WR bit until write complete (typically ~2ms worst case per row)
+        timeout = 1000000; // ~10ms timeout per row write (100MHz core)
+        while(NVM_IsBusy() && timeout > 0) {
+            timeout--;
+        }
+        if (timeout == 0) {
+            return false;  // Timeout during row write
+        }
         
-        xferDone = false;
+        // ✅ Small delay between rows for flash recovery
+        CORETIMER_DelayUs(50);
         
         // Check for write errors
         if (NVM_ErrorGet() != NVM_ERROR_NONE) {
@@ -216,6 +237,9 @@ bool SETTINGS_SaveToFlash(const CNC_Settings* settings)
         writePtr += NVM_FLASH_ROWSIZE;
         address  += NVM_FLASH_ROWSIZE;
     }
+    
+    // ✅ Final delay to ensure flash is stable
+    CORETIMER_DelayUs(100);
     
     return true;
 }
