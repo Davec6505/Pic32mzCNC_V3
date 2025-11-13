@@ -95,7 +95,7 @@ static const CNC_Settings default_settings = {
     .tool_length_offset = 0.0f,
     
     // Arc configuration
-    .mm_per_arc_segment = 0.1f,    // GRBL default: 0.1mm per arc segment
+    .mm_per_arc_segment = 0.5f,    // Increased from 0.1mm - creates larger segments with reliable step counts
     
     .checksum = 0  // Will be calculated
 };

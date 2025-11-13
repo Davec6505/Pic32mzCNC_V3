@@ -55,6 +55,7 @@ bool UART_Printf(const char* format, ...) {
 /* ========== GRBL PROTOCOL MESSAGE HELPERS ========== */
 
 bool UART_SendOK(void) {
+    DEBUG_PRINT_GCODE("[UART] Sending 'ok'\r\n");
     UART3_Write((uint8_t*)"ok\r\n", 4);
     return true;
 }
