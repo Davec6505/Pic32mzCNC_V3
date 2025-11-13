@@ -52,11 +52,27 @@ typedef enum {
 } ArcGenState;
 
 // ============================================================================
+// Motion Segment Type
+// ============================================================================
+
+typedef enum {
+    SEGMENT_TYPE_LINEAR = 0,    // G0/G1 linear motion
+    SEGMENT_TYPE_ARC,           // G2/G3 arc motion
+    SEGMENT_TYPE_DWELL          // G4 dwell (no motion, just timer)
+} SegmentType;
+
+// ============================================================================
 // Motion Segment Structure
 // ============================================================================
 
 typedef struct {
-    // Bresenham parameters
+    // Segment type
+    SegmentType type;            // LINEAR, ARC, or DWELL
+    
+    // Dwell-specific parameters (only used when type == SEGMENT_TYPE_DWELL)
+    uint32_t dwell_duration;     // Dwell duration in core timer ticks (100MHz)
+    
+    // Bresenham parameters (only used for LINEAR/ARC segments)
     int32_t delta_x, delta_y, delta_z, delta_a;
     int32_t error_y, error_z, error_a;
     
@@ -194,9 +210,11 @@ typedef struct {
     float arcFeedrate;                 // Arc feedrate (mm/min)
     CoordinatePoint arcEndPoint;       // Final arc destination
     
-    // Runtime motion state flag
+    // Runtime motion state flags
     // true when OC/TMR are running and motion is active; false when fully idle
     bool motionActive;
+    // true when a segment completes (signals to check deferred ok)
+    bool motionSegmentCompleted;
 } APP_DATA;
 
 #endif // DATA_STRUCTURES_H

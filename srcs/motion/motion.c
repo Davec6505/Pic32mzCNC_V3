@@ -96,8 +96,28 @@ void MOTION_SegmentTasks(MotionSegment motionQueue[], uint32_t* head, uint32_t* 
         // ====================================================================
         case MOTION_STATE_EXECUTING:
         {
+            // ✅ DWELL SEGMENT: Check timer instead of steps
+            if (current_segment->type == SEGMENT_TYPE_DWELL) {
+                if (STEPPER_IsDwellComplete()) {
+                    DEBUG_PRINT_MOTION("[COMPLETE] Dwell segment done\r\n");
+                    motion_state = MOTION_STATE_SEGMENT_COMPLETE;
+                }
+                break;  // Don't check steps or velocity for dwell
+            }
+            
+            // ✅ MOTION SEGMENT (LINEAR/ARC): Check steps and update velocity
+            // ✅ DEBUG: Check completion status periodically
+            static uint32_t debug_check_counter = 0;
+            if (++debug_check_counter >= 1000) {
+                debug_check_counter = 0;
+                DEBUG_PRINT_MOTION("[EXECUTING] steps_completed=%lu, steps_remaining=%lu\r\n",
+                    current_segment->steps_completed, current_segment->steps_remaining);
+            }
+            
             // Check if segment is complete (ISR updates steps_completed)
             if (current_segment->steps_completed >= current_segment->steps_remaining) {
+                DEBUG_PRINT_MOTION("[COMPLETE] Segment done: %lu >= %lu\r\n",
+                    current_segment->steps_completed, current_segment->steps_remaining);
                 motion_state = MOTION_STATE_SEGMENT_COMPLETE;
                 break;
             }
@@ -167,9 +187,14 @@ void MOTION_Tasks(APP_DATA* appData) {
     // This function is called continuously from APP_Tasks (main loop).
     // It manages segment loading and monitoring - all real-time work happens in OCP1_ISR!
     
+    // ⚠️ DEBUG REMOVED - was flooding UART, causing system freeze
+    // Only print when actually loading a segment (see below)
+    
     // ===== 1. SEGMENT LOADING =====
     // Load new segment when currentSegment is NULL and queue has data
     if(appData->currentSegment == NULL && appData->motionQueueCount > 0) {
+        
+        DEBUG_PRINT_MOTION("[MOTION_Tasks] Loading segment: queue=%lu\r\n", appData->motionQueueCount);
         // Get segment from tail of circular buffer
         appData->currentSegment = &appData->motionQueue[appData->motionQueueTail];
 
@@ -179,6 +204,9 @@ void MOTION_Tasks(APP_DATA* appData) {
             appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
             appData->motionQueueCount--;
             appData->currentSegment = NULL;
+            
+            // ✅ Signal that queue space became available
+            appData->motionSegmentCompleted = true;
             return;  // Try again next iteration
         }
         
@@ -213,19 +241,26 @@ void MOTION_Tasks(APP_DATA* appData) {
         if(seg->steps_completed < seg->accelerate_until) {
             // ✅ ACCELERATION PHASE
             // Rate decreases (interval gets shorter, speed increases)
-            // new_rate = initial_rate - (steps_completed * rate_delta)
-            new_rate = seg->initial_rate - ((int32_t)seg->steps_completed * abs(seg->rate_delta));
-            
-            // Clamp to nominal rate (don't overshoot)
-            if(new_rate < seg->nominal_rate) {
-                new_rate = seg->nominal_rate;
+            // Guard against underflow from multiplication overflow
+            int32_t rate_change = (int32_t)seg->steps_completed * abs(seg->rate_delta);
+            if (rate_change > (int32_t)seg->initial_rate) {
+                new_rate = seg->nominal_rate;  // Clamp to nominal if underflow would occur
+            } else {
+                new_rate = seg->initial_rate - rate_change;
+                
+                // Clamp to nominal rate (don't overshoot)
+                if(new_rate < seg->nominal_rate) {
+                    new_rate = seg->nominal_rate;
+                }
             }
             
         } else if(seg->steps_completed > seg->decelerate_after) {
             // ✅ DECELERATION PHASE
             // Rate increases (interval gets longer, speed decreases)
             uint32_t decel_steps = seg->steps_completed - seg->decelerate_after;
-            new_rate = seg->nominal_rate + ((int32_t)decel_steps * abs(seg->rate_delta));
+            int32_t rate_change = (int32_t)decel_steps * abs(seg->rate_delta);
+            
+            new_rate = seg->nominal_rate + rate_change;
             
             // Clamp to final rate (don't slow below minimum)
             if(new_rate > seg->final_rate) {
@@ -242,10 +277,11 @@ void MOTION_Tasks(APP_DATA* appData) {
             STEPPER_SetStepRate(new_rate);
             appData->currentStepInterval = new_rate;
             
-            DEBUG_PRINT_MOTION("[MOTION] Rate update: %lu (steps=%lu, phase=%s)\r\n", 
-                             new_rate, seg->steps_completed,
-                             (seg->steps_completed < seg->accelerate_until) ? "ACCEL" :
-                             (seg->steps_completed > seg->decelerate_after) ? "DECEL" : "CRUISE");
+            // ⚠️ DISABLED: Too verbose - floods UART and causes crashes
+            // DEBUG_PRINT_MOTION("[MOTION] Rate update: %lu (steps=%lu, phase=%s)\r\n", 
+            //                  new_rate, seg->steps_completed,
+            //                  (seg->steps_completed < seg->accelerate_until) ? "ACCEL" :
+            //                  (seg->steps_completed > seg->decelerate_after) ? "DECEL" : "CRUISE");
         }
     }
     
@@ -254,14 +290,26 @@ void MOTION_Tasks(APP_DATA* appData) {
     if(appData->currentSegment != NULL) {
         MotionSegment* seg = appData->currentSegment;
         
+        // ✅ DEBUG: Periodic completion check
+        static uint32_t completion_check_counter = 0;
+        if (++completion_check_counter >= 5000) {
+            completion_check_counter = 0;
+            DEBUG_PRINT_MOTION("[CHECK] steps_completed=%lu, steps_remaining=%lu\r\n",
+                seg->steps_completed, seg->steps_remaining);
+        }
+        
         if(seg->steps_completed >= seg->steps_remaining) {
             // ===== DEBUG: Segment Completion =====
-            DEBUG_PRINT_SEGMENT("[SEGMENT] Complete: %lu steps\r\n", seg->steps_completed);
+            DEBUG_PRINT_MOTION("[SEGMENT] Complete: %lu >= %lu steps\r\n", 
+                seg->steps_completed, seg->steps_remaining);
             DEBUG_EXEC_SEGMENT(LED1_Clear());  // Visual indicator: segment done
             
             // Segment complete - remove from queue
             appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
             appData->motionQueueCount--;
+            
+            // ✅ Signal that queue space became available
+            appData->motionSegmentCompleted = true;
             
             // Mark current segment as NULL so next one loads
             appData->currentSegment = NULL;
@@ -300,9 +348,16 @@ void MOTION_Arc(APP_DATA* appData) {
         // Use exact end point to prevent accumulated error
         next = appData->arcEndPoint;
         appData->arcGenState = ARC_GEN_IDLE;
+        DEBUG_PRINT_MOTION("[ARC] ✅ COMPLETE: Arc finished, state now IDLE\r\n");
+        DEBUG_PRINT_MOTION("[ARC] COMPLETE: Final segment, exact end=(%.2f,%.2f)\r\n",
+                          next.x, next.y);
         
     } else {
-        // Calculate intermediate point using CURRENT theta
+        // ✅ CRITICAL FIX: Increment angle BEFORE calculating next position
+        // Otherwise first segment calculates at START theta → zero steps!
+        appData->arcTheta += appData->arcThetaIncrement;
+        
+        // Calculate intermediate point using NEXT theta
         next.x = appData->arcCenter.x + appData->arcRadius * cosf(appData->arcTheta);
         next.y = appData->arcCenter.y + appData->arcRadius * sinf(appData->arcTheta);
         
@@ -316,9 +371,6 @@ void MOTION_Arc(APP_DATA* appData) {
         // Interpolate Z and A from start to end
         next.z = appData->arcStartPoint.z + (appData->arcEndPoint.z - appData->arcStartPoint.z) * progress;
         next.a = appData->arcStartPoint.a + (appData->arcEndPoint.a - appData->arcStartPoint.a) * progress;
-        
-        // Increment angle for next segment
-        appData->arcTheta += appData->arcThetaIncrement;
     }
     
     // Generate motion segment for this arc increment
@@ -336,19 +388,19 @@ void MOTION_Arc(APP_DATA* appData) {
     appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
     appData->motionQueueCount++;
     
-    // Update current position
+    // Update current position (arc internal state)
     appData->arcCurrent = next;
+    
+    // ✅ CRITICAL: Update work coordinates INCREMENTALLY for each segment
+    // This ensures currentX/Y reflect actual position even during long arcs
+    // Required for multi-segment arcs where next command may arrive before completion
+    appData->currentX = next.x;
+    appData->currentY = next.y;
+    appData->currentZ = next.z;
+    appData->currentA = next.a;
     
     // Increment segment counter
     appData->arcSegmentCurrent++;
-    
-    // Update work coordinates when arc completes
-    if(appData->arcGenState == ARC_GEN_IDLE) {
-        appData->currentX = appData->arcEndPoint.x;
-        appData->currentY = appData->arcEndPoint.y;
-        appData->currentZ = appData->arcEndPoint.z;
-        appData->currentA = appData->arcEndPoint.a;
-    }
 }
 
 
@@ -430,11 +482,18 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 appData->modalFeedrate = feedrate;
             }
             
+            // ✅ CRITICAL: Check if motion queue has space
+            if (appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+                DEBUG_PRINT_MOTION("[LINEAR] Motion queue full (%lu/%d), deferring command\r\n",
+                                  (unsigned long)appData->motionQueueCount, MAX_MOTION_SEGMENTS);
+                return false;  // Queue full, leave event in queue for retry
+            }
+            
             // Get next queue slot
             MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
             
-            DEBUG_PRINT_MOTION("[MOTION] Calling KINEMATICS_LinearMove: start=(%.2f,%.2f), end=(%.2f,%.2f), F=%.1f\r\n",
-                              start.x, start.y, end.x, end.y, feedrate);
+            // DEBUG_PRINT_MOTION("[MOTION] Calling KINEMATICS_LinearMove: start=(%.2f,%.2f), end=(%.2f,%.2f), F=%.1f\r\n",
+            //                   start.x, start.y, end.x, end.y, feedrate);
             
             // ===== JUNCTION PLANNING: Calculate entry and exit velocities =====
             float entry_velocity = 8.33f;  // Default: start from minimum speed (500 mm/min)
@@ -498,12 +557,12 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // Convert to motion segment with junction velocities
             KINEMATICS_LinearMove(start, end, feedrate, segment, entry_velocity, exit_velocity);
 
-            DEBUG_PRINT_MOTION("[MOTION] Segment: steps=%lu, dx=%ld, dy=%ld, dz=%ld\r\n",
-                              segment->steps_remaining, segment->delta_x, segment->delta_y, segment->delta_z);
+            // DEBUG_PRINT_MOTION("[MOTION] Segment: steps=%lu, dx=%ld, dy=%ld, dz=%ld\r\n",
+            //                   segment->steps_remaining, segment->delta_x, segment->delta_y, segment->delta_z);
 
             // Guard: skip zero-length segments (no steps)
             if (segment->steps_remaining == 0) {
-                DEBUG_PRINT_MOTION("[MOTION] Zero-length segment - skipping\r\n");
+                // DEBUG_PRINT_MOTION("[MOTION] Zero-length segment - skipping\r\n");
                 // Update current position and treat as no-op
                 appData->currentX = end.x;
                 appData->currentY = end.y;
@@ -512,7 +571,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 return true;
             }
 
-            DEBUG_PRINT_MOTION("[MOTION] Adding segment to queue (count will be %d)\r\n", appData->motionQueueCount + 1);
+            // DEBUG_PRINT_MOTION("[MOTION] Adding segment to queue (count will be %d)\r\n", appData->motionQueueCount + 1);
             
             // Add to motion queue
             appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
@@ -570,6 +629,13 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             float start_angle = atan2f(start.y - center.y, start.x - center.x);
             float end_angle = atan2f(end.y - center.y, end.x - center.x);
             
+            DEBUG_PRINT_MOTION("[ARC INIT] Start=(%.2f,%.2f) End=(%.2f,%.2f) Center=(%.2f,%.2f)\r\n",
+                              start.x, start.y, end.x, end.y, center.x, center.y);
+            DEBUG_PRINT_MOTION("[ARC INIT] Direction=%s Radius=%.3f\r\n",
+                              event->data.arcMove.clockwise ? "CW(G2)" : "CCW(G3)", r_start);
+            DEBUG_PRINT_MOTION("[ARC INIT] Start_angle=%.3f End_angle=%.3f\r\n",
+                              start_angle, end_angle);
+            
             float total_angle;
             if(event->data.arcMove.clockwise) {
                 total_angle = start_angle - end_angle;
@@ -579,8 +645,12 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 if(total_angle <= 0.0f) total_angle += 2.0f * M_PI;
             }
             
+            DEBUG_PRINT_MOTION("[ARC INIT] Total_angle=%.3f rad (%.1f deg)\r\n",
+                              total_angle, total_angle * 180.0f / M_PI);
+            
             // Initialize arc state
             appData->arcGenState = ARC_GEN_ACTIVE;
+            DEBUG_PRINT_MOTION("[ARC] ✅ NEW ARC: Initialized, state now ACTIVE\r\n");
             appData->arcTheta = start_angle;
             appData->arcThetaStart = start_angle;  // Store initial angle for progress calculation
             appData->arcThetaEnd = end_angle;
@@ -594,14 +664,17 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             appData->arcPlane = appData->modalPlane;
             appData->arcFeedrate = event->data.arcMove.feedrate;
             
-            // ✅ CRITICAL: Reset step accumulators when starting new arc
-            // This prevents fractional steps from previous moves affecting arc accuracy
-            KINEMATICS_ResetAccumulators();
+            // ✅ REMOVED: Don't reset accumulators - arc segments MUST accumulate fractional steps!
+            // Each 0.1mm segment may be <1 step, but fractional steps accumulate across all segments
+            // KINEMATICS_ResetAccumulators();  // ❌ REMOVED - caused zero-step arc segments
             
             CNC_Settings* settings = SETTINGS_GetCurrent();
             float arc_length = r_start * total_angle;
             uint32_t num_segments = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
             if(num_segments < 2) num_segments = 2;  // Minimum 2 segments to prevent division by zero
+            
+            DEBUG_PRINT_MOTION("[ARC INIT] Arc_length=%.2f mm, Segments=%lu, mm_per_segment=%.3f\r\n",
+                              arc_length, (unsigned long)num_segments, settings->mm_per_arc_segment);
             
             appData->arcSegmentCurrent = 0;      // Start at segment 0
             appData->arcSegmentTotal = num_segments;  // Store total for termination check
@@ -612,6 +685,9 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             } else {
                 appData->arcThetaIncrement = -fabsf(appData->arcThetaIncrement);
             }
+            
+            DEBUG_PRINT_MOTION("[ARC INIT] Theta_increment=%.4f rad, Total segments=%lu\r\n",
+                              appData->arcThetaIncrement, (unsigned long)num_segments);
             
             return true;
         }
@@ -700,6 +776,32 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
         }
         
         case GCODE_EVENT_DWELL:
+        {
+            // G4 P<seconds> - Create a DWELL segment in the motion queue
+            // Convert seconds to core timer ticks (core timer runs at CPU_FREQ/2 = 100MHz)
+            float seconds = event->data.dwell.seconds;
+            uint32_t ticks = (uint32_t)(seconds * 100000000.0f);  // 100MHz core timer
+            
+            // Check if motion queue has space
+            if (appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+                DEBUG_PRINT_MOTION("[DWELL] Motion queue full, cannot enqueue dwell\r\n");
+                return false;
+            }
+            
+            // Create DWELL segment
+            MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
+            memset(segment, 0, sizeof(MotionSegment));  // Zero all fields
+            
+            segment->type = SEGMENT_TYPE_DWELL;
+            segment->dwell_duration = ticks;
+            
+            // Enqueue segment
+            appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+            appData->motionQueueCount++;
+            
+            DEBUG_PRINT_MOTION("[DWELL] Enqueued %.3f second dwell segment (%lu ticks)\r\n", seconds, (unsigned long)ticks);
+            return true;
+        }
         case GCODE_EVENT_COOLANT_ON:
         case GCODE_EVENT_COOLANT_OFF:
         case GCODE_EVENT_SET_TOOL:
