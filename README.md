@@ -1052,4 +1052,158 @@ GND           → Signal Ground
 
 For complete MCC configuration and pin alternate function settings, refer to the project's `.mcc` configuration files and GPIO PLIB generated code in `srcs/config/default/peripheral/gpio/`.
 
+## 📋 **TODO: Future Features** (November 13, 2025)
+
+### **Priority 1: Production Testing** 
+**Status**: ⏳ In Progress  
+**Goal**: Validate current implementation with real CNC operations before adding features
+
+Tasks:
+- [ ] Test with actual stepper motors and drivers
+- [ ] Validate position accuracy over full travel range
+- [ ] Test complex toolpaths from CAM software
+- [ ] Verify junction deviation behavior on real cuts
+- [ ] Tune GRBL settings ($-parameters) for specific machine
+
+### **Priority 2: Probing System (G38.x)**
+**Status**: ❌ Not Started  
+**Dependencies**: Production testing complete  
+**Use Case**: Automatic work coordinate zero-setting, tool length measurement
+
+Features to implement:
+- [ ] G38.2 - Probe toward workpiece, stop on contact, error if not triggered
+- [ ] G38.3 - Probe toward workpiece, stop on contact, no error
+- [ ] G38.4 - Probe away from workpiece, stop on loss of contact, error if not triggered
+- [ ] G38.5 - Probe away from workpiece, stop on loss of contact, no error
+- [ ] Probe hardware integration (digital input pin)
+- [ ] Probe position storage and reporting in `$#` command
+- [ ] Probe feed rate limits and safety checks
+- [ ] Integration with tool length offset (G43)
+
+**Estimated Effort**: 6-8 hours  
+**Files to modify**: `gcode_parser.c`, `motion.c`, `app.c`, `settings.c`
+
+### **Priority 3: Predefined Positions (G28/G30)**
+**Status**: ❌ Not Started  
+**Dependencies**: None  
+**Use Case**: Tool change positions, safe parking locations, machine home return
+
+Features to implement:
+- [ ] G28 - Return to predefined position #1 (via optional intermediate point)
+- [ ] G28.1 - Set current position as G28 reference
+- [ ] G30 - Return to predefined position #2 (via optional intermediate point)
+- [ ] G30.1 - Set current position as G30 reference
+- [ ] G28/G30 positions stored in NVM flash (persistent across resets)
+- [ ] Optional intermediate point handling (G28 X10 Y5 → move to X10,Y5 first, then G28 position)
+- [ ] Report G28/G30 positions in `$#` command
+
+**Estimated Effort**: 4-6 hours  
+**Files to modify**: `gcode_parser.c`, `settings.c`, `app.c`
+
+### **Priority 4: Tool Length Compensation (G43/G49)**
+**Status**: ⚠️ Partial (storage exists, not applied)  
+**Dependencies**: Probing system (optional, can be set manually)  
+**Use Case**: Automatic Z-axis offset for different tool lengths
+
+Features to implement:
+- [ ] G43 Hx - Apply tool length offset for tool #x (use stored TLO table)
+- [ ] G43.1 Kx - Apply immediate tool length offset of x mm
+- [ ] G49 - Cancel tool length compensation
+- [ ] Tool length offset table (multiple tools, indexed by H-word)
+- [ ] TLO table storage in NVM flash
+- [ ] Apply TLO to all Z-axis motion commands
+- [ ] Report active TLO in `$G` modal state
+
+**Estimated Effort**: 5-7 hours  
+**Files to modify**: `gcode_parser.c`, `kinematics.c`, `app.c`, `settings.c`
+
+### **Priority 5: Canned Cycles (G81-G89)**
+**Status**: ❌ Not Started  
+**Dependencies**: Production testing, basic drilling validated  
+**Use Case**: Simplified drilling, peck drilling, boring, tapping operations
+
+Features to implement:
+- [ ] G81 - Standard drilling cycle
+- [ ] G82 - Drilling with dwell
+- [ ] G83 - Peck drilling cycle
+- [ ] G73 - High-speed peck drilling
+- [ ] G85 - Boring cycle (feed in, feed out)
+- [ ] G89 - Boring with dwell
+- [ ] G80 - Cancel canned cycle mode
+- [ ] R-word (retract plane)
+- [ ] L-word (repeat count)
+- [ ] Incremental (G91) canned cycle support
+
+**Estimated Effort**: 10-15 hours  
+**Files to modify**: `gcode_parser.c`, `motion.c`, `app.c`
+
+### **Priority 6: Multi-Segment Look-Ahead Planner**
+**Status**: ⚠️ Partial (2-segment junction deviation working)  
+**Dependencies**: Production testing, junction deviation validated  
+**Use Case**: Further speed optimization on complex curves and 3D contours
+
+Features to implement:
+- [ ] Extend lookahead from 2 segments to 4-8 segments
+- [ ] Forward pass: Calculate maximum entry velocities for all queued segments
+- [ ] Reverse pass: Adjust exit velocities based on deceleration limits
+- [ ] Velocity profile optimization across segment boundaries
+- [ ] Co-linear segment merging (reduce queue usage)
+- [ ] Acceleration/deceleration blending for smooth transitions
+
+**Estimated Effort**: 12-20 hours (complex motion planning)  
+**Files to modify**: `motion.c`, `kinematics.c`
+
+### **Priority 7: Spindle Speed Feedback (Closed-Loop S-word)**
+**Status**: ⚠️ Partial (open-loop PWM working)  
+**Dependencies**: Spindle encoder hardware  
+**Use Case**: CSS (Constant Surface Speed) for lathes, synchronized operations
+
+Features to implement:
+- [ ] Spindle encoder input (frequency/pulse counting)
+- [ ] Actual RPM calculation from encoder feedback
+- [ ] Closed-loop RPM control (PID or simple error correction)
+- [ ] CSS mode for lathe operations (G96/G97)
+- [ ] Spindle speed monitoring and reporting in status queries
+- [ ] Spindle at-speed delay (M3 S1000 P2.0 - wait 2 seconds for spindle to reach speed)
+
+**Estimated Effort**: 8-12 hours  
+**Files to modify**: `spindle.c`, `gcode_parser.c`, `app.c`
+
+### **Priority 8: Jerk Control (S-Curve Acceleration)**
+**Status**: ❌ Not Started  
+**Dependencies**: Full multi-segment planner working well  
+**Use Case**: 3D printer-style smooth acceleration, reduced mechanical stress
+
+**⚠️ NOTE**: GRBL does NOT use jerk control. This would be a departure from standard GRBL behavior.
+
+Features to implement:
+- [ ] S-curve acceleration profiles (replace trapezoidal ramps)
+- [ ] Jerk limit settings (X/Y/Z/A jerk parameters)
+- [ ] Acceleration profile recalculation with jerk constraints
+- [ ] Integration with velocity planner
+
+**Estimated Effort**: 15-25 hours (major motion planning rewrite)  
+**Files to modify**: `kinematics.c`, `motion.c`, `settings.c`
+
+---
+
+### **Testing Strategy for Each Feature**
+
+For each TODO item above:
+1. **Unit Testing**: Create isolated test G-code snippets
+2. **Integration Testing**: Test with complete toolpaths
+3. **Edge Case Testing**: Boundary conditions, error handling
+4. **Performance Testing**: Validate timing and CPU overhead
+5. **Documentation**: Update README and copilot-instructions.md
+
+### **Development Notes**
+
+- **Keep Features Independent**: Each TODO should be implementable without breaking existing functionality
+- **Version Control**: Create separate branches for each major feature
+- **Backward Compatibility**: Ensure existing G-code files continue to work
+- **GRBL Compliance**: Prioritize GRBL v1.1 standard behavior where applicable
+- **Production First**: Only add features after validating current implementation works reliably
+
+**Current Focus**: Test existing production-ready system thoroughly before adding new features! 🚀
+
 ````
