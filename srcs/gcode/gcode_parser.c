@@ -595,9 +595,13 @@ static inline uint32_t Flow_LowWater(const GCODE_CommandQueue* q)
  * @param q Command queue (unused with current logic)
  */
 void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
-    // Only send deferred "ok" when motion queue is completely empty
-    if (okPending && appData->motionQueueCount == 0) {
-        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue empty)\r\n");
+    // Send deferred "ok" when buffer drops below low-water mark
+    // This prevents deadlock on long motion files while still providing backpressure
+    uint32_t lowWater = appData->gcodeCommandQueue.maxMotionSegments - MOTION_BUFFER_LOW_WATER;
+    
+    if (okPending && appData->motionQueueCount < lowWater) {
+        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue=%lu < lowWater=%lu)\r\n",
+                          (unsigned long)appData->motionQueueCount, (unsigned long)lowWater);
         if (UART_SendOK()) okPending = false;
     }
 }
