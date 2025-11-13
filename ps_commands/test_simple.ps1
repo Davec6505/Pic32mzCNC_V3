@@ -1,6 +1,6 @@
 # Simple serial test - one command at a time with delays
 param(
-    [string]$ComPort = "COM4",
+    [string]$ComPort = "COM3",
     [int]$BaudRate = 115200
 )
 

@@ -126,6 +126,9 @@ CoordinatePoint KINEMATICS_MachineToWorkWithWCS(CoordinatePoint machine_pos, uin
 MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end, float feedrate, 
                                    MotionSegment* segment_buffer,
                                    float entry_velocity, float exit_velocity) {
+    // ✅ Set segment type (CRITICAL: Must be first!)
+    segment_buffer->type = SEGMENT_TYPE_LINEAR;
+    
     // Get settings and stepper position (reuse existing modules - no duplication)
     CNC_Settings* settings = SETTINGS_GetCurrent();
     StepperPosition* stepper = STEPPER_GetPosition();
@@ -249,7 +252,9 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     }
     
     // Junction-aware velocity planning
-    float min_steps_per_sec = 500.0f;  // Configurable minimum to avoid stalling
+    // ✅ FIX: Use actual feedrate as minimum, not arbitrary slow value
+    // This prevents starting segments at half speed unnecessarily
+    float min_steps_per_sec = steps_per_sec;  // Use target speed as minimum
     
     // Calculate entry and exit step rates from junction velocities
     float entry_steps_per_sec = fmaxf(entry_velocity * steps_per_mm_dominant, min_steps_per_sec);
@@ -258,12 +263,13 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     segment_buffer->initial_rate = (uint32_t)(TIMER_FREQ / entry_steps_per_sec);
     segment_buffer->final_rate = (uint32_t)(TIMER_FREQ / exit_steps_per_sec);
 
-    // Ensure rates don't exceed nominal rate (can't go faster than max feedrate)
+    // ✅ FIX: Ensure rates don't go faster than nominal (LOWER rate = FASTER speed in timer ticks)
+    // nominal_rate is the FASTEST allowed speed (minimum ticks between steps)
     if (segment_buffer->initial_rate < segment_buffer->nominal_rate) {
-        segment_buffer->initial_rate = segment_buffer->nominal_rate;
+        segment_buffer->initial_rate = segment_buffer->nominal_rate;  // Start at cruise speed
     }
     if (segment_buffer->final_rate < segment_buffer->nominal_rate) {
-        segment_buffer->final_rate = segment_buffer->nominal_rate;
+        segment_buffer->final_rate = segment_buffer->nominal_rate;    // End at cruise speed
     }
     
     // Rate delta per step (for integer ISR math)
@@ -282,7 +288,9 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // Motion state initialization
     segment_buffer->steps_remaining = max_delta;
     segment_buffer->steps_completed = 0;
-    segment_buffer->step_interval = segment_buffer->initial_rate;
+    // ⚠️ TEMPORARY: Use nominal_rate (cruise speed) until velocity profiling is connected
+    // TODO: Implement proper acceleration by updating step_interval in MOTION_PHASE_VELOCITY
+    segment_buffer->step_interval = segment_buffer->nominal_rate;
     
     // Pulse width from settings (reuse existing calculation from stepper.c)
     segment_buffer->pulse_width = (uint32_t)(settings->step_pulse_time * 12.5f);  // µs to timer ticks

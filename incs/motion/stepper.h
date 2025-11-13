@@ -30,4 +30,7 @@ bool STEPPER_IsEnabled(void);
 /* Enable all stepper drivers (counterpart to STEPPER_DisableAll). */
 void STEPPER_EnableAll(void);
 
+/* Check if dwell timer has completed (for DWELL segments). */
+bool STEPPER_IsDwellComplete(void);
+
 #endif /* STEPPER_H */

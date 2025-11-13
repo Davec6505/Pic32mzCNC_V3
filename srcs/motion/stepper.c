@@ -3,10 +3,12 @@
 #include "settings.h"
 #include "motion_utils.h"
 #include "utils/utils.h"  // For AxisConfig and AXIS_xxx inline helpers
+#include "utils/uart_utils.h"  // For DEBUG_PRINT_STEPPER
 #include "definitions.h"
 #include "../config/default/peripheral/tmr/plib_tmr4.h"  // TMR4 access (16-bit)
 #include "../config/default/peripheral/tmr/plib_tmr5.h"  // TMR5 pulse width timer
 #include "../config/default/peripheral/ocmp/plib_ocmp1.h"  // OC1 virtual axis timer
+#include "../config/default/peripheral/coretimer/plib_coretimer.h"  // Core timer for dwell
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>  // abs()
@@ -91,6 +93,11 @@ static uint8_t enable_invert = 0;
 
 static bool steppers_enabled = false;
 
+// ✅ Dwell timer state (for SEGMENT_TYPE_DWELL)
+static volatile bool dwell_active = false;       // true when dwell timer is running
+static volatile uint32_t dwell_start_ticks = 0;  // Core timer value when dwell started
+static volatile uint32_t dwell_duration = 0;     // How long to wait (core timer ticks)
+
 void STEPPER_Initialize(APP_DATA* appData) {
     // Store reference for ISR access
     app_data_ref = appData;
@@ -129,14 +136,14 @@ void STEPPER_Initialize(APP_DATA* appData) {
     
     // ✅ DEBUG: Verify enable pins are set correctly after enabling
     DEBUG_PRINT_STEPPER("[STEPPER_Init] Enable invert mask: 0x%02X\r\n", enable_invert);
-    DEBUG_EXEC_STEPPER(
+    DEBUG_EXEC_STEPPER({
         int enx_state = EnX_Get();
         int eny_state = EnY_Get();
         int enz_state = EnZ_Get();
         int ena_state = EnA_Get();
-    );
-    DEBUG_PRINT_STEPPER("[STEPPER_Init] EnX=%d EnY=%d EnZ=%d EnA=%d (0=low/enabled for active-low)\r\n",
-        enx_state, eny_state, enz_state, ena_state);
+        UART_Printf("[STEPPER_Init] EnX=%d EnY=%d EnZ=%d EnA=%d (0=low/enabled for active-low)\r\n",
+            enx_state, eny_state, enz_state, ena_state);
+    });
 }
 
 // ============================================================================
@@ -146,6 +153,31 @@ void STEPPER_Initialize(APP_DATA* appData) {
 void STEPPER_LoadSegment(MotionSegment* segment) {
     if (segment == NULL) return;
  
+    // ✅ DWELL SEGMENT HANDLING - No motion, just timer
+    if (segment->type == SEGMENT_TYPE_DWELL) {
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] DWELL segment: %lu ticks (%.3f sec)\r\n",
+            (unsigned long)segment->dwell_duration,
+            (float)segment->dwell_duration / 100000000.0f);
+        
+        // Start dwell timer (core timer at 100MHz)
+        dwell_active = true;
+        dwell_start_ticks = CORETIMER_CounterGet();
+        dwell_duration = segment->dwell_duration;
+        
+        // Mark segment as complete immediately (steps_remaining = 0, steps_completed = 0)
+        // Motion state machine will check dwell_active in STEPPER_IsDwellComplete()
+        segment->steps_remaining = 0;
+        segment->steps_completed = 0;
+        
+        // Mark motion inactive during dwell (no motor motion)
+        if (app_data_ref != NULL) {
+            app_data_ref->motionActive = false;
+        }
+        
+        return;  // ✅ DWELL doesn't start TMR4 or OC1 - just timer!
+    }
+ 
+    // ✅ MOTION SEGMENT HANDLING (LINEAR/ARC)
     // Handles soft reset (ox18), emergency stop, or other disabling instructions.
     if(!steppers_enabled){
         STEPPER_EnableAll();
@@ -228,6 +260,11 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     } else {
         DEBUG_PRINT_STEPPER("[STEPPER_Load] TMR4 already running\r\n");
     }
+
+    // Mark motion active when timer/OC are running
+    if (app_data_ref != NULL) {
+        app_data_ref->motionActive = true;
+    }
 }
 
 // ============================================================================
@@ -240,6 +277,11 @@ void STEPPER_SetStepRate(uint32_t rate_ticks) {
     uint16_t period = (uint16_t)rate_ticks;
     if (period < MIN_RATE) period = MIN_RATE;
     if (period > 65535) period = 65535;  // Clamp to 16-bit max
+    
+    // ✅ CRITICAL: Update segment's step_interval so ISR uses new rate
+    if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
+        app_data_ref->currentSegment->step_interval = period;
+    }
     
     // Update PR4 - this changes the OC1 period
     TMR4_PeriodSet(period);
@@ -257,6 +299,24 @@ void STEPPER_SetStepRate(uint32_t rate_ticks) {
 bool STEPPER_IsEnabled(void)
 {
     return steppers_enabled;
+}
+
+bool STEPPER_IsDwellComplete(void)
+{
+    if (!dwell_active) return true;  // Not in dwell, so it's "complete"
+    
+    // Check if dwell timer has elapsed
+    uint32_t now = CORETIMER_CounterGet();
+    uint32_t elapsed = now - dwell_start_ticks;
+    
+    if (elapsed >= dwell_duration) {
+        dwell_active = false;
+        DEBUG_PRINT_STEPPER("[STEPPER_Dwell] Complete - elapsed %lu >= %lu ticks\r\n",
+            (unsigned long)elapsed, (unsigned long)dwell_duration);
+        return true;
+    }
+    
+    return false;  // Still waiting
 }
 
 void STEPPER_EnableAll(void)
@@ -316,6 +376,11 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 void OCP1_ISR(uintptr_t context) {
     // ✅ CRITICAL DEBUG: Toggle LED to confirm ISR fires
     LED1_Toggle();
+    
+    // ✅ GUARD: No active segment - skip step generation but keep timer running
+    if (app_data_ref == NULL || app_data_ref->currentSegment == NULL) {
+        return;  // Main loop will load next segment or stop timer
+    }
     
     // ===== DOMINANT AXIS STEP (ALWAYS) =====
     // Use pre-calculated dominant_axis (set during STEPPER_LoadSegment)

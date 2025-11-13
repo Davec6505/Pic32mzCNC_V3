@@ -41,35 +41,36 @@
 
 int main ( void )
 {
-    static volatile uint32_t app_indicator = 0;
-    
-    /* Initialize all modules */
-    SYS_Initialize ( NULL );
+  /* Initialize all modules */
+  SYS_Initialize ( NULL );
 
-    // ✅ CRITICAL: Load settings from flash FIRST
-    // This must happen before APP_Initialize() so settings are available
-    // for any module that needs them during initialization
-    SETTINGS_Initialize();
+  // ✅ CRITICAL: Load settings from flash FIRST
+  // This must happen before APP_Initialize() so settings are available
+  // for any module that needs them during initialization
+  SETTINGS_Initialize();
 
-    /* Initialize application */
-    APP_Initialize();
+  /* Initialize application */
+  APP_Initialize();
 
-    while ( true )
-    {
-        /* Maintain state machines of all polled MPLAB Harmony modules. */
-        APP_Tasks();
+  // Use Core Timer for a stable 1 Hz LED1 heartbeat (independent of loop load)
+  uint32_t hb_last = CORETIMER_CounterGet();
+  const uint32_t HB_INTERVAL = 100000000U; // ~1s @ 100MHz Core Timer (200MHz CPU / 2)
 
-        /* Toggle LED1 every 1 second for app status indication at the end of the loop
-         * This indicates that the application is running.
-         */
-        if(++app_indicator >= 100000){
-            app_indicator = 0;
-            LED1_Toggle();
-        }
+  while ( true )
+  {
+    /* Maintain state machines of all polled MPLAB Harmony modules. */
+    APP_Tasks();
+
+    // LED1 heartbeat: slow blink when idle; during motion, ISR toggles LED1 rapidly
+    uint32_t now_ticks = CORETIMER_CounterGet();
+    if ((uint32_t)(now_ticks - hb_last) >= HB_INTERVAL) {
+      hb_last = now_ticks;
+      LED1_Toggle();
     }
+  }
 
-    /* Execution should not come here during normal operation */
-    return ( EXIT_FAILURE );
+  /* Execution should not come here during normal operation */
+  return ( EXIT_FAILURE );
 }
 
 

@@ -4,7 +4,13 @@
 
 **Pic32mzCNC_V3** is a production-ready CNC motion control system for PIC32MZ microcontrollers featuring **hardware-validated motion restart**, **optimal timer configuration**, and **robust GRBL v1.1 protocol** for industrial stepper motor control.
 
-### ✅ **Latest Fixes** (November 10, 2025)
+### ✅ **Latest Fixes** (November 13, 2025)
+- ✅ **Aggressive Flow Control**: Defers "ok" until motion queue empty, prevents UGS premature "Finished"
+- ✅ **GRBL v1.1 Blank Line Compliance**: All lines (blank, comments, G-code) get "ok" responses
+- ✅ **Motion Completion Synchronization**: Deferred "ok" only sent when motion truly completes
+- ✅ **File Streaming Completion**: Rectangle test completes both iterations successfully
+
+### ✅ **Recent Production Fixes** (November 10, 2025)
 - ✅ **UGS Soft Reset Recovery**: Motion automatically restarts after Ctrl+X soft reset
 - ✅ **Optimal Timer Configuration**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs pulses
 - ✅ **Hardware Validation Guards**: OC1/TMR4 startup checks prevent motion failures

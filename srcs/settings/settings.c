@@ -42,10 +42,10 @@ static const CNC_Settings default_settings = {
     .limit_pins_invert = 0,        // false as uint8
     
     // Steps per mm (typical for 1/8 microstepping, 200 steps/rev, 5mm pitch)
-    .steps_per_mm_x = 40.0f,       // 200 * 8 / 5 / 8 = 40
-    .steps_per_mm_y = 40.0f,
-    .steps_per_mm_z = 40.0f,
-    .steps_per_mm_a = 40.0f,
+    .steps_per_mm_x = 156.0f,       // 200 * 8 / 5 / 8 = 40
+    .steps_per_mm_y = 156.0f,
+    .steps_per_mm_z = 156.0f,
+    .steps_per_mm_a = 156.0f,
     
     // Max rates (mm/min)
     .max_rate_x = 5000.0f,
@@ -94,8 +94,9 @@ static const CNC_Settings default_settings = {
     // Tool length offset - initialized to zero
     .tool_length_offset = 0.0f,
     
-    // Arc configuration
-    .mm_per_arc_segment = 0.1f,    // GRBL default: 0.1mm per arc segment
+    // Arc configuration ($12-$13)
+    .mm_per_arc_segment = 0.5f,    // $12 - Increased from 0.1mm - creates larger segments with reliable step counts
+    .arc_tolerance = 0.002f,       // $13 - GRBL v1.1 default: 0.002mm (2 microns) for radius error compensation
     
     .checksum = 0  // Will be calculated
 };
@@ -146,6 +147,11 @@ bool SETTINGS_LoadFromFlash(CNC_Settings* settings)
         return false;  // Flash empty or invalid - keep current settings (defaults)
     }
     
+    // Validate version - reject if structure changed
+    if (temp_settings.version != SETTINGS_VERSION) {
+        return false;  // Version mismatch - structure changed, use defaults
+    }
+    
     // Validate checksum
     uint32_t calculated_crc = SETTINGS_CalculateCRC32(&temp_settings);
     if (calculated_crc != temp_settings.checksum) {
@@ -181,32 +187,53 @@ bool SETTINGS_SaveToFlash(const CNC_Settings* settings)
         return false;  // Address not row-aligned!
     }
     
-    // ✅ Wait for NVM ready (Harmony pattern)
-    while(NVM_IsBusy() == true);
+    // ✅ Poll WR bit with timeout - prevents infinite hang on hardware fault
+    // Wait for any pending NVM operation to complete
+    uint32_t timeout = 1000000; // ~1 second timeout (100MHz core, 2 ticks per iteration)
+    while(NVM_IsBusy() && timeout > 0) {
+        timeout--;
+    }
+    if (timeout == 0) {
+        return false;  // Timeout waiting for NVM ready
+    }
     
-    // ✅ Erase the Page (Harmony pattern)
+    // ✅ Erase the Page
     NVM_PageErase(address);
     
-    // ✅ Wait for erase complete using callback flag
-    while(xferDone == false);
+    // ✅ Poll WR bit until erase complete (typically ~20ms worst case)
+    timeout = 10000000; // ~100ms timeout for page erase (100MHz core)
+    while(NVM_IsBusy() && timeout > 0) {
+        timeout--;
+    }
+    if (timeout == 0) {
+        return false;  // Timeout during page erase
+    }
     
-    xferDone = false;
+    // ✅ Small delay after erase for flash recovery
+    CORETIMER_DelayUs(100);
     
     // ✅ Check for erase errors
     if (NVM_ErrorGet() != NVM_ERROR_NONE) {
         return false;
     }
     
-    // ✅ Write data row-by-row (Harmony pattern)
+    // ✅ Write data row-by-row
     for (i = 0; i < sizeof(CNC_Settings); i+= NVM_FLASH_ROWSIZE)
     {
         // Program a row of data
         NVM_RowWrite((uint32_t *)writePtr, address);
 
-        // Wait for write complete using callback flag
-        while(xferDone == false);
+        // ✅ Poll WR bit until write complete (typically ~2ms worst case per row)
+        timeout = 1000000; // ~10ms timeout per row write (100MHz core)
+        while(NVM_IsBusy() && timeout > 0) {
+            timeout--;
+        }
+        if (timeout == 0) {
+            return false;  // Timeout during row write
+        }
         
-        xferDone = false;
+        // ✅ Small delay between rows for flash recovery
+        CORETIMER_DelayUs(50);
         
         // Check for write errors
         if (NVM_ErrorGet() != NVM_ERROR_NONE) {
@@ -216,6 +243,9 @@ bool SETTINGS_SaveToFlash(const CNC_Settings* settings)
         writePtr += NVM_FLASH_ROWSIZE;
         address  += NVM_FLASH_ROWSIZE;
     }
+    
+    // ✅ Final delay to ensure flash is stable
+    CORETIMER_DelayUs(100);
     
     return true;
 }
@@ -248,6 +278,7 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         
         // Arc configuration
         case 12: settings->mm_per_arc_segment = value; break;
+        case 13: settings->arc_tolerance = value; break;
         
         // Steps per mm
         case 100: settings->steps_per_mm_x = value; break;
@@ -306,6 +337,7 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         
         case 11: return settings->junction_deviation;
         case 12: return settings->mm_per_arc_segment;
+        case 13: return settings->arc_tolerance;
         
         case 100: return settings->steps_per_mm_x;
         case 101: return settings->steps_per_mm_y;
@@ -360,7 +392,7 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$5=%u\r\n", settings->limit_pins_invert);
     len += sprintf(&settings_buffer[len], "$11=%.3f\r\n", settings->junction_deviation);
     len += sprintf(&settings_buffer[len], "$12=%.3f\r\n", settings->mm_per_arc_segment);
-
+    len += sprintf(&settings_buffer[len], "$13=%.3f\r\n", settings->arc_tolerance);
         
     len += sprintf(&settings_buffer[len], "$22=%u\r\n", settings->homing_enable);
     len += sprintf(&settings_buffer[len], "$23=%u\r\n", settings->homing_dir_mask);

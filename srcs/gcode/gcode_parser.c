@@ -27,6 +27,8 @@
 #include "data_structures.h"
 #include "utils/uart_utils.h"
 #include "../config/default/peripheral/uart/plib_uart3.h"
+#include "definitions.h"                  // For T4CON/_T4CON_ON_MASK (hardware state)
+#include "../config/default/peripheral/gpio/plib_gpio.h"  // For LED debug
 
 /* -------------------------------------------------------------------------- */
 /* Configuration                                                              */
@@ -37,28 +39,32 @@
 
 // Banner message configured in common.h via STARTUP_BANNER_STRING macro
 
-#define MOTION_BUFFER_THRESHOLD 2
+// Dual-threshold flow control for UGS compatibility
+// HIGH_WATER: Start deferring "ok" when queue reaches this (almost full)
+// LOW_WATER: Resume sending "ok" when queue drains to this (some space freed)
+// With MAX=16: Defer at 14 (2 free), Resume at 12 (4 drained)
+#define MOTION_BUFFER_HIGH_WATER 2    // Defer when (MAX - 2) = 14 segments used
+#define MOTION_BUFFER_LOW_WATER  4    // Resume when (MAX - 4) = 12 segments used
 
 /* -------------------------------------------------------------------------- */
 /* Static Buffers / State                                                     */
 /* -------------------------------------------------------------------------- */
 static uint8_t txBuffer[250];
-static uint8_t rxBuffer[250];
+static uint8_t rxBuffer[512];  // Increased to match UART3 RX buffer size
 static volatile uint32_t nBytesRead = 0;
 
 GCODE_Data gcodeData = {
     .state = GCODE_STATE_IDLE,
 };
 
-static bool okPending = false;
+static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
 static bool feedHoldActive = false;         /* '!' feed hold, '~' resume */
 static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
 static bool unitsInches = false;            /* false=mm (G21), true=inches (G20) */
 
-/* ADDED: After soft reset steppers remain disabled; enable on first motion */
-// static bool stepperEnablePending = false;
+/* ✅ REMOVED: Startup deferral variables (caused UGS stalling) */
 
 /* -------------------------------------------------------------------------- */
 /* Forward Declarations                                                       */
@@ -122,15 +128,20 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     cmdQueue->head  = 0;
     cmdQueue->tail  = 0;
     cmdQueue->count = 0;
-    cmdQueue->motionQueueCount = appData->motionQueueCount;
+    /* ✅ No sync needed - flow control reads appData->motionQueueCount directly */
 
     /* 7. Reset G-code parser state */
-    okPending = false;
+    okPendingCount = 0;  // Clear all deferred ok responses
     grblAlarm = false;
     grblCheckMode = false;
     feedHoldActive = false;
     unitsInches = false;
     gcodeData.state = GCODE_STATE_IDLE;
+
+    // ✅ REMOVED: Startup deferral reset (no longer used)
+
+    // Motion fully idle after reset
+    appData->motionActive = false;
 
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
@@ -138,7 +149,17 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     /* 8. Mark steppers to be re-enabled automatically on first motion command */
     // stepperEnablePending = true;
 
-    /* 9. Print GRBL startup banner (expected by senders after Ctrl+X) */
+    /* 9. Save current settings to flash (persist any changes made before reset) */
+    // Flash write now uses CORETIMER delays to prevent hangs
+    // CRITICAL: Clear G92 offset before saving - G92 is a temporary offset, not persistent!
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+    if (settings != NULL) {
+        SETTINGS_SetG92Offset(0.0f, 0.0f, 0.0f);  // Reset G92 to zero before saving
+        SETTINGS_SaveToFlash(settings);
+        DEBUG_PRINT_GCODE("[GCODE] Settings saved to flash during soft reset (G92 cleared)\r\n");
+    }
+
+    /* 10. Print GRBL startup banner (expected by senders after Ctrl+X) */
 #ifdef ENABLE_STARTUP_BANNER
     UART_SEND_BANNER();  // Compile-time string and length from common.h
 #endif
@@ -159,12 +180,14 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
 
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
-    okPending = false;
+    okPendingCount = 0;  // Clear all deferred ok responses
     gcodeData.state = GCODE_STATE_IDLE;
     unitsInches = false;
     grblCheckMode = false;
     grblAlarm = false;
     feedHoldActive = false;
+
+    // ✅ REMOVED: Startup deferral initialization (no longer used)
 }
 
 /* -------------------------------------------------------------------------- */
@@ -285,12 +308,19 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
     if (!cmd || !ev) return false;
     ev->type = GCODE_EVENT_NONE;
 
+    DEBUG_PRINT_GCODE("[PARSE] cmd='%s'\r\n", cmd);
+
     if (cmd[0] == 'G') {
         char* pend = NULL;
         int gnum = (int)strtol(&cmd[1], &pend, 10);
+        
+        DEBUG_PRINT_GCODE("[PARSE] G-code detected: gnum=%d\r\n", gnum);
 
-        if (gnum == 20) { unitsInches = true; return true; }
-        if (gnum == 21) { unitsInches = false; return true; }
+        // G20/G21 - Units (handled internally, no event needed)
+        if (gnum == 20) { unitsInches = true; ev->type = GCODE_EVENT_NONE; return true; }
+        if (gnum == 21) { unitsInches = false; ev->type = GCODE_EVENT_NONE; return true; }
+        
+        // G90/G91 - Positioning mode
         if (gnum == 90) { ev->type = GCODE_EVENT_SET_ABSOLUTE; return true; }
         if (gnum == 91) { ev->type = GCODE_EVENT_SET_RELATIVE; return true; }
 
@@ -367,12 +397,15 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
 
         if (gnum == 0 || gnum == 1) {
             ev->type = GCODE_EVENT_LINEAR_MOVE;
+            DEBUG_PRINT_GCODE("[PARSE] Linear move (G%d)\r\n", gnum);
         } else if (gnum == 2) {
             ev->type = GCODE_EVENT_ARC_MOVE;
             ev->data.arcMove.clockwise = true;
+            DEBUG_PRINT_GCODE("[PARSE] Arc CW (G2)\r\n");
         } else if (gnum == 3) {
             ev->type = GCODE_EVENT_ARC_MOVE;
             ev->data.arcMove.clockwise = false;
+            DEBUG_PRINT_GCODE("[PARSE] Arc CCW (G3)\r\n");
         } else if (gnum == 4) {
             ev->type = GCODE_EVENT_DWELL;
             char* pP = strstr((char*)cmd, "P");
@@ -382,14 +415,6 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             return false;
         }
 
-        // If this is the first motion after a soft reset, re-enable steppers
-      /*  if (stepperEnablePending &&
-            (ev->type == GCODE_EVENT_LINEAR_MOVE || ev->type == GCODE_EVENT_ARC_MOVE)) {
-            STEPPER_EnableAll();
-            stepperEnablePending = false;
-            DEBUG_PRINT_GCODE("[GCODE] Steppers re-enabled after soft reset\r\n");
-        }
-      */
         char* pX = find_char((char*)cmd, 'X');
         char* pY = find_char((char*)cmd, 'Y');
         char* pZ = find_char((char*)cmd, 'Z');
@@ -427,6 +452,10 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             ev->data.arcMove.centerX = i * unit_scale;
             ev->data.arcMove.centerY = j * unit_scale;
             ev->data.arcMove.feedrate = (f > 0.0f) ? (f * unit_scale) : 0.0f;
+            DEBUG_PRINT_GCODE("[PARSE] Arc params: X=%.2f Y=%.2f I=%.2f J=%.2f F=%.1f\r\n",
+                             ev->data.arcMove.x, ev->data.arcMove.y, 
+                             ev->data.arcMove.centerX, ev->data.arcMove.centerY, 
+                             ev->data.arcMove.feedrate);
             return true;
         }
     }
@@ -485,20 +514,127 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
 
     GCODE_Command* gc = &cmdQueue->commands[cmdQueue->tail];
     if (gc->command[0] == '\0') {
+        // Empty command - consume it and return false
         cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
         cmdQueue->count--;
         return false;
     }
 
     if (!parse_command_to_event(gc->command, event)) {
+        // Parse failed - consume command and return false
+        DEBUG_PRINT_GCODE("[GetEvent] Parse failed for: '%s'\r\n", gc->command);
         cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
         cmdQueue->count--;
         return false;
     }
 
+    // ✅ SUCCESS: Event parsed, but DON'T consume yet!
+    // Event will be consumed after successful processing via GCODE_ConsumeEvent()
+    DEBUG_PRINT_GCODE("[GetEvent] Event ready: type=%d from cmd='%s'\r\n", event->type, gc->command);
+    return true;
+}
+
+/**
+ * @brief Consume the current event from the queue after successful processing
+ * 
+ * CRITICAL: Only call this AFTER successfully processing the event from GCODE_GetNextEvent!
+ */
+void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue)
+{
+    if (!cmdQueue) return;
+    if (cmdQueue->count == 0) return;
+    
+    // Remove the event that was just processed
     cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
     cmdQueue->count--;
-    return true;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Flow Control Helpers - Centralized OK Management                           */
+/* -------------------------------------------------------------------------- */
+
+/* Removed IsOkPending/SetOkPending/ClearOkPending helpers to avoid unused warnings;
+   logic now accesses okPending directly inside the flow-control helpers below. */
+
+/**
+ * @brief Compute high-water mark for flow control (when to START deferring ok)
+ * 
+ * Returns maxSegments - HIGH_WATER threshold
+ * Example: With MAX=16, HIGH_WATER=2 → defer when queue >= 14
+ */
+static inline uint32_t Flow_HighWater(const GCODE_CommandQueue* q)
+{
+    if (q == NULL) return 0U;
+    return (q->maxMotionSegments > MOTION_BUFFER_HIGH_WATER)
+         ? (uint32_t)(q->maxMotionSegments - MOTION_BUFFER_HIGH_WATER)
+         : 0U;
+}
+
+/**
+ * @brief Compute low-water mark for flow control (when to RESUME sending ok)
+ * 
+ * Returns maxSegments - LOW_WATER threshold
+ * Example: With MAX=16, LOW_WATER=4 → resume when queue <= 12
+ */
+static inline uint32_t Flow_LowWater(const GCODE_CommandQueue* q)
+{
+    if (q == NULL) return 0U;
+    return (q->maxMotionSegments > MOTION_BUFFER_LOW_WATER)
+         ? (uint32_t)(q->maxMotionSegments - MOTION_BUFFER_LOW_WATER)
+         : 0U;
+}
+
+/**
+ * @brief Check if we should send a deferred "ok" response
+ * 
+ * With aggressive flow control, only send deferred "ok" when motion queue
+ * is COMPLETELY empty. This ensures UGS doesn't see "Finished" until all
+ * motion has executed.
+ * 
+ * @param appData Application data with motion queue count
+ * @param q Command queue (unused with current logic)
+ */
+void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
+    // Send deferred "ok" responses when buffer drops below low-water mark
+    // This prevents deadlock on long motion files while still providing backpressure
+    uint32_t lowWater = appData->gcodeCommandQueue.maxMotionSegments - MOTION_BUFFER_LOW_WATER;
+    
+    while (okPendingCount > 0 && appData->motionQueueCount < lowWater) {
+        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue=%lu < lowWater=%lu, pending=%lu)\r\n",
+                          (unsigned long)appData->motionQueueCount, (unsigned long)lowWater,
+                          (unsigned long)okPendingCount);
+        if (UART_SendOK()) {
+            okPendingCount--;
+        } else {
+            break;  // TX buffer full, try again next iteration
+        }
+    }
+}
+
+/**
+ * @brief Decide whether to send "ok" immediately or defer it
+ * 
+ * Called when a command is received.
+ * Uses HIGH_WATER threshold - defers ok when buffer is almost full.
+ * 
+ * @param currentQueueCount Current motion queue count
+ * @param maxSegments Maximum motion queue size
+ */
+static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
+{
+    // ✅ Aggressive flow control to prevent UGS "Finished" before motion completes
+    // Only send "ok" immediately when queue is completely empty
+    // This ensures the last "ok" is sent only after all motion completes
+    
+    if (appData->motionQueueCount == 0) {
+        DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (queue empty, motion complete)\r\n");
+        (void)UART_SendOK();
+    } else {
+        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu > 0, total pending=%lu)\r\n", 
+                          (unsigned long)appData->motionQueueCount,
+                          (unsigned long)(okPendingCount + 1));
+        okPendingCount++;
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -506,8 +642,20 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
 /* -------------------------------------------------------------------------- */
 void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 {
+    static uint32_t call_counter = 0;
+    call_counter++;
+    
+    // if ((call_counter % 10000) == 0) {
+    //     DEBUG_PRINT_GCODE("[GCODE_Tasks] Called %lu times, state=%d\r\n", 
+    //                      call_counter, gcodeData.state);
+    // }
+    
     GCODE_CommandQueue* cmdQueue = commandQueue;
     uint32_t nBytesAvailable = 0;
+
+    // ✅ CRITICAL: Check deferred "ok" ONCE at entry using FRESH count
+    // If buffer drained and okPending, send "ok" immediately then continue processing
+    GCODE_CheckDeferredOk(appData, cmdQueue);
 
     switch (gcodeData.state)
     {
@@ -521,9 +669,15 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 nBytesRead += got;
                 rxBuffer[nBytesRead] = '\0';
             }
+        } else {
+            // ✅ No new bytes arriving - check for deferred ok
+            // This runs every iteration when idle, ensuring final "ok" is sent
+            GCODE_CheckDeferredOk(appData, cmdQueue);
         }
 
-        if (nBytesRead == 0) break;
+        if (nBytesRead == 0) {
+            break;  // No data in buffer, exit IDLE state
+        }
 
         /* Literal "0x18" typed by user */
         if (nBytesRead >= 4 &&
@@ -548,7 +702,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             if (!has_terminator) break;
             rxBuffer[terminator_pos] = '\0';
 
-            if (rxBuffer[0] == '$') {
+            // ✅ Check for control chars AFTER termination (handles '?' with newline)
+            if (is_control_char(rxBuffer[0])) {
+                gcodeData.state = GCODE_STATE_CONTROL_CHAR;
+            } else if (rxBuffer[0] == '$') {
                 gcodeData.state = GCODE_STATE_QUERY_CHARS;
             } else if (rxBuffer[0] == 'G' || rxBuffer[0] == 'g' ||
                        rxBuffer[0] == 'M' || rxBuffer[0] == 'm' ||
@@ -557,16 +714,38 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                        rxBuffer[0] == 'S' || rxBuffer[0] == 's') {
                 gcodeData.state = GCODE_STATE_GCODE_COMMAND;
             } else {
+                // Determine if line contains G-code content (ignore pure comments / whitespace)
                 bool has_content = false;
-                for (uint32_t i = 0; i < terminator_pos; i++) {
-                    char c = rxBuffer[i];
-                    if (c != ' ' && c != '\t' && c != 0) { has_content = true; break; }
+                // Find first non-whitespace character
+                uint32_t first_idx = 0;
+                while (first_idx < terminator_pos) {
+                    char c = rxBuffer[first_idx];
+                    if (c == ' ' || c == '\t') { first_idx++; continue; }
+                    break;
+                }
+                if (first_idx < terminator_pos) {
+                    char first = rxBuffer[first_idx];
+                    if (first == ';' || first == '(') {
+                        // Comment-only line → treat as blank, do not queue
+                        has_content = false;
+                    } else {
+                        // Any other non-whitespace, non-comment first char counts as content
+                        has_content = true;
+                    }
                 }
                 if (has_content) {
+                    DEBUG_PRINT_GCODE("[IDLE] Processing line: '%s'\r\n", rxBuffer);
                     cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
-                    if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-                        UART_SendOK();
-                    } else okPending = true;
+                    
+                    // ✅ Send "ok" for all lines with content
+                    DEBUG_PRINT_GCODE("[IDLE] Sending ok for content line\r\n");
+                    SendOrDeferOk(appData, cmdQueue);
+                } else {
+                    // ✅ GRBL v1.1 behavior: Blank lines get "ok" response
+                    // UGS counts ALL lines including blanks, so we must respond
+                    // Flow control applies - will defer if motion queue has content
+                    DEBUG_PRINT_GCODE("[IDLE] Blank/comment line - sending ok with flow control\r\n");
+                    SendOrDeferOk(appData, cmdQueue);
                 }
                 uint32_t skip_pos = terminator_pos + 1;
                 while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
@@ -580,9 +759,8 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     nBytesRead = 0;
                     memset(rxBuffer, 0, sizeof(rxBuffer));
                 }
-                if (okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-                    UART_SendOK(); okPending = false;
-                }
+                // After consuming a line, attempt to release any deferred ok now that we may have headroom
+                GCODE_CheckDeferredOk(appData, cmdQueue);
                 break;
             }
         }
@@ -607,10 +785,18 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 float wpos_z = mpos_z - wcs->offset.z;
 
                 const char* state = "Idle";
-                if (grblAlarm) state = "Alarm";
-                else if (feedHoldActive) state = "Hold";
-                else if (appData->currentSegment != NULL &&
-                         appData->currentSegment->steps_completed < appData->currentSegment->steps_remaining) {
+                if (grblAlarm) {
+                    state = "Alarm";
+                } else if (feedHoldActive) {
+                    state = "Hold";
+                } else if (appData->arcGenState == ARC_GEN_ACTIVE) {
+                    // Arc generator active → still processing arc segments
+                    state = "Run";
+                } else if ((T4CON & _T4CON_ON_MASK) != 0) {
+                    // Hardware timer running → motion in progress (or about to start)
+                    state = "Run";
+                } else if (appData->currentSegment != NULL &&
+                           appData->currentSegment->steps_completed < appData->currentSegment->steps_remaining) {
                     state = "Run";
                 } else if (appData->motionQueueCount > 0) {
                     state = "Run";
@@ -630,6 +816,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     grblCheckMode ? "|Cm:1" : "",
                     feedHoldActive ? "|FH:1" : "");
                 UART3_Write(txBuffer, response_len);
+                
+                // ⚠️ Real-time commands NEVER trigger deferred ok checks
+                // The deferred ok will be sent by IDLE loop (line 668) or next command
                 break;
             }
             case '~': /* Cycle start / resume */
@@ -651,15 +840,28 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 break;
         }
 
-        if (nBytesRead > 1) {
-            memmove(rxBuffer, &rxBuffer[1], nBytesRead - 1);
-            nBytesRead -= 1;
+        // ✅ GRBL PROTOCOL: Real-time commands NEVER generate "ok" responses
+        // Consume control character at position 0, plus any trailing CR/LF
+        // This prevents "?\r\n" from leaving "\r\n" which would be processed as blank line
+        uint32_t skip_pos = 1;  // Skip the control character itself
+        while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n')) {
+            skip_pos++;  // Skip all trailing line terminators
+        }
+        
+        if (skip_pos < nBytesRead) {
+            // Remaining bytes after control char + terminators
+            memmove(rxBuffer, &rxBuffer[skip_pos], nBytesRead - skip_pos);
+            nBytesRead -= skip_pos;
             rxBuffer[nBytesRead] = '\0';
             if (nBytesRead > 0 && is_control_char(rxBuffer[0])) {
                 gcodeData.state = GCODE_STATE_CONTROL_CHAR;
-            } else gcodeData.state = GCODE_STATE_IDLE;
+            } else {
+                gcodeData.state = GCODE_STATE_IDLE;
+            }
         } else {
+            // Nothing left after consuming control char and terminators - clear everything
             nBytesRead = 0;
+            rxBuffer[0] = '\0';  // ✅ Ensure first byte is null
             memset(rxBuffer, 0, sizeof(rxBuffer));
             gcodeData.state = GCODE_STATE_IDLE;
         }
@@ -834,8 +1036,19 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 handled = true;
             }
         }
+        else if (len >= 5 && cmd[0] == '$' && cmd[1] == 'S' && cmd[2] == 'A' && cmd[3] == 'V' && cmd[4] == 'E') {
+            // $SAVE - Explicitly save current settings to flash
+            CNC_Settings* settings = SETTINGS_GetCurrent();
+            if (settings != NULL && SETTINGS_SaveToFlash(settings)) {
+                UART3_Write((uint8_t*)"[MSG:Settings saved to flash]\r\n", 33);
+            } else {
+                UART3_Write((uint8_t*)"error:9\r\n", 10);  // Error 9: Flash write failed
+                send_ok = false;
+            }
+            handled = true;
+        }
         else if (len == 1 && cmd[0] == '$') {
-            UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $C $X $F $RST= $SLP]\r\n", 44);
+            UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $C $X $F $RST= $SAVE $SLP]\r\n", 50);
             handled = true;
         }
 
@@ -857,10 +1070,14 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         for (uint32_t i = 0; i < nBytesRead; i++) {
             if (rxBuffer[i] == '\0') { cmd_end = i; break; }
         }
+        DEBUG_PRINT_GCODE("[GCODE_CMD] Processing command: '%s'\r\n", rxBuffer);
         cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
-        if (!okPending && cmdQueue->motionQueueCount < (cmdQueue->maxMotionSegments - MOTION_BUFFER_THRESHOLD)) {
-            UART_SendOK();
-        } else okPending = true;
+        
+        // ✅ DISABLED: Startup deferral caused stalling with single arc commands
+        // Normal flow control for all commands (immediate or deferred based on buffer)
+        DEBUG_PRINT_GCODE("[GCODE_CMD] Normal flow control\r\n");
+        SendOrDeferOk(appData, cmdQueue);
+        
         nBytesRead = 0;
         memset(rxBuffer, 0, sizeof(rxBuffer));
         gcodeData.state = GCODE_STATE_IDLE;

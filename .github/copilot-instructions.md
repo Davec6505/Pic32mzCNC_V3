@@ -6,8 +6,31 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 ##    Always run make from root directory VI
 To ensure proper build configuration and output paths, always execute `make` commands from the root directory of the Pic32mzCNC_V3 project. This guarantees that all relative paths and build settings are correctly applied. makefile incs target is dynamic, it knows the paths no need to add absolute file references, all paths are relative to the root directory.
 
-## 🚀 Current Implementation Status (November 10, 2025)
+## 🚀 Current Implementation Status (November 13, 2025)
+
+### ⚠️ ACTIVE ISSUES
+**None - All major issues resolved!**
+
+**Recently RESOLVED Issues (November 13, 2025)**:
+- ✅ **UGS Premature "Finished" State** - Fixed with aggressive flow control (defer until queue empty)
+- ✅ **File Streaming Completion** - Rectangle test completes both iterations successfully
+- ✅ **Blank Line Handling** - GRBL v1.1 compliant "ok" responses for all lines
+- ✅ **Motion Queue Synchronization** - Deferred "ok" only sent when motion truly completes
+- ✅ **UGS Visualization Delay** - Fixed with startup OK deferral (November 11)
+- ✅ **UGS File Streaming Stalls** - Fixed with deferred "ok" check in IDLE loop (November 11)
+- ✅ Flash save hanging - Fixed with NVM_IsBusy() polling (November 10)
+- ✅ Motion speed slow (98 mm/min) - Fixed, now ~8000 mm/min (November 10)
+- ✅ Settings persistence - Working correctly (November 10)
+
 ### ✅ COMPLETED FEATURES
+- **AGGRESSIVE FLOW CONTROL**: Single-threshold system defers "ok" until motion queue empty, prevents UGS premature "Finished" (November 13, 2025)
+- **BLANK LINE GRBL COMPLIANCE**: All lines (blank, comments, G-code) get "ok" responses with flow control applied (November 13, 2025)
+- **MOTION COMPLETION SYNCHRONIZATION**: Deferred "ok" only sent when `motionQueueCount == 0` ensures UGS accuracy (November 13, 2025)
+- **SEGMENT COMPLETION TRIGGERS**: `motionSegmentCompleted` flag set when queue drains, triggers deferred ok check (November 13, 2025)
+- **STARTUP OK DEFERRAL FOR UGS VISUALIZATION**: Withholds first 2 motion command OKs until 2nd motion received, preventing UGS premature "Finished" state (November 11, 2025)
+- **SINGLE AUTHORITATIVE COUNT ARCHITECTURE**: Eliminated stale count copies, all flow control reads `appData->motionQueueCount` directly (November 11, 2025)
+- **IMPROVED FLOW CONTROL**: Deferred "ok" check in IDLE loop prevents UGS streaming stalls (November 11, 2025)
+- **MOTION PIPELINE VALIDATED**: Segments execute correctly, position tracking accurate, ISR operates properly (November 11, 2025)
 - **COMPLETE HOMING & LIMIT SWITCH SYSTEM**: Professional GRBL v1.1 compatible homing with $H command, array-based limit configuration, hardware debouncing, and proper inversion logic (November 10, 2025)
 - **COMPLETE SPINDLE PWM CONTROL**: OC8/TMR6 PWM system with 3.338kHz frequency, RPM conversion, M3/M5/S command integration (November 10, 2025)
 - **ARRAY-BASED AXIS CONTROL**: Eliminated all switch statements for axis operations using coordinate array utilities (November 10, 2025)
@@ -82,6 +105,295 @@ if(!(T4CON & _T4CON_ON_MASK)) {
 - Optimal stepper driver compatibility (2.5µs pulse width)
 - Hardware state validation prevents startup failures
 - Debug output shows timer frequency and timing calculations
+
+### 🔧 FLOW CONTROL ARCHITECTURE (November 11, 2025) ⭐ UPDATED
+**Single Authoritative Count Source**
+
+Problem Solved: Stale count copies causing deferred "ok" to never send when buffer drained.
+
+Root Cause Analysis:
+- `appData->motionQueueCount` was being synced to `gcodeCommandQueue.motionQueueCount` once per iteration
+- Flow control checked the STALE copy instead of FRESH authoritative count
+- When buffer drained, copied value hadn't updated yet, so deferred "ok" was never sent
+- UGS waited indefinitely for "ok", stopped sending remaining commands
+
+Solution: Single Authoritative Source
+```c
+// REMOVED from GCODE_CommandQueue structure:
+// uint32_t motionQueueCount;  // DELETE - was stale copy
+
+// REMOVED from app.c APP_IDLE:
+// appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;  // DELETE sync
+
+// Flow control now reads fresh count directly:
+CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+SendOrDeferOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+```
+
+Files Modified:
+- `incs/data_structures.h` - Removed `motionQueueCount` field from `GCODE_CommandQueue`
+- `srcs/app.c` - Removed sync at line 241
+- `srcs/gcode/gcode_parser.c` - Flow control reads `appData->motionQueueCount` directly
+
+Idle Loop Enhancement:
+```c
+case GCODE_STATE_IDLE:
+    // ... UART processing ...
+    
+    if (nBytesRead == 0) {
+        // ✅ Check for deferred "ok" even when no new data
+        CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+        break;
+    }
+```
+
+Benefits:
+- ✅ No stale copies - always reads current buffer occupancy
+- ✅ Deferred "ok" sent during idle loop when buffer drains
+- ✅ UGS file streaming completes full programs
+- ✅ Cleaner architecture - single source of truth
+
+### 🔧 STARTUP OK DEFERRAL FOR UGS VISUALIZATION (November 11, 2025) ⭐ NEW
+Module: `srcs/gcode/gcode_parser.c` → Startup deferral state machine
+
+**Problem Solved**: UGS (Universal G-Code Sender) would receive all "ok" responses before motion started, mark file as "Finished", and stop automatic status polling. Motion wouldn't visualize until manual `?` query sent.
+
+**Root Cause**: Setup commands (G21, G90, G17, G92, G1F500) received "ok" immediately. By the time first motion command executed, UGS had all expected "ok" responses and considered file complete.
+
+**Solution**: Startup OK Deferral with Motion Detection
+- Withholds first 2 **motion command** "ok" responses
+- Flushes both OKs together after 2nd motion command received
+- UGS sees motion start before receiving all OKs → continues automatic polling
+
+**Implementation Architecture**:
+```c
+// Static state variables (gcode_parser.c lines 62-64)
+static bool startupDeferralActive = false;
+static uint8_t startupDeferralRemaining = 0;  // Counts down from 2
+static uint8_t startupDeferredOkCredits = 0;  // Accumulates withheld OKs
+
+// Motion detection function (lines 549-585)
+static bool LineHasMotionWord(const char* line, uint32_t len) {
+    // Two-stage check:
+    // 1. Find G0/G1/G2/G3 (excluding G10, G17, G21, etc.)
+    // 2. Verify at least one axis parameter (X/Y/Z/A) present
+    
+    // Stage 1: Scan for G followed by 0-3
+    bool found_g_code = false;
+    for (uint32_t i = 0; i < len - 1; i++) {
+        char c = line[i];
+        if (c == 'G' || c == 'g') {
+            char next = line[i+1];
+            if (next >= '0' && next <= '3') {
+                // Exclude G10, G17, G21, G28, G30, etc.
+                if (i+2 < len && line[i+2] >= '0' && line[i+2] <= '9') {
+                    continue;  // Skip G10+
+                }
+                found_g_code = true;
+                break;
+            }
+        }
+    }
+    if (!found_g_code) return false;
+    
+    // Stage 2: Verify axis parameters exist
+    // Prevents false positives like "G1F500" (feedrate only, no movement)
+    for (uint32_t i = 0; i < len; i++) {
+        char c = line[i];
+        if (c == 'X' || c == 'x' || c == 'Y' || c == 'y' || 
+            c == 'Z' || c == 'z' || c == 'A' || c == 'a') {
+            return true;  // Motion command with axis movement
+        }
+    }
+    return false;  // G-code present but no axis parameters
+}
+```
+
+**Deferral Logic** (lines 715-743 IDLE, 1045-1070 GCODE_COMMAND):
+```c
+bool isMotion = LineHasMotionWord(rxBuffer, terminator_pos);
+
+// Arm deferral on first motion command
+if (!startupDeferralActive && isMotion) {
+    startupDeferralActive = true;
+    startupDeferralRemaining = 2;
+    startupDeferredOkCredits = 0;
+}
+
+// Withhold OKs for first 2 motion commands
+if (startupDeferralActive && isMotion && startupDeferralRemaining > 0) {
+    startupDeferralRemaining--;
+    startupDeferredOkCredits++;
+    
+    // Flush both OKs when 2nd motion command received
+    if (startupDeferralRemaining == 0) {
+        while (startupDeferredOkCredits > 0) {
+            UART_SendOK();
+            startupDeferredOkCredits--;
+        }
+        startupDeferralActive = false;
+    }
+} else {
+    SendOrDeferOk(appData, cmdQueue);  // Normal flow control
+}
+```
+
+**Critical Design Details**:
+- **Two-Stage Motion Detection**: Prevents false positives from:
+  - G17/G18/G19 (plane selection)
+  - G21/G20 (units)
+  - G90/G91 (distance mode)
+  - **G1F500** (feedrate setting with no axis movement)
+- **Axis Parameter Requirement**: Only commands with X/Y/Z/A trigger deferral
+- **Inline OK Flushing**: Both OKs sent together when `remaining==0`
+- **No Hardware Dependencies**: Pure protocol-level solution, no motion system coupling
+
+**Typical Execution Sequence**:
+```gcode
+G21          → OK (setup, no deferral)
+G90          → OK (setup, no deferral)
+G17          → OK (setup, no deferral)
+G92X0Y0Z0    → OK (setup, G92 not motion)
+G1F500       → OK (feedrate only, no X/Y/Z/A parameters!)
+             → OK (blank line)
+G1X20Y0      → Deferral armed, OK withheld (1st motion, remaining=1)
+G1X20Y10     → OK, OK flushed together (2nd motion, remaining=0)
+             → UGS sees Run state, continues automatic polling
+G1X0Y10      → OK (normal flow control)
+G1X0Y0       → OK (normal flow control)
+```
+
+**Benefits**:
+- ✅ UGS automatically polls during motion (no manual `?` needed)
+- ✅ Real-time visualization without protocol hacks
+- ✅ GRBL-compatible behavior pattern
+- ✅ Robust motion detection (no false positives)
+- ✅ Works with any G-code sender expecting GRBL protocol
+
+**Testing**:
+Rectangle test shows complete success:
+- Setup commands receive immediate OKs
+- First 2 motion commands withheld
+- Motion starts, UGS sees `<Run|MPos:...>` updates
+- Complete path execution with continuous visualization
+- Clean `<Idle|...>` return when finished
+
+### 🔧 AGGRESSIVE FLOW CONTROL (November 13, 2025) ⭐ NEW
+Module: `srcs/gcode/gcode_parser.c` → Flow control system redesign
+
+**Problem Solved**: UGS marked files as "Finished" before motion completed because it received all "ok" responses while the motion queue still had segments executing. This caused UGS to stop automatic status polling, leaving motion running without visualization updates.
+
+**Root Cause**: Previous flow control used dual thresholds (high-water/low-water) which sent deferred "ok" responses before the motion queue was truly empty. UGS would receive all expected "ok" responses, mark the file complete, and stop polling - even though motion was still executing.
+
+**Solution**: Aggressive Single-Threshold Flow Control
+- **Defer ALL "ok" responses** when motion queue has any content (`motionQueueCount > 0`)
+- **Send "ok" ONLY when** motion queue is completely empty (`motionQueueCount == 0`)
+- Applied to ALL commands: G-code, blank lines, and comments
+- Ensures the final "ok" is sent only after motion truly completes
+
+**Implementation Architecture**:
+```c
+// Flow control function (gcode_parser.c)
+static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
+{
+    // Only send "ok" immediately when motion queue is completely empty
+    if (appData->motionQueueCount == 0) {
+        DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (queue empty, motion complete)\r\n");
+        (void)UART_SendOK();
+    } else {
+        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu > 0)\r\n", 
+                          (unsigned long)appData->motionQueueCount);
+        okPending = true;
+    }
+}
+
+// Deferred ok check (gcode_parser.c)
+void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
+    // Only send deferred "ok" when motion queue is completely empty
+    if (okPending && appData->motionQueueCount == 0) {
+        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue empty)\r\n");
+        if (UART_SendOK()) okPending = false;
+    }
+}
+```
+
+**Motion Segment Completion Triggers** (`srcs/motion/motion.c`):
+```c
+// Zero-length segment skip (line 211)
+if (appData->currentSegment->steps_remaining == 0) {
+    appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
+    appData->motionQueueCount--;
+    appData->currentSegment = NULL;
+    
+    // ✅ Signal that queue space became available
+    appData->motionSegmentCompleted = true;
+    return;
+}
+
+// Normal segment completion (line 315)
+appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
+appData->motionQueueCount--;
+
+// ✅ Signal that queue space became available
+appData->motionSegmentCompleted = true;
+```
+
+**Deferred OK Check in Main Loop** (`srcs/app.c` line 247):
+```c
+case APP_IDLE:
+    MOTION_Tasks(&appData);
+    
+    // ✅ Check deferred OKs immediately when segment completes
+    if (appData.motionSegmentCompleted) {
+        appData.motionSegmentCompleted = false;
+        GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
+    }
+```
+
+**Blank Line Handling**:
+```c
+// Blank lines get "ok" responses with flow control applied (GRBL v1.1 compliant)
+} else {
+    DEBUG_PRINT_GCODE("[IDLE] Blank/comment line - sending ok with flow control\r\n");
+    SendOrDeferOk(appData, cmdQueue);  // Same flow control as G-code
+}
+```
+
+**Files Modified**:
+1. `srcs/gcode/gcode_parser.c` - Aggressive flow control logic
+2. `srcs/motion/motion.c` - Set `motionSegmentCompleted` flag when segments complete
+3. `srcs/app.c` - Check deferred ok immediately after motion tasks
+4. `incs/data_structures.h` - Added `bool motionSegmentCompleted` flag to APP_DATA
+
+**Execution Flow**:
+1. First command arrives, queue = 0 → Send "ok" immediately
+2. Command queued, queue = 1
+3. Second command arrives, queue > 0 → Defer "ok" (set okPending = true)
+4. Motion executes, segment completes, queue = 0
+5. `motionSegmentCompleted` flag triggers check
+6. Deferred ok check: `okPending && queue == 0` → Send "ok"
+7. UGS receives "ok", sends next command
+8. Process repeats until file completes
+9. Final command (M0, blank lines, etc.) deferred until queue = 0
+10. UGS only sees "Finished" AFTER all motion truly completes
+
+**Benefits**:
+- ✅ UGS stays in "Run" state until motion completes
+- ✅ Continuous status polling and visualization
+- ✅ Accurate "Finished" timing - only when motion done
+- ✅ Works with blank lines and comments (GRBL v1.1 compliant)
+- ✅ No premature "Finished" state
+- ✅ Clean file streaming from start to finish
+
+**Test Results** (Rectangle Test - November 13, 2025):
+- Both rectangles completed successfully
+- Diagonal move executed
+- Return to origin (0,0,0) completed
+- All "ok" responses properly timed
+- UGS showed `<Run>` throughout motion
+- UGS showed `<Idle>` only after motion stopped
+- No premature "Finished" state
+- Complete file execution with continuous visualization
 
 ### 🔧 ATOMIC INLINE GPIO ARCHITECTURE (November 8, 2025)
 Module: `incs/utils/utils.h`, `srcs/utils/utils.c`, `srcs/motion/stepper.c`
@@ -1058,7 +1370,7 @@ NVM Operations (Harmony Pattern):
   - `03_arc_linear_interpolation.puml` - Arc/linear interpolation system
 - `README.md` - Complete project documentation with TODO list
 
-## Unified Data Structures (Completed)
+## Unified Data Structures (November 11, 2025 - UPDATED)
 Architecture Pattern:
 All major data structures consolidated in `incs/data_structures.h` to eliminate circular dependencies and provide clean module separation.
 
@@ -1071,33 +1383,38 @@ Structure Hierarchy:
 - GCODE_CommandQueue
   ├── commands[16]
   ├── head, tail, count
-  └── motionQueueCount, maxMotionSegments (nested for flow control)
+  └── maxMotionSegments (max buffer size ONLY, no current count)
 - APP_STATES enum
 - APP_DATA
   ├── state
-  ├── gcodeCommandQueue (with nested motion info)
-  └── motionQueue[16], head, tail, count
+  ├── gcodeCommandQueue
+  └── motionQueue[16], head, tail, count (AUTHORITATIVE)
 ```
 
-Flow Control Infrastructure (Ready to Use):
-The nested motion queue info in `GCODE_CommandQueue` enables flow control without circular dependencies:
+Flow Control Infrastructure (Single Source):
+Flow control reads `appData->motionQueueCount` directly - no copies, no sync:
 ```c
-// app.c syncs motion queue status before GCODE processing
+// app.c - NO sync needed (removed November 11)
 case APP_IDLE:
-    // Sync motion queue count for flow control
-    appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
-    
-    // Now GCODE_Tasks can check motion buffer occupancy
-    GCODE_Tasks(&appData.gcodeCommandQueue);
+    // ✅ No sync - flow control reads appData.motionQueueCount directly
+    GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
     break;
+
+// gcode_parser.c - reads fresh count directly
+void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* cmdQueue) {
+    // Check deferred "ok" using FRESH authoritative count
+    CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+    // ...
+}
 ```
 
-Benefits of Unified Structures:
+Benefits of Single Source Architecture:
 - No circular dependencies - all structures in one header
 - Clean module separation - data vs logic separation
-- Single source of truth - structure definitions in one place
+- Single source of truth - `appData->motionQueueCount` is ONLY modified in `motion.c`
+- No stale copies - flow control always sees current buffer occupancy
 - Easy to test - mock entire APP_DATA structure
-- Flow control ready - nested motion queue info accessible to G-code parser
+- Flow control works - deferred "ok" sent when buffer actually drains
 
 ## Settings Implementation (Completed)
 

@@ -99,9 +99,8 @@ void APP_Initialize ( void )
     appData.gcodeCommandQueue.tail = 0;
     appData.gcodeCommandQueue.count = 0;
     
-    // ✅ Initialize nested motion queue info for flow control
-    appData.gcodeCommandQueue.motionQueueCount = 0;
-    appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
+  // ✅ Initialize flow control capacity (single source of truth is appData.motionQueueCount)
+  appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
     
     // ✅ Initialize current position (work coordinates) to origin
     appData.currentX = 0.0f;
@@ -237,30 +236,26 @@ void APP_Tasks ( void )
             // During motion, ISR toggles LED1 on each step (fast blink)
             // LED1 will blink at step rate, visible motion indicator
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
-            // Sync motion queue status for flow control BEFORE G-code processing
-            appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;
-            appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
-            
+            // Flow control uses appData.motionQueueCount directly (no sync needed)
+
+            // ✅ ALWAYS process G-code (even in ALARM) for status queries and $X clear
             // Read bytes, tokenize, and queue commands continuously
             GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
 
-            // Convert one queued command into a motion event and enqueue segment(s)
-            // Doing this BEFORE motion ensures new segments can load immediately this cycle
-            {
-                GCODE_Event event;
-                if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
-                    DEBUG_PRINT_GCODE("[APP] Event type=%d\r\n", event.type);
-                    MOTION_ProcessGcodeEvent(&appData, &event);
-                }
-            }
-
-            // ===== MOTION CONTROLLER (SIMPLIFIED - NO ROLLOVER NEEDED WITH PR2) =====
+            // ===== MOTION CONTROLLER - RUNS BEFORE EVENT PROCESSING =====
+            // ⚠️ CRITICAL: Motion must run EVERY iteration to keep ISR fed with segments
+            // This runs even during dwell to complete existing motion before timer starts
             MOTION_Tasks(&appData);
 
-            // ===== HOMING STATE MACHINE =====
-            HOMING_Tasks(&appData);
+            // ✅ CRITICAL: Check deferred OKs immediately when segment completes
+            // Motion frees a queue slot → check if we should send deferred "ok"
+            if (appData.motionSegmentCompleted) {
+                appData.motionSegmentCompleted = false;
+                GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
+            }
 
             // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
+            // Generate arc segments one at a time when arc is active
             if(appData.arcGenState == ARC_GEN_ACTIVE) {
                 MOTION_Arc(&appData);
             }
@@ -268,6 +263,34 @@ void APP_Tasks ( void )
             // ===== HOMING STATE MACHINE (NON-BLOCKING) =====
             // Process homing cycle if active
             HOMING_Tasks(&appData);
+
+            // ===== EVENT PROCESSING - CONVERT GCODE TO MOTION =====
+            // ⚠️ Only process events if NOT in alarm state
+            if(appData.state != APP_ALARM) {
+                
+                // Process next event - convert one queued command into motion event
+                // Dwell is now handled as a motion segment (no special checking needed)
+                GCODE_Event event;
+                if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
+                    DEBUG_PRINT_GCODE("[APP] Event retrieved: type=%d (1=LINEAR,2=ARC)\r\n", event.type);
+                    
+                    // ⚠️ CRITICAL: Don't process ARC events while another arc is generating
+                    // But allow non-arc commands (dwell, linear, etc.) to process
+                    bool should_process = true;
+                    if (event.type == GCODE_EVENT_ARC_MOVE && appData.arcGenState == ARC_GEN_ACTIVE) {
+                        should_process = false;  // Defer arc until current arc completes
+                    }
+                    
+                    if (should_process) {
+                        // Process event - only consume if successful
+                        if (MOTION_ProcessGcodeEvent(&appData, &event)) {
+                            // Event processed successfully - consume it from queue
+                            GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
+                        }
+                        // If processing failed (queue full), leave event in queue for next iteration
+                    }
+                }
+            }
 
             // ===== HARD LIMIT CHECK (TEMP DISABLED) =====
             // Check limit switches with inversion mask from settings
