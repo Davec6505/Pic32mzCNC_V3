@@ -76,7 +76,7 @@ typedef struct {
 
 // Default settings
 #define SETTINGS_SIGNATURE 0x47524231  // "GRB1"
-#define SETTINGS_VERSION   1
+#define SETTINGS_VERSION   2           // Incremented when structure changes (was 1)
 
 // ✅ CRITICAL: Safe NVM storage location based on MikroE bootloader
 // PIC32MZ2048EFH100 Program Flash with MikroE Bootloader:

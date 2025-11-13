@@ -57,7 +57,7 @@ GCODE_Data gcodeData = {
     .state = GCODE_STATE_IDLE,
 };
 
-static bool okPending = false;              // Flow control: "ok" deferred when buffer full
+static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
 static bool feedHoldActive = false;         /* '!' feed hold, '~' resume */
@@ -131,7 +131,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     /* ✅ No sync needed - flow control reads appData->motionQueueCount directly */
 
     /* 7. Reset G-code parser state */
-    okPending = false;
+    okPendingCount = 0;  // Clear all deferred ok responses
     grblAlarm = false;
     grblCheckMode = false;
     feedHoldActive = false;
@@ -180,7 +180,7 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
 
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
-    okPending = false;
+    okPendingCount = 0;  // Clear all deferred ok responses
     gcodeData.state = GCODE_STATE_IDLE;
     unitsInches = false;
     grblCheckMode = false;
@@ -595,14 +595,19 @@ static inline uint32_t Flow_LowWater(const GCODE_CommandQueue* q)
  * @param q Command queue (unused with current logic)
  */
 void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
-    // Send deferred "ok" when buffer drops below low-water mark
+    // Send deferred "ok" responses when buffer drops below low-water mark
     // This prevents deadlock on long motion files while still providing backpressure
     uint32_t lowWater = appData->gcodeCommandQueue.maxMotionSegments - MOTION_BUFFER_LOW_WATER;
     
-    if (okPending && appData->motionQueueCount < lowWater) {
-        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue=%lu < lowWater=%lu)\r\n",
-                          (unsigned long)appData->motionQueueCount, (unsigned long)lowWater);
-        if (UART_SendOK()) okPending = false;
+    while (okPendingCount > 0 && appData->motionQueueCount < lowWater) {
+        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue=%lu < lowWater=%lu, pending=%lu)\r\n",
+                          (unsigned long)appData->motionQueueCount, (unsigned long)lowWater,
+                          (unsigned long)okPendingCount);
+        if (UART_SendOK()) {
+            okPendingCount--;
+        } else {
+            break;  // TX buffer full, try again next iteration
+        }
     }
 }
 
@@ -625,9 +630,10 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
         DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (queue empty, motion complete)\r\n");
         (void)UART_SendOK();
     } else {
-        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu > 0)\r\n", 
-                          (unsigned long)appData->motionQueueCount);
-        okPending = true;
+        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu > 0, total pending=%lu)\r\n", 
+                          (unsigned long)appData->motionQueueCount,
+                          (unsigned long)(okPendingCount + 1));
+        okPendingCount++;
     }
 }
 
@@ -663,12 +669,14 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 nBytesRead += got;
                 rxBuffer[nBytesRead] = '\0';
             }
+        } else {
+            // ✅ No new bytes arriving - check for deferred ok
+            // This runs every iteration when idle, ensuring final "ok" is sent
+            GCODE_CheckDeferredOk(appData, cmdQueue);
         }
 
         if (nBytesRead == 0) {
-            // ✅ No new data - check if we should send deferred "ok" before exiting
-            GCODE_CheckDeferredOk(appData, cmdQueue);
-            break;
+            break;  // No data in buffer, exit IDLE state
         }
 
         /* Literal "0x18" typed by user */
@@ -809,9 +817,8 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     feedHoldActive ? "|FH:1" : "");
                 UART3_Write(txBuffer, response_len);
                 
-                // ✅ Check for deferred "ok" after status query
-                // Motion queue may have drained during idle, send pending ok if needed
-                GCODE_CheckDeferredOk(appData, cmdQueue);
+                // ⚠️ Real-time commands NEVER trigger deferred ok checks
+                // The deferred ok will be sent by IDLE loop (line 668) or next command
                 break;
             }
             case '~': /* Cycle start / resume */

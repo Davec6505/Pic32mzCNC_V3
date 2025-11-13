@@ -147,6 +147,11 @@ bool SETTINGS_LoadFromFlash(CNC_Settings* settings)
         return false;  // Flash empty or invalid - keep current settings (defaults)
     }
     
+    // Validate version - reject if structure changed
+    if (temp_settings.version != SETTINGS_VERSION) {
+        return false;  // Version mismatch - structure changed, use defaults
+    }
+    
     // Validate checksum
     uint32_t calculated_crc = SETTINGS_CalculateCRC32(&temp_settings);
     if (calculated_crc != temp_settings.checksum) {
