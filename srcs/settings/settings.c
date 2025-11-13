@@ -42,10 +42,10 @@ static const CNC_Settings default_settings = {
     .limit_pins_invert = 0,        // false as uint8
     
     // Steps per mm (typical for 1/8 microstepping, 200 steps/rev, 5mm pitch)
-    .steps_per_mm_x = 40.0f,       // 200 * 8 / 5 / 8 = 40
-    .steps_per_mm_y = 40.0f,
-    .steps_per_mm_z = 40.0f,
-    .steps_per_mm_a = 40.0f,
+    .steps_per_mm_x = 156.0f,       // 200 * 8 / 5 / 8 = 40
+    .steps_per_mm_y = 156.0f,
+    .steps_per_mm_z = 156.0f,
+    .steps_per_mm_a = 156.0f,
     
     // Max rates (mm/min)
     .max_rate_x = 5000.0f,

@@ -840,15 +840,28 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 break;
         }
 
-        if (nBytesRead > 1) {
-            memmove(rxBuffer, &rxBuffer[1], nBytesRead - 1);
-            nBytesRead -= 1;
+        // ✅ GRBL PROTOCOL: Real-time commands NEVER generate "ok" responses
+        // Consume control character at position 0, plus any trailing CR/LF
+        // This prevents "?\r\n" from leaving "\r\n" which would be processed as blank line
+        uint32_t skip_pos = 1;  // Skip the control character itself
+        while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n')) {
+            skip_pos++;  // Skip all trailing line terminators
+        }
+        
+        if (skip_pos < nBytesRead) {
+            // Remaining bytes after control char + terminators
+            memmove(rxBuffer, &rxBuffer[skip_pos], nBytesRead - skip_pos);
+            nBytesRead -= skip_pos;
             rxBuffer[nBytesRead] = '\0';
             if (nBytesRead > 0 && is_control_char(rxBuffer[0])) {
                 gcodeData.state = GCODE_STATE_CONTROL_CHAR;
-            } else gcodeData.state = GCODE_STATE_IDLE;
+            } else {
+                gcodeData.state = GCODE_STATE_IDLE;
+            }
         } else {
+            // Nothing left after consuming control char and terminators - clear everything
             nBytesRead = 0;
+            rxBuffer[0] = '\0';  // ✅ Ensure first byte is null
             memset(rxBuffer, 0, sizeof(rxBuffer));
             gcodeData.state = GCODE_STATE_IDLE;
         }
