@@ -19,8 +19,9 @@ typedef struct {
     uint8_t step_enable_invert;    // $4 - invert step enable pin (bool as uint8)
     uint8_t limit_pins_invert;     // $5 - invert limit pins (bool as uint8)
     
-    // Arc configuration ($12)
+    // Arc configuration ($12-$13)
     float mm_per_arc_segment;      // $12 - Arc segment length in mm (default 0.1mm)
+    float arc_tolerance;           // $13 - Arc tolerance in mm (default 0.002mm, GRBL v1.1)
     
     // Motion configuration ($100-$132)
     float steps_per_mm_x;          // $100 - X-axis steps per mm

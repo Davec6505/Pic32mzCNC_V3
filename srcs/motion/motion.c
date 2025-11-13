@@ -610,20 +610,34 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             center.z = start.z;
             center.a = 0.0f;
             
-            // Radius validation
+            // GRBL v1.1 radius validation with automatic compensation
+            // Calculate radius from both start and end points
             float r_start = sqrtf(event->data.arcMove.centerX * event->data.arcMove.centerX + 
                                  event->data.arcMove.centerY * event->data.arcMove.centerY);
             float r_end = sqrtf((end.x - center.x) * (end.x - center.x) + 
                                (end.y - center.y) * (end.y - center.y));
             
-            if(fabsf(r_start - r_end) > 0.005f) {
-                DEBUG_PRINT_MOTION("[MOTION] ⚠️ ARC RADIUS ERROR: r_start=%.3f, r_end=%.3f, diff=%.3f\r\n",
-                                  r_start, r_end, fabsf(r_start - r_end));
+            float radius_error = fabsf(r_start - r_end);
+            
+            // Get arc tolerance from settings (GRBL $13)
+            CNC_Settings* settings = SETTINGS_GetCurrent();
+            float arc_tolerance = settings->arc_tolerance;
+            
+            // Check if radius error exceeds tolerance
+            if(radius_error > arc_tolerance) {
+                DEBUG_PRINT_MOTION("[MOTION] ⚠️ ARC RADIUS ERROR: r_start=%.3f, r_end=%.3f, diff=%.3f (tolerance=%.3f)\r\n",
+                                  r_start, r_end, radius_error, arc_tolerance);
                 UART_Printf("error:33\r\n");  // GRBL error code for arc radius error
                 appData->alarmCode = 33;  // Arc radius error
                 appData->state = APP_ALARM;
                 return false;
             }
+            
+            // GRBL radius compensation: Use average radius to compensate for CAM rounding errors
+            float radius = (r_start + r_end) / 2.0f;
+            
+            DEBUG_PRINT_MOTION("[ARC INIT] Radius compensation: r_start=%.4f, r_end=%.4f, avg=%.4f, error=%.4f\r\n",
+                              r_start, r_end, radius, radius_error);
             
             // Calculate angles
             float start_angle = atan2f(start.y - center.y, start.x - center.x);
@@ -631,8 +645,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             
             DEBUG_PRINT_MOTION("[ARC INIT] Start=(%.2f,%.2f) End=(%.2f,%.2f) Center=(%.2f,%.2f)\r\n",
                               start.x, start.y, end.x, end.y, center.x, center.y);
-            DEBUG_PRINT_MOTION("[ARC INIT] Direction=%s Radius=%.3f\r\n",
-                              event->data.arcMove.clockwise ? "CW(G2)" : "CCW(G3)", r_start);
+            DEBUG_PRINT_MOTION("[ARC INIT] Direction=%s Radius=%.4f (compensated)\r\n",
+                              event->data.arcMove.clockwise ? "CW(G2)" : "CCW(G3)", radius);
             DEBUG_PRINT_MOTION("[ARC INIT] Start_angle=%.3f End_angle=%.3f\r\n",
                               start_angle, end_angle);
             
@@ -659,7 +673,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             appData->arcCurrent = start;
             appData->arcStartPoint = start;  // Store initial position for Z/A interpolation
             appData->arcEndPoint = end;
-            appData->arcRadius = r_start;
+            appData->arcRadius = radius;  // Use compensated average radius
             appData->arcClockwise = event->data.arcMove.clockwise;
             appData->arcPlane = appData->modalPlane;
             appData->arcFeedrate = event->data.arcMove.feedrate;
@@ -668,8 +682,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // Each 0.1mm segment may be <1 step, but fractional steps accumulate across all segments
             // KINEMATICS_ResetAccumulators();  // ❌ REMOVED - caused zero-step arc segments
             
-            CNC_Settings* settings = SETTINGS_GetCurrent();
-            float arc_length = r_start * total_angle;
+            // Calculate arc length and number of segments (reuse settings from radius check above)
+            float arc_length = radius * total_angle;  // Use compensated radius
             uint32_t num_segments = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
             if(num_segments < 2) num_segments = 2;  // Minimum 2 segments to prevent division by zero
             

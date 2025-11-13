@@ -94,8 +94,9 @@ static const CNC_Settings default_settings = {
     // Tool length offset - initialized to zero
     .tool_length_offset = 0.0f,
     
-    // Arc configuration
-    .mm_per_arc_segment = 0.5f,    // Increased from 0.1mm - creates larger segments with reliable step counts
+    // Arc configuration ($12-$13)
+    .mm_per_arc_segment = 0.5f,    // $12 - Increased from 0.1mm - creates larger segments with reliable step counts
+    .arc_tolerance = 0.002f,       // $13 - GRBL v1.1 default: 0.002mm (2 microns) for radius error compensation
     
     .checksum = 0  // Will be calculated
 };
@@ -272,6 +273,7 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         
         // Arc configuration
         case 12: settings->mm_per_arc_segment = value; break;
+        case 13: settings->arc_tolerance = value; break;
         
         // Steps per mm
         case 100: settings->steps_per_mm_x = value; break;
@@ -330,6 +332,7 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         
         case 11: return settings->junction_deviation;
         case 12: return settings->mm_per_arc_segment;
+        case 13: return settings->arc_tolerance;
         
         case 100: return settings->steps_per_mm_x;
         case 101: return settings->steps_per_mm_y;
@@ -384,7 +387,7 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$5=%u\r\n", settings->limit_pins_invert);
     len += sprintf(&settings_buffer[len], "$11=%.3f\r\n", settings->junction_deviation);
     len += sprintf(&settings_buffer[len], "$12=%.3f\r\n", settings->mm_per_arc_segment);
-
+    len += sprintf(&settings_buffer[len], "$13=%.3f\r\n", settings->arc_tolerance);
         
     len += sprintf(&settings_buffer[len], "$22=%u\r\n", settings->homing_enable);
     len += sprintf(&settings_buffer[len], "$23=%u\r\n", settings->homing_dir_mask);
