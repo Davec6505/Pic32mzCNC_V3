@@ -308,6 +308,9 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
     if (!cmd || !ev) return false;
     ev->type = GCODE_EVENT_NONE;
 
+    // Axis letter array for scalable parsing (shared across all parsing blocks)
+    static const char axis_letters[NUM_AXIS] = {'X', 'Y', 'Z', 'A'};
+
     DEBUG_PRINT_GCODE("[PARSE] cmd='%s'\r\n", cmd);
 
     if (cmd[0] == 'G') {
@@ -333,28 +336,22 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
 
         // G92 - Set work coordinate offset (same as G10 L20 P0)
         if (gnum == 92) {
-            char* pX = find_char((char*)cmd, 'X');
-            char* pY = find_char((char*)cmd, 'Y');
-            char* pZ = find_char((char*)cmd, 'Z');
-            char* pA = find_char((char*)cmd, 'A');
-            const float unit_scale = unitsInches ? 25.4f : 1.0f;
-            float desiredX = pX ? (parse_float_after(pX) * unit_scale) : NAN;
-            float desiredY = pY ? (parse_float_after(pY) * unit_scale) : NAN;
-            float desiredZ = pZ ? (parse_float_after(pZ) * unit_scale) : NAN;
-            float desiredA = pA ? (parse_float_after(pA) * unit_scale) : NAN;
-            
             StepperPosition* pos = STEPPER_GetPosition();
             WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
+            const float unit_scale = unitsInches ? 25.4f : 1.0f;
             
-            // Array-based machine position calculation with loop
-            float desired[NUM_AXIS] = {desiredX, desiredY, desiredZ, desiredA};
+            // Array-based axis parameter parsing with loop
+            float desired[NUM_AXIS];
             float mpos[NUM_AXIS];
             
+            // Parse all axis parameters using loop
             for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                char* pAxis = find_char((char*)cmd, axis_letters[axis]);
+                desired[axis] = pAxis ? (parse_float_after(pAxis) * unit_scale) : NAN;
                 mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
             }
             
-            // Set offset = MachinePos - DesiredWorkPos (only X, Y, Z supported)
+            // Set offset = MachinePos - DesiredWorkPos (only X, Y, Z supported in WCS)
             for (E_AXIS axis = AXIS_X; axis < AXIS_Z + 1; axis++) {
                 if (!isnan(desired[axis])) {
                     SET_COORDINATE_AXIS(&wcs->offset, axis, mpos[axis] - desired[axis]);
@@ -370,24 +367,18 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             int p_val = pP ? (int)strtol(pP + 1, NULL, 10) : 0;
             int l_val = pL ? (int)strtol(pL + 1, NULL, 10) : 0;
             if (l_val == 20) {
-                char* pX = find_char((char*)cmd, 'X');
-                char* pY = find_char((char*)cmd, 'Y');
-                char* pZ = find_char((char*)cmd, 'Z');
-                char* pA = find_char((char*)cmd, 'A');
-                const float unit_scale = unitsInches ? 25.4f : 1.0f;
-                float desiredX = pX ? (parse_float_after(pX) * unit_scale) : NAN;
-                float desiredY = pY ? (parse_float_after(pY) * unit_scale) : NAN;
-                float desiredZ = pZ ? (parse_float_after(pZ) * unit_scale) : NAN;
-                float desiredA = pA ? (parse_float_after(pA) * unit_scale) : NAN;
                 if (p_val == 0 || p_val == 1) {
                     StepperPosition* pos = STEPPER_GetPosition();
                     WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
+                    const float unit_scale = unitsInches ? 25.4f : 1.0f;
                     
-                    // Array-based machine position calculation with loop
-                    float desired[NUM_AXIS] = {desiredX, desiredY, desiredZ, desiredA};
+                    // Array-based axis parameter parsing with loop
+                    float desired[NUM_AXIS];
                     float mpos[NUM_AXIS];
                     
                     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                        char* pAxis = find_char((char*)cmd, axis_letters[axis]);
+                        desired[axis] = pAxis ? (parse_float_after(pAxis) * unit_scale) : NAN;
                         mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
                     }
                     
@@ -427,40 +418,38 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             return false;
         }
 
-        char* pX = find_char((char*)cmd, 'X');
-        char* pY = find_char((char*)cmd, 'Y');
-        char* pZ = find_char((char*)cmd, 'Z');
-        char* pA = find_char((char*)cmd, 'A');
+        // Array-based axis parameter parsing with loop
+        char* pAxis[NUM_AXIS];
+        float axis_values[NUM_AXIS];
+        
+        for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+            pAxis[axis] = find_char((char*)cmd, axis_letters[axis]);
+            axis_values[axis] = pAxis[axis] ? parse_float_after(pAxis[axis]) : NAN;
+        }
+        
         char* pF = find_char((char*)cmd, 'F');
-
         const float unit_scale = unitsInches ? 25.4f : 1.0f;
 
         if (ev->type == GCODE_EVENT_LINEAR_MOVE) {
-            float x = pX ? parse_float_after(pX) : NAN;
-            float y = pY ? parse_float_after(pY) : NAN;
-            float z = pZ ? parse_float_after(pZ) : NAN;
-            float a = pA ? parse_float_after(pA) : NAN;
             float f = pF ? parse_float_after(pF) : 0.0f;
-            ev->data.linearMove.x = !isnan(x) ? x * unit_scale : NAN;
-            ev->data.linearMove.y = !isnan(y) ? y * unit_scale : NAN;
-            ev->data.linearMove.z = !isnan(z) ? z * unit_scale : NAN;
-            ev->data.linearMove.a = !isnan(a) ? a * unit_scale : NAN;
+            // Event structure still uses hardcoded members (future refactoring opportunity)
+            ev->data.linearMove.x = !isnan(axis_values[AXIS_X]) ? axis_values[AXIS_X] * unit_scale : NAN;
+            ev->data.linearMove.y = !isnan(axis_values[AXIS_Y]) ? axis_values[AXIS_Y] * unit_scale : NAN;
+            ev->data.linearMove.z = !isnan(axis_values[AXIS_Z]) ? axis_values[AXIS_Z] * unit_scale : NAN;
+            ev->data.linearMove.a = !isnan(axis_values[AXIS_A]) ? axis_values[AXIS_A] * unit_scale : NAN;
             ev->data.linearMove.feedrate = (f > 0.0f) ? (f * unit_scale) : 0.0f;
             return true;
         } else if (ev->type == GCODE_EVENT_ARC_MOVE) {
-            float x = pX ? parse_float_after(pX) : NAN;
-            float y = pY ? parse_float_after(pY) : NAN;
-            float z = pZ ? parse_float_after(pZ) : NAN;
-            float a = pA ? parse_float_after(pA) : NAN;
             char* pI = find_char((char*)cmd, 'I');
             char* pJ = find_char((char*)cmd, 'J');
             float i = pI ? parse_float_after(pI) : 0.0f;
             float j = pJ ? parse_float_after(pJ) : 0.0f;
             float f = pF ? parse_float_after(pF) : 0.0f;
-            ev->data.arcMove.x = !isnan(x) ? x * unit_scale : NAN;
-            ev->data.arcMove.y = !isnan(y) ? y * unit_scale : NAN;
-            ev->data.arcMove.z = !isnan(z) ? z * unit_scale : NAN;
-            ev->data.arcMove.a = !isnan(a) ? a * unit_scale : NAN;
+            // Event structure still uses hardcoded members (future refactoring opportunity)
+            ev->data.arcMove.x = !isnan(axis_values[AXIS_X]) ? axis_values[AXIS_X] * unit_scale : NAN;
+            ev->data.arcMove.y = !isnan(axis_values[AXIS_Y]) ? axis_values[AXIS_Y] * unit_scale : NAN;
+            ev->data.arcMove.z = !isnan(axis_values[AXIS_Z]) ? axis_values[AXIS_Z] * unit_scale : NAN;
+            ev->data.arcMove.a = !isnan(axis_values[AXIS_A]) ? axis_values[AXIS_A] * unit_scale : NAN;
             ev->data.arcMove.centerX = i * unit_scale;
             ev->data.arcMove.centerY = j * unit_scale;
             ev->data.arcMove.feedrate = (f > 0.0f) ? (f * unit_scale) : 0.0f;
