@@ -95,94 +95,81 @@ static inline bool __attribute__((always_inline)) Wrapper_Z_Max_Get(void)    { r
 static inline bool __attribute__((always_inline)) Wrapper_A_Min_Get(void)    { return A_Min_Get(); }
 static inline bool __attribute__((always_inline)) Wrapper_A_Max_Get(void)    { return A_Max_Get(); }
 
+// ✅ ARRAY-BASED FUNCTION POINTER TABLES (indexed by E_AXIS enum)
+// This eliminates 72 lines of repetitive assignments!
+static GPIO_SetFunc axis_step_set[NUM_AXIS] = {
+    Wrapper_StepX_Set, Wrapper_StepY_Set, Wrapper_StepZ_Set, Wrapper_StepA_Set
+};
+static GPIO_ClearFunc axis_step_clear[NUM_AXIS] = {
+    Wrapper_StepX_Clear, Wrapper_StepY_Clear, Wrapper_StepZ_Clear, Wrapper_StepA_Clear
+};
+static GPIO_ToggleFunc axis_step_toggle[NUM_AXIS] = {
+    Wrapper_StepX_Toggle, Wrapper_StepY_Toggle, Wrapper_StepZ_Toggle, Wrapper_StepA_Toggle
+};
+static GPIO_GetFunc axis_step_get[NUM_AXIS] = {
+    Wrapper_StepX_Get, Wrapper_StepY_Get, Wrapper_StepZ_Get, Wrapper_StepA_Get
+};
+
+static GPIO_SetFunc axis_dir_set[NUM_AXIS] = {
+    Wrapper_DirX_Set, Wrapper_DirY_Set, Wrapper_DirZ_Set, Wrapper_DirA_Set
+};
+static GPIO_ClearFunc axis_dir_clear[NUM_AXIS] = {
+    Wrapper_DirX_Clear, Wrapper_DirY_Clear, Wrapper_DirZ_Clear, Wrapper_DirA_Clear
+};
+static GPIO_ToggleFunc axis_dir_toggle[NUM_AXIS] = {
+    Wrapper_DirX_Toggle, Wrapper_DirY_Toggle, Wrapper_DirZ_Toggle, Wrapper_DirA_Toggle
+};
+static GPIO_GetFunc axis_dir_get[NUM_AXIS] = {
+    Wrapper_DirX_Get, Wrapper_DirY_Get, Wrapper_DirZ_Get, Wrapper_DirA_Get
+};
+
+static GPIO_SetFunc axis_enable_set[NUM_AXIS] = {
+    Wrapper_EnX_Set, Wrapper_EnY_Set, Wrapper_EnZ_Set, Wrapper_EnA_Set
+};
+static GPIO_ClearFunc axis_enable_clear[NUM_AXIS] = {
+    Wrapper_EnX_Clear, Wrapper_EnY_Clear, Wrapper_EnZ_Clear, Wrapper_EnA_Clear
+};
+static GPIO_ToggleFunc axis_enable_toggle[NUM_AXIS] = {
+    Wrapper_EnX_Toggle, Wrapper_EnY_Toggle, Wrapper_EnZ_Toggle, Wrapper_EnA_Toggle
+};
+static GPIO_GetFunc axis_enable_get[NUM_AXIS] = {
+    Wrapper_EnX_Get, Wrapper_EnY_Get, Wrapper_EnZ_Get, Wrapper_EnA_Get
+};
+
 // Initialize axis configuration - MUST be called during app initialization
 void UTILS_InitAxisConfig(void) {
     CNC_Settings* settings = SETTINGS_GetCurrent();
     StepperPosition* stepper_pos = STEPPER_GetPositionPointer();  // Get LIVE counters, not snapshot!
     
-    // ===== X AXIS (AXIS_X = 0) =====
-    g_axis_config[AXIS_X].step.Set = Wrapper_StepX_Set;
-    g_axis_config[AXIS_X].step.Clear = Wrapper_StepX_Clear;
-    g_axis_config[AXIS_X].step.Toggle = Wrapper_StepX_Toggle;
-    g_axis_config[AXIS_X].step.Get = Wrapper_StepX_Get;
+    // ✅ ARRAY-BASED: Loop through all axes and assign function pointers
+    // Adding a 5th axis now requires ONLY adding entries to the function pointer arrays above!
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        // Step pin function pointers
+        g_axis_config[axis].step.Set = axis_step_set[axis];
+        g_axis_config[axis].step.Clear = axis_step_clear[axis];
+        g_axis_config[axis].step.Toggle = axis_step_toggle[axis];
+        g_axis_config[axis].step.Get = axis_step_get[axis];
+        
+        // Direction pin function pointers
+        g_axis_config[axis].dir.Set = axis_dir_set[axis];
+        g_axis_config[axis].dir.Clear = axis_dir_clear[axis];
+        g_axis_config[axis].dir.Toggle = axis_dir_toggle[axis];
+        g_axis_config[axis].dir.Get = axis_dir_get[axis];
+        
+        // Enable pin function pointers
+        g_axis_config[axis].enable.Set = axis_enable_set[axis];
+        g_axis_config[axis].enable.Clear = axis_enable_clear[axis];
+        g_axis_config[axis].enable.Toggle = axis_enable_toggle[axis];
+        g_axis_config[axis].enable.Get = axis_enable_get[axis];
+    }
     
-    g_axis_config[AXIS_X].dir.Set = Wrapper_DirX_Set;
-    g_axis_config[AXIS_X].dir.Clear = Wrapper_DirX_Clear;
-    g_axis_config[AXIS_X].dir.Toggle = Wrapper_DirX_Toggle;
-    g_axis_config[AXIS_X].dir.Get = Wrapper_DirX_Get;
-    
-    g_axis_config[AXIS_X].enable.Set = Wrapper_EnX_Set;
-    g_axis_config[AXIS_X].enable.Clear = Wrapper_EnX_Clear;
-    g_axis_config[AXIS_X].enable.Toggle = Wrapper_EnX_Toggle;
-    g_axis_config[AXIS_X].enable.Get = Wrapper_EnX_Get;
-    
-    g_axis_config[AXIS_X].max_rate = &settings->max_rate_x;
-    g_axis_config[AXIS_X].acceleration = &settings->acceleration_x;
-    g_axis_config[AXIS_X].steps_per_mm = &settings->steps_per_mm_x;
-    g_axis_config[AXIS_X].step_count = &stepper_pos->x_steps;
-    
-    // ===== Y AXIS (AXIS_Y = 1) =====
-    g_axis_config[AXIS_Y].step.Set = Wrapper_StepY_Set;
-    g_axis_config[AXIS_Y].step.Clear = Wrapper_StepY_Clear;
-    g_axis_config[AXIS_Y].step.Toggle = Wrapper_StepY_Toggle;
-    g_axis_config[AXIS_Y].step.Get = Wrapper_StepY_Get;
-    
-    g_axis_config[AXIS_Y].dir.Set = Wrapper_DirY_Set;
-    g_axis_config[AXIS_Y].dir.Clear = Wrapper_DirY_Clear;
-    g_axis_config[AXIS_Y].dir.Toggle = Wrapper_DirY_Toggle;
-    g_axis_config[AXIS_Y].dir.Get = Wrapper_DirY_Get;
-    
-    g_axis_config[AXIS_Y].enable.Set = Wrapper_EnY_Set;
-    g_axis_config[AXIS_Y].enable.Clear = Wrapper_EnY_Clear;
-    g_axis_config[AXIS_Y].enable.Toggle = Wrapper_EnY_Toggle;
-    g_axis_config[AXIS_Y].enable.Get = Wrapper_EnY_Get;
-    
-    g_axis_config[AXIS_Y].max_rate = &settings->max_rate_y;
-    g_axis_config[AXIS_Y].acceleration = &settings->acceleration_y;
-    g_axis_config[AXIS_Y].steps_per_mm = &settings->steps_per_mm_y;
-    g_axis_config[AXIS_Y].step_count = &stepper_pos->y_steps;
-    
-    // ===== Z AXIS (AXIS_Z = 2) =====
-    g_axis_config[AXIS_Z].step.Set = Wrapper_StepZ_Set;
-    g_axis_config[AXIS_Z].step.Clear = Wrapper_StepZ_Clear;
-    g_axis_config[AXIS_Z].step.Toggle = Wrapper_StepZ_Toggle;
-    g_axis_config[AXIS_Z].step.Get = Wrapper_StepZ_Get;
-    
-    g_axis_config[AXIS_Z].dir.Set = Wrapper_DirZ_Set;
-    g_axis_config[AXIS_Z].dir.Clear = Wrapper_DirZ_Clear;
-    g_axis_config[AXIS_Z].dir.Toggle = Wrapper_DirZ_Toggle;
-    g_axis_config[AXIS_Z].dir.Get = Wrapper_DirZ_Get;
-    
-    g_axis_config[AXIS_Z].enable.Set = Wrapper_EnZ_Set;
-    g_axis_config[AXIS_Z].enable.Clear = Wrapper_EnZ_Clear;
-    g_axis_config[AXIS_Z].enable.Toggle = Wrapper_EnZ_Toggle;
-    g_axis_config[AXIS_Z].enable.Get = Wrapper_EnZ_Get;
-    
-    g_axis_config[AXIS_Z].max_rate = &settings->max_rate_z;
-    g_axis_config[AXIS_Z].acceleration = &settings->acceleration_z;
-    g_axis_config[AXIS_Z].steps_per_mm = &settings->steps_per_mm_z;
-    g_axis_config[AXIS_Z].step_count = &stepper_pos->z_steps;
-    
-    // ===== A AXIS (AXIS_A = 3) =====
-    g_axis_config[AXIS_A].step.Set = Wrapper_StepA_Set;
-    g_axis_config[AXIS_A].step.Clear = Wrapper_StepA_Clear;
-    g_axis_config[AXIS_A].step.Toggle = Wrapper_StepA_Toggle;
-    g_axis_config[AXIS_A].step.Get = Wrapper_StepA_Get;
-    
-    g_axis_config[AXIS_A].dir.Set = Wrapper_DirA_Set;
-    g_axis_config[AXIS_A].dir.Clear = Wrapper_DirA_Clear;
-    g_axis_config[AXIS_A].dir.Toggle = Wrapper_DirA_Toggle;
-    g_axis_config[AXIS_A].dir.Get = Wrapper_DirA_Get;
-    
-    g_axis_config[AXIS_A].enable.Set = Wrapper_EnA_Set;
-    g_axis_config[AXIS_A].enable.Clear = Wrapper_EnA_Clear;
-    g_axis_config[AXIS_A].enable.Toggle = Wrapper_EnA_Toggle;
-    g_axis_config[AXIS_A].enable.Get = Wrapper_EnA_Get;
-    
-    g_axis_config[AXIS_A].max_rate = &settings->max_rate_a;
-    g_axis_config[AXIS_A].acceleration = &settings->acceleration_a;
-    g_axis_config[AXIS_A].steps_per_mm = &settings->steps_per_mm_a;
-    g_axis_config[AXIS_A].step_count = &stepper_pos->a_steps;
+    // ✅ ARRAY-BASED: Assign settings pointers for all axes (loop for scalability)
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        g_axis_config[axis].max_rate = &settings->max_rate[axis];
+        g_axis_config[axis].acceleration = &settings->acceleration[axis];
+        g_axis_config[axis].steps_per_mm = &settings->steps_per_mm[axis];
+        g_axis_config[axis].step_count = &stepper_pos->steps[axis];
+    }
 }
 
 // Get axis configuration (safe accessor with bounds checking)
@@ -198,49 +185,34 @@ const AxisConfig* UTILS_GetAxisConfig(E_AXIS axis) {
 // Global limit configuration array (indexed by E_AXIS enum)
 LimitConfig g_limit_config[NUM_AXIS];
 
+// ✅ ARRAY-BASED LIMIT SWITCH FUNCTION POINTER TABLES
+static GPIO_GetFunc axis_limit_min_get[NUM_AXIS] = {
+    Wrapper_X_Min_Get, Wrapper_Y_Min_Get, Wrapper_Z_Min_Get, Wrapper_A_Min_Get
+};
+static GPIO_GetFunc axis_limit_max_get[NUM_AXIS] = {
+    Wrapper_X_Max_Get, Wrapper_Y_Max_Get, Wrapper_Z_Max_Get, Wrapper_A_Max_Get
+};
+
 // Initialize limit switch configuration - MUST be called during app initialization
 void UTILS_InitLimitConfig(void) {
     CNC_Settings* settings = SETTINGS_GetCurrent();
     
-    // ===== X AXIS (AXIS_X = 0) =====
-    g_limit_config[AXIS_X].limit.GetMin = Wrapper_X_Min_Get;
-    g_limit_config[AXIS_X].limit.GetMax = Wrapper_X_Max_Get;
-    g_limit_config[AXIS_X].homing_enable = &settings->homing_enable;
-    g_limit_config[AXIS_X].homing_dir_mask = &settings->homing_dir_mask;
-    g_limit_config[AXIS_X].homing_feed_rate = &settings->homing_feed_rate;
-    g_limit_config[AXIS_X].homing_seek_rate = &settings->homing_seek_rate;
-    g_limit_config[AXIS_X].homing_debounce = &settings->homing_debounce;
-    g_limit_config[AXIS_X].homing_pull_off = &settings->homing_pull_off;
+    // ✅ ARRAY-BASED: Loop through all axes and assign limit switch function pointers
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        g_limit_config[axis].limit.GetMin = axis_limit_min_get[axis];
+        g_limit_config[axis].limit.GetMax = axis_limit_max_get[axis];
+    }
     
-    // ===== Y AXIS (AXIS_Y = 1) =====
-    g_limit_config[AXIS_Y].limit.GetMin = Wrapper_Y_Min_Get;
-    g_limit_config[AXIS_Y].limit.GetMax = Wrapper_Y_Max_Get;
-    g_limit_config[AXIS_Y].homing_enable = &settings->homing_enable;
-    g_limit_config[AXIS_Y].homing_dir_mask = &settings->homing_dir_mask;
-    g_limit_config[AXIS_Y].homing_feed_rate = &settings->homing_feed_rate;
-    g_limit_config[AXIS_Y].homing_seek_rate = &settings->homing_seek_rate;
-    g_limit_config[AXIS_Y].homing_debounce = &settings->homing_debounce;
-    g_limit_config[AXIS_Y].homing_pull_off = &settings->homing_pull_off;
-    
-    // ===== Z AXIS (AXIS_Z = 2) =====
-    g_limit_config[AXIS_Z].limit.GetMin = Wrapper_Z_Min_Get;
-    g_limit_config[AXIS_Z].limit.GetMax = Wrapper_Z_Max_Get;
-    g_limit_config[AXIS_Z].homing_enable = &settings->homing_enable;
-    g_limit_config[AXIS_Z].homing_dir_mask = &settings->homing_dir_mask;
-    g_limit_config[AXIS_Z].homing_feed_rate = &settings->homing_feed_rate;
-    g_limit_config[AXIS_Z].homing_seek_rate = &settings->homing_seek_rate;
-    g_limit_config[AXIS_Z].homing_debounce = &settings->homing_debounce;
-    g_limit_config[AXIS_Z].homing_pull_off = &settings->homing_pull_off;
-    
-    // ===== A AXIS (AXIS_A = 3) =====
-    g_limit_config[AXIS_A].limit.GetMin = Wrapper_A_Min_Get;
-    g_limit_config[AXIS_A].limit.GetMax = Wrapper_A_Max_Get;
-    g_limit_config[AXIS_A].homing_enable = &settings->homing_enable;
-    g_limit_config[AXIS_A].homing_dir_mask = &settings->homing_dir_mask;
-    g_limit_config[AXIS_A].homing_feed_rate = &settings->homing_feed_rate;
-    g_limit_config[AXIS_A].homing_seek_rate = &settings->homing_seek_rate;
-    g_limit_config[AXIS_A].homing_debounce = &settings->homing_debounce;
-    g_limit_config[AXIS_A].homing_pull_off = &settings->homing_pull_off;
+    // ✅ ARRAY-BASED: Assign homing settings pointers for all axes (loop for scalability)
+    // All axes share the same homing settings (system-wide configuration)
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        g_limit_config[axis].homing_enable = &settings->homing_enable;
+        g_limit_config[axis].homing_dir_mask = &settings->homing_dir_mask;
+        g_limit_config[axis].homing_feed_rate = &settings->homing_feed_rate;
+        g_limit_config[axis].homing_seek_rate = &settings->homing_seek_rate;
+        g_limit_config[axis].homing_debounce = &settings->homing_debounce;
+        g_limit_config[axis].homing_pull_off = &settings->homing_pull_off;
+    }
 }
 
 // Get limit configuration (safe accessor with bounds checking)

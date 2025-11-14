@@ -4,13 +4,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// ============================================================================
-// Coordinate System Structures
-// ============================================================================
-
-typedef struct {
-    float x, y, z, a;
-} CoordinatePoint;
 
 // ============================================================================
 // Motion Queue Structures
@@ -62,6 +55,15 @@ typedef enum {
 } SegmentType;
 
 // ============================================================================
+// Coordinate System Structures
+// ============================================================================
+
+typedef struct {
+    float coordinate[NUM_AXIS];
+} CoordinatePoint;
+
+
+// ============================================================================
 // Motion Segment Structure
 // ============================================================================
 
@@ -72,9 +74,9 @@ typedef struct {
     // Dwell-specific parameters (only used when type == SEGMENT_TYPE_DWELL)
     uint32_t dwell_duration;     // Dwell duration in core timer ticks (100MHz)
     
-    // Bresenham parameters (only used for LINEAR/ARC segments)
-    int32_t delta_x, delta_y, delta_z, delta_a;
-    int32_t error_y, error_z, error_a;
+    // ✅ ARRAY-BASED: Bresenham parameters (only used for LINEAR/ARC segments)
+    int32_t delta[NUM_AXIS];     // Step deltas per axis [X, Y, Z, A]
+    int32_t error[NUM_AXIS];     // Bresenham error accumulators [X, Y, Z, A]
     
     // Dominant axis (pre-calculated during motion planning)
     E_AXIS dominant_axis;        // Axis with largest delta (drives step timing)
@@ -162,11 +164,8 @@ typedef struct {
     uint32_t motionQueueTail;
     uint32_t motionQueueCount;
     
-    // Current position tracking (work coordinates)
-    float currentX;
-    float currentY;
-    float currentZ;
-    float currentA;
+    // ✅ ARRAY-BASED: Current position tracking (work coordinates) [X, Y, Z, A]
+    float current[4];
     
     // Modal state (GRBL-style)
     float modalFeedrate;      // Last F value (mm/min)
@@ -185,10 +184,9 @@ typedef struct {
     uint32_t currentStepInterval;      // Current interval (changes with velocity profile)
     MotionSegment* currentSegment;     // Pointer to active segment being executed
     
-    // Bresenham state (for phase processing)
-    int32_t bresenham_error_y;
-    int32_t bresenham_error_z;
-    int32_t bresenham_error_a;
+    // ✅ ARRAY-BASED: Bresenham state (for phase processing) [X, Y, Z, A]
+    // Note: All axes can have errors since ANY axis can be dominant based on plane selection
+    int32_t bresenham_error[NUM_AXIS];
     
     // Rate limiting counters
     uint32_t uartPollCounter;          // Counter for UART polling (every ~10ms)

@@ -345,16 +345,21 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             
             StepperPosition* pos = STEPPER_GetPosition();
             WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-            float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
-            float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
-            float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
             
-            // Set offset = MachinePos - DesiredWorkPos
-            if (!isnan(desiredX)) wcs->offset.x = mpos_x - desiredX;
-            if (!isnan(desiredY)) wcs->offset.y = mpos_y - desiredY;
-            if (!isnan(desiredZ)) wcs->offset.z = mpos_z - desiredZ;
-            // A-axis not yet supported in WCS
-            (void)desiredA;
+            // Array-based machine position calculation with loop
+            float desired[NUM_AXIS] = {desiredX, desiredY, desiredZ, desiredA};
+            float mpos[NUM_AXIS];
+            
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
+            }
+            
+            // Set offset = MachinePos - DesiredWorkPos (only X, Y, Z supported)
+            for (E_AXIS axis = AXIS_X; axis < AXIS_Z + 1; axis++) {
+                if (!isnan(desired[axis])) {
+                    SET_COORDINATE_AXIS(&wcs->offset, axis, mpos[axis] - desired[axis]);
+                }
+            }
             
             return true;
         }
@@ -377,15 +382,22 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
                 if (p_val == 0 || p_val == 1) {
                     StepperPosition* pos = STEPPER_GetPosition();
                     WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-                    float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
-                    float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
-                    float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
-                    float mpos_a = 0.0f;
-                    if (!isnan(desiredX)) wcs->offset.x = mpos_x - desiredX;
-                    if (!isnan(desiredY)) wcs->offset.y = mpos_y - desiredY;
-                    if (!isnan(desiredZ)) wcs->offset.z = mpos_z - desiredZ;
-                    (void)mpos_a;
-                    (void)desiredA;
+                    
+                    // Array-based machine position calculation with loop
+                    float desired[NUM_AXIS] = {desiredX, desiredY, desiredZ, desiredA};
+                    float mpos[NUM_AXIS];
+                    
+                    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                        mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
+                    }
+                    
+                    // Set WCS offset (only X, Y, Z supported)
+                    for (E_AXIS axis = AXIS_X; axis < AXIS_Z + 1; axis++) {
+                        if (!isnan(desired[axis])) {
+                            SET_COORDINATE_AXIS(&wcs->offset, axis, mpos[axis] - desired[axis]);
+                        }
+                    }
+                    
                     return true;
                 } else {
                     return true;
@@ -776,13 +788,14 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 StepperPosition* pos = STEPPER_GetPosition();
                 WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
 
-                float mpos_x = (float)pos->x_steps / pos->steps_per_mm_x;
-                float mpos_y = (float)pos->y_steps / pos->steps_per_mm_y;
-                float mpos_z = (float)pos->z_steps / pos->steps_per_mm_z;
-
-                float wpos_x = mpos_x - wcs->offset.x;
-                float wpos_y = mpos_y - wcs->offset.y;
-                float wpos_z = mpos_z - wcs->offset.z;
+                // Array-based position calculation with loop for scalability
+                float mpos[NUM_AXIS];
+                float wpos[NUM_AXIS];
+                
+                for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                    mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
+                    wpos[axis] = mpos[axis] - GET_COORDINATE_AXIS(&wcs->offset, axis);
+                }
 
                 const char* state = "Idle";
                 if (grblAlarm) {
@@ -811,7 +824,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 
                 uint32_t response_len = (uint32_t)snprintf((char*)txBuffer, sizeof(txBuffer),
                     "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%u%s%s>\r\n",
-                    state, mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z,
+                    state, 
+                    mpos[AXIS_X], mpos[AXIS_Y], mpos[AXIS_Z], 
+                    wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
                     feedrate_mm_min, (unsigned)spindle_rpm,
                     grblCheckMode ? "|Cm:1" : "",
                     feedHoldActive ? "|FH:1" : "");
@@ -993,9 +1008,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 SETTINGS_RestoreDefaults(SETTINGS_GetCurrent());
             } else if (target == '#') {
                 WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-                wcs->offset.x = 0.0f;
-                wcs->offset.y = 0.0f;
-                wcs->offset.z = 0.0f;
+                for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                    SET_COORDINATE_AXIS(&wcs->offset, axis, 0.0f);
+                }
             } else {
                 UART3_Write((uint8_t*)"error:4\r\n", 10);
                 send_ok = false;

@@ -161,19 +161,19 @@ uint32_t UTILS_SafeStrlen(const char* str, uint32_t max_len);
 
 // ===== COORDINATE ARRAY UTILITIES (ELIMINATES AXIS SWITCH STATEMENTS) =====
 
-// Treat CoordinatePoint as float[4] array using guaranteed memory layout
-// CoordinatePoint { float x, y, z, a; } -> [0]=x, [1]=y, [2]=z, [3]=a
+// CoordinatePoint array utilities
+// CoordinatePoint { float coordinate[NUM_AXIS]; } -> [0]=X, [1]=Y, [2]=Z, [3]=A
 
 static inline void SET_COORDINATE_AXIS(CoordinatePoint* coord, E_AXIS axis, float value) {
-    ((float*)coord)[axis] = value;
+    coord->coordinate[axis] = value;
 }
 
 static inline float GET_COORDINATE_AXIS(const CoordinatePoint* coord, E_AXIS axis) {
-    return ((float*)coord)[axis];
+    return coord->coordinate[axis];
 }
 
 static inline void ADD_COORDINATE_AXIS(CoordinatePoint* coord, E_AXIS axis, float delta) {
-    ((float*)coord)[axis] += delta;
+    coord->coordinate[axis] += delta;
 }
 
 // Usage examples (replaces all switch statements for coordinate manipulation):

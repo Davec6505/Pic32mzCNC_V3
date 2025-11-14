@@ -358,8 +358,10 @@ void MOTION_Arc(APP_DATA* appData) {
         appData->arcTheta += appData->arcThetaIncrement;
         
         // Calculate intermediate point using NEXT theta
-        next.x = appData->arcCenter.x + appData->arcRadius * cosf(appData->arcTheta);
-        next.y = appData->arcCenter.y + appData->arcRadius * sinf(appData->arcTheta);
+        SET_COORDINATE_AXIS(&next, AXIS_X, 
+            GET_COORDINATE_AXIS(&appData->arcCenter, AXIS_X) + appData->arcRadius * cosf(appData->arcTheta));
+        SET_COORDINATE_AXIS(&next, AXIS_Y, 
+            GET_COORDINATE_AXIS(&appData->arcCenter, AXIS_Y) + appData->arcRadius * sinf(appData->arcTheta));
         
         // Linear interpolation for Z and A axes (helical motion)
         // Calculate progress based on segment count (more reliable than angles)
@@ -369,8 +371,12 @@ void MOTION_Arc(APP_DATA* appData) {
         }
         
         // Interpolate Z and A from start to end
-        next.z = appData->arcStartPoint.z + (appData->arcEndPoint.z - appData->arcStartPoint.z) * progress;
-        next.a = appData->arcStartPoint.a + (appData->arcEndPoint.a - appData->arcStartPoint.a) * progress;
+        SET_COORDINATE_AXIS(&next, AXIS_Z,
+            GET_COORDINATE_AXIS(&appData->arcStartPoint, AXIS_Z) + 
+            (GET_COORDINATE_AXIS(&appData->arcEndPoint, AXIS_Z) - GET_COORDINATE_AXIS(&appData->arcStartPoint, AXIS_Z)) * progress);
+        SET_COORDINATE_AXIS(&next, AXIS_A,
+            GET_COORDINATE_AXIS(&appData->arcStartPoint, AXIS_A) + 
+            (GET_COORDINATE_AXIS(&appData->arcEndPoint, AXIS_A) - GET_COORDINATE_AXIS(&appData->arcStartPoint, AXIS_A)) * progress);
     }
     
     // Generate motion segment for this arc increment
@@ -392,12 +398,12 @@ void MOTION_Arc(APP_DATA* appData) {
     appData->arcCurrent = next;
     
     // ✅ CRITICAL: Update work coordinates INCREMENTALLY for each segment
-    // This ensures currentX/Y reflect actual position even during long arcs
+    // This ensures current[] reflects actual position even during long arcs
     // Required for multi-segment arcs where next command may arrive before completion
-    appData->currentX = next.x;
-    appData->currentY = next.y;
-    appData->currentZ = next.z;
-    appData->currentA = next.a;
+    // ✅ ARRAY-BASED: Copy all axes using loop
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        appData->current[axis] = GET_COORDINATE_AXIS(&next, axis);
+    }
     
     // Increment segment counter
     appData->arcSegmentCurrent++;
@@ -434,22 +440,31 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 return false;  // Queue full - event already consumed, segment lost
             }
             
-            // Build start and end coordinates
-            CoordinatePoint start = {appData->currentX, appData->currentY, appData->currentZ, appData->currentA};
+            // ✅ ARRAY-BASED: Build start coordinate from current position
+            CoordinatePoint start = {{
+                appData->current[AXIS_X], appData->current[AXIS_Y],
+                appData->current[AXIS_Z], appData->current[AXIS_A]
+            }};
             CoordinatePoint end;
             
-            if(appData->absoluteMode) {
-                // G90 absolute mode - use coordinates directly (or current if NAN)
-                end.x = isnan(event->data.linearMove.x) ? appData->currentX : event->data.linearMove.x;
-                end.y = isnan(event->data.linearMove.y) ? appData->currentY : event->data.linearMove.y;
-                end.z = isnan(event->data.linearMove.z) ? appData->currentZ : event->data.linearMove.z;
-                end.a = isnan(event->data.linearMove.a) ? appData->currentA : event->data.linearMove.a;
-            } else {
-                // G91 relative mode - add to current position (or keep current if NAN)
-                end.x = isnan(event->data.linearMove.x) ? appData->currentX : (appData->currentX + event->data.linearMove.x);
-                end.y = isnan(event->data.linearMove.y) ? appData->currentY : (appData->currentY + event->data.linearMove.y);
-                end.z = isnan(event->data.linearMove.z) ? appData->currentZ : (appData->currentZ + event->data.linearMove.z);
-                end.a = isnan(event->data.linearMove.a) ? appData->currentA : (appData->currentA + event->data.linearMove.a);
+            // ✅ ARRAY-BASED: Build end coordinate with absolute/relative mode handling
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                float event_value;
+                // Extract event value based on axis (still from old event structure for now)
+                if (axis == AXIS_X) event_value = event->data.linearMove.x;
+                else if (axis == AXIS_Y) event_value = event->data.linearMove.y;
+                else if (axis == AXIS_Z) event_value = event->data.linearMove.z;
+                else event_value = event->data.linearMove.a;
+                
+                if (appData->absoluteMode) {
+                    // G90 absolute mode - use coordinates directly (or current if NAN)
+                    SET_COORDINATE_AXIS(&end, axis, 
+                        isnan(event_value) ? appData->current[axis] : event_value);
+                } else {
+                    // G91 relative mode - add to current position (or keep current if NAN)
+                    SET_COORDINATE_AXIS(&end, axis,
+                        isnan(event_value) ? appData->current[axis] : (appData->current[axis] + event_value));
+                }
             }
             
             // ✅ SOFT LIMIT CHECK - TEMPORARILY DISABLED FOR DEBUG
@@ -457,10 +472,15 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             CNC_Settings* settings = SETTINGS_GetCurrent();
             bool limit_violation = false;
             
-            if(!isnan(settings->max_travel_x) && !isnan(settings->max_travel_y) && !isnan(settings->max_travel_z)) {
-                if(fabsf(end.x) > settings->max_travel_x) limit_violation = true;
-                if(fabsf(end.y) > settings->max_travel_y) limit_violation = true;
-                if(fabsf(end.z) > settings->max_travel_z) limit_violation = true;
+            // ✅ ARRAY-BASED: Check soft limits (loop for scalability - only X/Y/Z, not A)
+            float end_coords[3] = {end.x, end.y, end.z};  // Map to array for loop
+            for (E_AXIS axis = AXIS_X; axis <= AXIS_Z; axis++) {
+                if (!isnan(settings->max_travel[axis])) {
+                    if (fabsf(end_coords[axis]) > settings->max_travel[axis]) {
+                        limit_violation = true;
+                        break;
+                    }
+                }
             }
             
             if(limit_violation) {
@@ -507,28 +527,28 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 
                 // Calculate normalized direction vectors
                 if (prev_segment->dominant_delta > 0) {
-                    CoordinatePoint prev_dir = {
-                        .x = (float)prev_segment->delta_x / (float)prev_segment->dominant_delta,
-                        .y = (float)prev_segment->delta_y / (float)prev_segment->dominant_delta,
-                        .z = (float)prev_segment->delta_z / (float)prev_segment->dominant_delta,
-                        .a = (float)prev_segment->delta_a / (float)prev_segment->dominant_delta
-                    };
+                    // ✅ ARRAY-BASED: Previous direction vector from segment deltas
+                    CoordinatePoint prev_dir;
+                    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                        SET_COORDINATE_AXIS(&prev_dir, axis, 
+                            (float)prev_segment->delta[axis] / (float)prev_segment->dominant_delta);
+                    }
                     
                     // We need current segment's direction, so do a preview calculation
-                    float dx_mm = end.x - start.x;
-                    float dy_mm = end.y - start.y; 
-                    float dz_mm = end.z - start.z;
-                    float da_mm = end.a - start.a;
-                    
-                    float distance = sqrtf(dx_mm*dx_mm + dy_mm*dy_mm + dz_mm*dz_mm + da_mm*da_mm);
+                    float delta_mm[NUM_AXIS];
+                    float distance = 0.0f;
+                    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                        delta_mm[axis] = GET_COORDINATE_AXIS(&end, axis) - GET_COORDINATE_AXIS(&start, axis);
+                        distance += delta_mm[axis] * delta_mm[axis];
+                    }
+                    distance = sqrtf(distance);
                     
                     if (distance > 0.001f) {  // Avoid division by zero
-                        CoordinatePoint curr_dir = {
-                            .x = dx_mm / distance,
-                            .y = dy_mm / distance,
-                            .z = dz_mm / distance,
-                            .a = da_mm / distance
-                        };
+                        // ✅ ARRAY-BASED: Current direction vector
+                        CoordinatePoint curr_dir;
+                        for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                            SET_COORDINATE_AXIS(&curr_dir, axis, delta_mm[axis] / distance);
+                        }
                         
                         // Get settings for junction calculation
                         CNC_Settings* settings = SETTINGS_GetCurrent();
@@ -563,11 +583,10 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // Guard: skip zero-length segments (no steps)
             if (segment->steps_remaining == 0) {
                 // DEBUG_PRINT_MOTION("[MOTION] Zero-length segment - skipping\r\n");
-                // Update current position and treat as no-op
-                appData->currentX = end.x;
-                appData->currentY = end.y;
-                appData->currentZ = end.z;
-                appData->currentA = end.a;
+                // ✅ ARRAY-BASED: Update current position and treat as no-op
+                for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                    appData->current[axis] = GET_COORDINATE_AXIS(&end, axis);
+                }
                 return true;
             }
 
@@ -577,11 +596,10 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
             appData->motionQueueCount++;
             
-            // Update current position
-            appData->currentX = end.x;
-            appData->currentY = end.y;
-            appData->currentZ = end.z;
-            appData->currentA = end.a;
+            // ✅ ARRAY-BASED: Update current position using coordinate utilities
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                appData->current[axis] = GET_COORDINATE_AXIS(&end, axis);
+            }
             
             return true;
         }
@@ -589,33 +607,46 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
         case GCODE_EVENT_ARC_MOVE:
         {
             // ✅ ARC MOTION - Initialize arc generation (KEEP ALL EXISTING ARC CODE!)
-            CoordinatePoint start = {appData->currentX, appData->currentY, appData->currentZ, appData->currentA};
+            CoordinatePoint start = {{appData->current[AXIS_X], appData->current[AXIS_Y], appData->current[AXIS_Z], appData->current[AXIS_A]}};
             CoordinatePoint end;
             
-            if(appData->absoluteMode) {
-                end.x = event->data.arcMove.x;
-                end.y = event->data.arcMove.y;
-                end.z = event->data.arcMove.z;
-                end.a = event->data.arcMove.a;
-            } else {
-                end.x = appData->currentX + event->data.arcMove.x;
-                end.y = appData->currentY + event->data.arcMove.y;
-                end.z = appData->currentZ + event->data.arcMove.z;
-                end.a = appData->currentA + event->data.arcMove.a;
+            // ✅ ARRAY-BASED: Build end coordinate (still using old event structure temporarily)
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                float event_value;
+                if (axis == AXIS_X) event_value = event->data.arcMove.x;
+                else if (axis == AXIS_Y) event_value = event->data.arcMove.y;
+                else if (axis == AXIS_Z) event_value = event->data.arcMove.z;
+                else event_value = event->data.arcMove.a;
+                
+                if (appData->absoluteMode) {
+                    SET_COORDINATE_AXIS(&end, axis, event_value);
+                } else {
+                    SET_COORDINATE_AXIS(&end, axis, appData->current[axis] + event_value);
+                }
             }
             
+            // Calculate arc center using loop for scalability
             CoordinatePoint center;
-            center.x = start.x + event->data.arcMove.centerX;
-            center.y = start.y + event->data.arcMove.centerY;
-            center.z = start.z;
-            center.a = 0.0f;
+            float center_offsets[NUM_AXIS] = {
+                event->data.arcMove.centerX,  // X offset
+                event->data.arcMove.centerY,  // Y offset
+                0.0f,                          // Z (no offset)
+                0.0f                           // A (no offset)
+            };
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                SET_COORDINATE_AXIS(&center, axis, 
+                    GET_COORDINATE_AXIS(&start, axis) + center_offsets[axis]);
+            }
             
             // GRBL v1.1 radius validation with automatic compensation
             // Calculate radius from both start and end points
             float r_start = sqrtf(event->data.arcMove.centerX * event->data.arcMove.centerX + 
                                  event->data.arcMove.centerY * event->data.arcMove.centerY);
-            float r_end = sqrtf((end.x - center.x) * (end.x - center.x) + 
-                               (end.y - center.y) * (end.y - center.y));
+            float r_end = sqrtf(
+                (GET_COORDINATE_AXIS(&end, AXIS_X) - GET_COORDINATE_AXIS(&center, AXIS_X)) * 
+                (GET_COORDINATE_AXIS(&end, AXIS_X) - GET_COORDINATE_AXIS(&center, AXIS_X)) + 
+                (GET_COORDINATE_AXIS(&end, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y)) * 
+                (GET_COORDINATE_AXIS(&end, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y)));
             
             float radius_error = fabsf(r_start - r_end);
             
@@ -640,11 +671,17 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                               r_start, r_end, radius, radius_error);
             
             // Calculate angles
-            float start_angle = atan2f(start.y - center.y, start.x - center.x);
-            float end_angle = atan2f(end.y - center.y, end.x - center.x);
+            float start_angle = atan2f(
+                GET_COORDINATE_AXIS(&start, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y), 
+                GET_COORDINATE_AXIS(&start, AXIS_X) - GET_COORDINATE_AXIS(&center, AXIS_X));
+            float end_angle = atan2f(
+                GET_COORDINATE_AXIS(&end, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y), 
+                GET_COORDINATE_AXIS(&end, AXIS_X) - GET_COORDINATE_AXIS(&center, AXIS_X));
             
             DEBUG_PRINT_MOTION("[ARC INIT] Start=(%.2f,%.2f) End=(%.2f,%.2f) Center=(%.2f,%.2f)\r\n",
-                              start.x, start.y, end.x, end.y, center.x, center.y);
+                              GET_COORDINATE_AXIS(&start, AXIS_X), GET_COORDINATE_AXIS(&start, AXIS_Y), 
+                              GET_COORDINATE_AXIS(&end, AXIS_X), GET_COORDINATE_AXIS(&end, AXIS_Y), 
+                              GET_COORDINATE_AXIS(&center, AXIS_X), GET_COORDINATE_AXIS(&center, AXIS_Y));
             DEBUG_PRINT_MOTION("[ARC INIT] Direction=%s Radius=%.4f (compensated)\r\n",
                               event->data.arcMove.clockwise ? "CW(G2)" : "CCW(G3)", radius);
             DEBUG_PRINT_MOTION("[ARC INIT] Start_angle=%.3f End_angle=%.3f\r\n",
@@ -668,8 +705,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             appData->arcTheta = start_angle;
             appData->arcThetaStart = start_angle;  // Store initial angle for progress calculation
             appData->arcThetaEnd = end_angle;
-            appData->arcCenter.x = center.x;
-            appData->arcCenter.y = center.y;
+            appData->arcCenter = center;  // Direct copy - both are CoordinatePoint
             appData->arcCurrent = start;
             appData->arcStartPoint = start;  // Store initial position for Z/A interpolation
             appData->arcEndPoint = end;
@@ -743,24 +779,24 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             CNC_Settings* settings = SETTINGS_GetCurrent();
             WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
             
-            float mpos_x = (float)pos->x_steps / settings->steps_per_mm_x;
-            float mpos_y = (float)pos->y_steps / settings->steps_per_mm_y;
-            float mpos_z = (float)pos->z_steps / settings->steps_per_mm_z;
-            
-            // Set work offset: work_offset = machine_pos - desired_work_pos
-            if (!isnan(event->data.workOffset.x)) {
-                wcs->offset.x = mpos_x - event->data.workOffset.x;
-                appData->currentX = event->data.workOffset.x;
+            // ✅ ARRAY-BASED: Calculate machine position (loop for scalability - only X/Y/Z)
+            float mpos[3];  // X, Y, Z machine positions
+            for (E_AXIS axis = AXIS_X; axis <= AXIS_Z; axis++) {
+                mpos[axis] = (float)pos->steps[axis] / settings->steps_per_mm[axis];
             }
             
-            if (!isnan(event->data.workOffset.y)) {
-                wcs->offset.y = mpos_y - event->data.workOffset.y;
-                appData->currentY = event->data.workOffset.y;
-            }
+            // ✅ ARRAY-BASED: Set work offset for all axes (only X/Y/Z, not A)
+            float offset_values[3] = {
+                event->data.workOffset.x,
+                event->data.workOffset.y,
+                event->data.workOffset.z
+            };
             
-            if (!isnan(event->data.workOffset.z)) {
-                wcs->offset.z = mpos_z - event->data.workOffset.z;
-                appData->currentZ = event->data.workOffset.z;
+            for (E_AXIS axis = AXIS_X; axis <= AXIS_Z; axis++) {
+                if (!isnan(offset_values[axis])) {
+                    SET_COORDINATE_AXIS(&wcs->offset, axis, mpos[axis] - offset_values[axis]);
+                    appData->current[axis] = offset_values[axis];
+                }
             }
             
             return true;

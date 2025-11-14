@@ -56,35 +56,21 @@ static APP_DATA* app_data_ref = NULL;
 
 // Position tracking (incremented/decremented by ISR based on direction)
 static StepperPosition stepper_pos = {
-    .x_steps = 0, .y_steps = 0, .z_steps = 0, .a_steps = 0,
-    .steps_per_mm_x = 200.0f,
-    .steps_per_mm_y = 200.0f,
-    .steps_per_mm_z = 200.0f,
-    .steps_per_deg_a = 1.0f
+    .steps = {0, 0, 0, 0},                    // All axes start at zero
+    .steps_per_mm = {200.0f, 200.0f, 200.0f, 200.0f}  // Default 200 steps/mm all axes
 };
 
 // Direction bits (set by motion loader before segment starts)
 // Bit 0=X, 1=Y, 2=Z, 3=A (1=forward/positive, 0=reverse/negative)
 static volatile uint8_t direction_bits = 0x0F;  // Default all forward
 
-// Bresenham error accumulators (persist across ISR calls)
-static volatile int32_t error_x = 0;  // Added for array indexing
-static volatile int32_t error_y = 0;
-static volatile int32_t error_z = 0;
-static volatile int32_t error_a = 0;
+// ✅ ARRAY-BASED: Bresenham error accumulators (persist across ISR calls)
+static volatile int32_t error[NUM_AXIS] = {0, 0, 0, 0};
 static volatile int32_t dominant_delta = 0;
 static volatile E_AXIS dominant_axis = AXIS_X;  // Pre-calculated dominant axis
 
-// Segment deltas (loaded when new segment starts)
-static volatile int32_t delta_x = 0;
-static volatile int32_t delta_y = 0;
-static volatile int32_t delta_z = 0;
-static volatile int32_t delta_a = 0;
-
-// ✅ Pre-built arrays for ISR iteration (ZERO stack overhead - static storage)
-// These replace local array creation on every ISR call (was 32 bytes/call)
-static volatile int32_t* const error_ptrs[NUM_AXIS] = {&error_x, &error_y, &error_z, &error_a};
-static volatile int32_t* const delta_ptrs[NUM_AXIS] = {&delta_x, &delta_y, &delta_z, &delta_a};
+// ✅ ARRAY-BASED: Segment deltas (loaded when new segment starts)
+static volatile int32_t delta[NUM_AXIS] = {0, 0, 0, 0};
 
 // Settings cache for ISR performance
 static uint8_t step_pulse_invert_mask = 0;
@@ -110,11 +96,10 @@ void STEPPER_Initialize(APP_DATA* appData) {
     direction_invert_mask = settings->step_direction_invert;
     enable_invert = settings->step_enable_invert;
     
-    // Update steps_per_mm from settings
-    stepper_pos.steps_per_mm_x = settings->steps_per_mm_x;
-    stepper_pos.steps_per_mm_y = settings->steps_per_mm_y;
-    stepper_pos.steps_per_mm_z = settings->steps_per_mm_z;
-    stepper_pos.steps_per_deg_a = settings->steps_per_mm_a;
+    // ✅ ARRAY-BASED: Update steps_per_mm from settings (loop for scalability)
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        stepper_pos.steps_per_mm[axis] = settings->steps_per_mm[axis];
+    }
     
     // Register TMR5 callback for step pulse width (clears GPIO after 3µs)
     TMR5_CallbackRegister(TMR5_PulseWidthCallback, (uintptr_t)NULL);
@@ -193,33 +178,29 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
         DEBUG_PRINT_STEPPER("[STEPPER_Load] OC1 already enabled\r\n");
     }
 
-    // Load deltas for Bresenham
-    delta_x = segment->delta_x;
-    delta_y = segment->delta_y;
-    delta_z = segment->delta_z;
-    delta_a = segment->delta_a;
+    // ✅ ARRAY-BASED: Load deltas for Bresenham (single loop!)
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        delta[axis] = segment->delta[axis];
+    }
     
     // Use pre-calculated dominant axis and delta from motion planning
     // (Calculated once in KINEMATICS_LinearMove, not recalculated here)
     dominant_axis = segment->dominant_axis;
     dominant_delta = segment->dominant_delta;
     
-    // Initialize Bresenham errors
-    error_y = dominant_delta / 2;
-    error_z = dominant_delta / 2;
-    error_a = dominant_delta / 2;
-    
-    // Set directions
-    direction_bits = 0;
-    if (delta_x >= 0) direction_bits |= (1 << AXIS_X);
-    if (delta_y >= 0) direction_bits |= (1 << AXIS_Y);
-    if (delta_z >= 0) direction_bits |= (1 << AXIS_Z);
-    if (delta_a >= 0) direction_bits |= (1 << AXIS_A);
-    
-    // Update GPIO direction pins using array-based approach
-    int32_t deltas[NUM_AXIS] = {delta_x, delta_y, delta_z, delta_a};
+    // ✅ ARRAY-BASED: Initialize Bresenham errors (single loop!)
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        MOTION_UTILS_SetDirection(axis, (deltas[axis] >= 0), direction_invert_mask);
+        error[axis] = dominant_delta / 2;
+    }
+    
+    // ✅ ARRAY-BASED: Set directions (single loop!)
+    direction_bits = 0;
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        if (delta[axis] >= 0) {
+            direction_bits |= (1 << axis);
+        }
+        // Update GPIO direction pin
+        MOTION_UTILS_SetDirection(axis, (delta[axis] >= 0), direction_invert_mask);
     }
     
     // Set initial step rate (PR4 controls OC1 period in 16-bit mode)
@@ -407,15 +388,15 @@ void OCP1_ISR(uintptr_t context) {
     }
     
     // ===== BRESENHAM FOR SUBORDINATE AXES =====
-    // Use pre-built static arrays - ZERO stack overhead (no local array creation)
+    // ✅ ARRAY-BASED: Direct array access - ZERO pointer overhead!
     
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         // Skip dominant axis and axes with zero delta
-        if (axis == dominant_axis || *delta_ptrs[axis] == 0) continue;
+        if (axis == dominant_axis || delta[axis] == 0) continue;
         
-        // Bresenham error accumulation
-        *error_ptrs[axis] += abs(*delta_ptrs[axis]);
-        if (*error_ptrs[axis] >= dominant_delta) {
+        // Bresenham error accumulation using direct array access
+        error[axis] += abs(delta[axis]);
+        if (error[axis] >= dominant_delta) {
             // Atomic GPIO step pulse - single instruction!
             AXIS_StepSet(axis);
             
@@ -426,7 +407,7 @@ void OCP1_ISR(uintptr_t context) {
                 AXIS_DecrementSteps(axis);
             }
             
-            *error_ptrs[axis] -= dominant_delta;
+            error[axis] -= dominant_delta;
         }
     }
     
@@ -482,21 +463,21 @@ StepperPosition* STEPPER_GetPosition(void)
 {
     static StepperPosition snap;
 
-    // Defaults
-    snap.x_steps = snap.y_steps = snap.z_steps = snap.a_steps = 0;
-    snap.steps_per_mm_x = snap.steps_per_mm_y = snap.steps_per_mm_z = 1.0f;
-    snap.steps_per_deg_a = 1.0f;
+    // ✅ ARRAY-BASED: Zero all arrays (single loop!)
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        snap.steps[axis] = 0;
+        snap.steps_per_mm[axis] = 1.0f;
+    }
 
-    // Live step counters (from axis config pointers)
-    if (g_axis_config[AXIS_X].step_count) snap.x_steps = *g_axis_config[AXIS_X].step_count;
-    if (g_axis_config[AXIS_Y].step_count) snap.y_steps = *g_axis_config[AXIS_Y].step_count;
-    if (g_axis_config[AXIS_Z].step_count) snap.z_steps = *g_axis_config[AXIS_Z].step_count;
-    if (g_axis_config[AXIS_A].step_count) snap.a_steps = *g_axis_config[AXIS_A].step_count;
-
-    // Steps/mm (used by status/MPos→mm conversion)
-    if (g_axis_config[AXIS_X].steps_per_mm) snap.steps_per_mm_x = *g_axis_config[AXIS_X].steps_per_mm;
-    if (g_axis_config[AXIS_Y].steps_per_mm) snap.steps_per_mm_y = *g_axis_config[AXIS_Y].steps_per_mm;
-    if (g_axis_config[AXIS_Z].steps_per_mm) snap.steps_per_mm_z = *g_axis_config[AXIS_Z].steps_per_mm;
+    // ✅ ARRAY-BASED: Copy live step counters (single loop!)
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        if (g_axis_config[axis].step_count) {
+            snap.steps[axis] = *g_axis_config[axis].step_count;
+        }
+        if (g_axis_config[axis].steps_per_mm) {
+            snap.steps_per_mm[axis] = *g_axis_config[axis].steps_per_mm;
+        }
+    }
 
     return &snap;
 }

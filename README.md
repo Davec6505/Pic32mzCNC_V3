@@ -1,8 +1,8 @@
 # Pic32mzCNC_V3 - CNC Motion Control System
 
-## 🚀 Project Status: **Production Ready** ✅
+## 🚀 Project Status: **Under test** ✅
 
-**Pic32mzCNC_V3** is a production-ready CNC motion control system for PIC32MZ microcontrollers featuring **hardware-validated motion restart**, **optimal timer configuration**, and **robust GRBL v1.1 protocol** for industrial stepper motor control.
+**Pic32mzCNC_V3** is a CNC motion control system for PIC32MZEFH microcontrollers featuring, and **robust GRBL v1.1 protocol** for stepper motor control.
 
 ### ✅ **Latest Production Release** (November 13, 2025) 🚀
 **All features merged to master and pushed to GitHub!**
@@ -86,13 +86,6 @@ The system uses a **single OC1 module in continuous pulse mode** for hardware-dr
 - **ISR only runs when step needed** - Bresenham + GPIO pulses
 
 **Architecture Pattern:**
-```c
-// OC1 in continuous pulse mode:
-// - OCxR: Rising edge (near end of period)
-// - OCxRS: Falling edge (triggers ISR via hardware compare)
-// - Hardware compare generates ISR asynchronously
-// - TMR4 rolls over at PR4, OC1 continues automatically
-// - NO continuous software timer checking!
 
 void OCP1_ISR(void) {
     // Hardware called us - time for next step

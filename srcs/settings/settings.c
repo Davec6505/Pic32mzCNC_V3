@@ -41,28 +41,17 @@ static const CNC_Settings default_settings = {
     .step_enable_invert = 0,       // false as uint8
     .limit_pins_invert = 0,        // false as uint8
     
-    // Steps per mm (typical for 1/8 microstepping, 200 steps/rev, 5mm pitch)
-    .steps_per_mm_x = 156.0f,       // 200 * 8 / 5 / 8 = 40
-    .steps_per_mm_y = 156.0f,
-    .steps_per_mm_z = 156.0f,
-    .steps_per_mm_a = 156.0f,
+    // Steps per mm (typical for 1/8 microstepping, 200 steps/rev, 5mm pitch) - Array-based
+    .steps_per_mm = {156.0f, 156.0f, 156.0f, 156.0f},  // [X, Y, Z, A]
     
-    // Max rates (mm/min)
-    .max_rate_x = 5000.0f,
-    .max_rate_y = 5000.0f,
-    .max_rate_z = 2000.0f,
-    .max_rate_a = 5000.0f,
+    // Max rates (mm/min) - Array-based
+    .max_rate = {5000.0f, 5000.0f, 2000.0f, 5000.0f},  // [X, Y, Z, A]
     
-    // Acceleration (mm/sec^2)
-    .acceleration_x = 500.0f,
-    .acceleration_y = 500.0f,
-    .acceleration_z = 200.0f,
-    .acceleration_a = 500.0f,
+    // Acceleration (mm/sec^2) - Array-based
+    .acceleration = {500.0f, 500.0f, 200.0f, 500.0f},  // [X, Y, Z, A]
     
-    // Max travel (mm)
-    .max_travel_x = 300.0f,
-    .max_travel_y = 300.0f,
-    .max_travel_z = 100.0f,
+    // Max travel (mm) - Array-based
+    .max_travel = {300.0f, 300.0f, 100.0f, 0.0f},      // [X, Y, Z, A] (A=0 for rotary)
     
     // Spindle
     .spindle_max_rpm = 24000.0f,
@@ -80,16 +69,16 @@ static const CNC_Settings default_settings = {
     // Junction deviation for smooth cornering  
     .junction_deviation = 0.01f,   // GRBL default: 0.01mm
     
-    // Work coordinate systems (G54-G59) - all initialized to zero
-    .wcs_g54_x = 0.0f, .wcs_g54_y = 0.0f, .wcs_g54_z = 0.0f,
-    .wcs_g55_x = 0.0f, .wcs_g55_y = 0.0f, .wcs_g55_z = 0.0f,
-    .wcs_g56_x = 0.0f, .wcs_g56_y = 0.0f, .wcs_g56_z = 0.0f,
-    .wcs_g57_x = 0.0f, .wcs_g57_y = 0.0f, .wcs_g57_z = 0.0f,
-    .wcs_g58_x = 0.0f, .wcs_g58_y = 0.0f, .wcs_g58_z = 0.0f,
-    .wcs_g59_x = 0.0f, .wcs_g59_y = 0.0f, .wcs_g59_z = 0.0f,
+    // Work coordinate systems (G54-G59) - Array-based, all initialized to zero
+    .wcs_g54 = {0.0f, 0.0f, 0.0f},  // [X, Y, Z]
+    .wcs_g55 = {0.0f, 0.0f, 0.0f},
+    .wcs_g56 = {0.0f, 0.0f, 0.0f},
+    .wcs_g57 = {0.0f, 0.0f, 0.0f},
+    .wcs_g58 = {0.0f, 0.0f, 0.0f},
+    .wcs_g59 = {0.0f, 0.0f, 0.0f},
     
-    // G92 coordinate offset - initialized to zero
-    .g92_offset_x = 0.0f, .g92_offset_y = 0.0f, .g92_offset_z = 0.0f,
+    // G92 coordinate offset - Array-based, initialized to zero
+    .g92_offset = {0.0f, 0.0f, 0.0f},  // [X, Y, Z]
     
     // Tool length offset - initialized to zero
     .tool_length_offset = 0.0f,
@@ -280,28 +269,28 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 12: settings->mm_per_arc_segment = value; break;
         case 13: settings->arc_tolerance = value; break;
         
-        // Steps per mm
-        case 100: settings->steps_per_mm_x = value; break;
-        case 101: settings->steps_per_mm_y = value; break;
-        case 102: settings->steps_per_mm_z = value; break;
-        case 103: settings->steps_per_mm_a = value; break;
+        // Steps per mm ($100-$103) - Array-based
+        case 100: settings->steps_per_mm[AXIS_X] = value; break;
+        case 101: settings->steps_per_mm[AXIS_Y] = value; break;
+        case 102: settings->steps_per_mm[AXIS_Z] = value; break;
+        case 103: settings->steps_per_mm[AXIS_A] = value; break;
         
-        // Max rates
-        case 110: settings->max_rate_x = value; break;
-        case 111: settings->max_rate_y = value; break;
-        case 112: settings->max_rate_z = value; break;
-        case 113: settings->max_rate_a = value; break;
+        // Max rates ($110-$113) - Array-based
+        case 110: settings->max_rate[AXIS_X] = value; break;
+        case 111: settings->max_rate[AXIS_Y] = value; break;
+        case 112: settings->max_rate[AXIS_Z] = value; break;
+        case 113: settings->max_rate[AXIS_A] = value; break;
         
-        // Acceleration
-        case 120: settings->acceleration_x = value; break;
-        case 121: settings->acceleration_y = value; break;
-        case 122: settings->acceleration_z = value; break;
-        case 123: settings->acceleration_a = value; break;
+        // Acceleration ($120-$123) - Array-based
+        case 120: settings->acceleration[AXIS_X] = value; break;
+        case 121: settings->acceleration[AXIS_Y] = value; break;
+        case 122: settings->acceleration[AXIS_Z] = value; break;
+        case 123: settings->acceleration[AXIS_A] = value; break;
         
-        // Max travel
-        case 130: settings->max_travel_x = value; break;
-        case 131: settings->max_travel_y = value; break;
-        case 132: settings->max_travel_z = value; break;
+        // Max travel ($130-$132) - Array-based
+        case 130: settings->max_travel[AXIS_X] = value; break;
+        case 131: settings->max_travel[AXIS_Y] = value; break;
+        case 132: settings->max_travel[AXIS_Z] = value; break;
         
         // Spindle
         case 30: settings->spindle_max_rpm = value; break;
@@ -338,25 +327,28 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         case 11: return settings->junction_deviation;
         case 12: return settings->mm_per_arc_segment;
         case 13: return settings->arc_tolerance;
+        // Steps per mm ($100-$103) - Array-based
+        case 100: return settings->steps_per_mm[AXIS_X];
+        case 101: return settings->steps_per_mm[AXIS_Y];
+        case 102: return settings->steps_per_mm[AXIS_Z];
+        case 103: return settings->steps_per_mm[AXIS_A];
         
-        case 100: return settings->steps_per_mm_x;
-        case 101: return settings->steps_per_mm_y;
-        case 102: return settings->steps_per_mm_z;
-        case 103: return settings->steps_per_mm_a;
+        // Max rates ($110-$113) - Array-based
+        case 110: return settings->max_rate[AXIS_X];
+        case 111: return settings->max_rate[AXIS_Y];
+        case 112: return settings->max_rate[AXIS_Z];
+        case 113: return settings->max_rate[AXIS_A];
         
-        case 110: return settings->max_rate_x;
-        case 111: return settings->max_rate_y;
-        case 112: return settings->max_rate_z;
-        case 113: return settings->max_rate_a;
+        // Acceleration ($120-$123) - Array-based
+        case 120: return settings->acceleration[AXIS_X];
+        case 121: return settings->acceleration[AXIS_Y];
+        case 122: return settings->acceleration[AXIS_Z];
+        case 123: return settings->acceleration[AXIS_A];
         
-        case 120: return settings->acceleration_x;
-        case 121: return settings->acceleration_y;
-        case 122: return settings->acceleration_z;
-        case 123: return settings->acceleration_a;
-        
-        case 130: return settings->max_travel_x;
-        case 131: return settings->max_travel_y;
-        case 132: return settings->max_travel_z;
+        // Max travel ($130-$132) - Array-based
+        case 130: return settings->max_travel[AXIS_X];
+        case 131: return settings->max_travel[AXIS_Y];
+        case 132: return settings->max_travel[AXIS_Z];
         
         case 30: return settings->spindle_max_rpm;
         case 31: return settings->spindle_min_rpm;
@@ -404,24 +396,28 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$30=%.3f\r\n", settings->spindle_max_rpm);
     len += sprintf(&settings_buffer[len], "$31=%.3f\r\n", settings->spindle_min_rpm);
     
-    len += sprintf(&settings_buffer[len], "$100=%.3f\r\n", settings->steps_per_mm_x);
-    len += sprintf(&settings_buffer[len], "$101=%.3f\r\n", settings->steps_per_mm_y);
-    len += sprintf(&settings_buffer[len], "$102=%.3f\r\n", settings->steps_per_mm_z);
-    len += sprintf(&settings_buffer[len], "$103=%.3f\r\n", settings->steps_per_mm_a);
+    // Steps per mm ($100-$103) - Array-based
+    len += sprintf(&settings_buffer[len], "$100=%.3f\r\n", settings->steps_per_mm[AXIS_X]);
+    len += sprintf(&settings_buffer[len], "$101=%.3f\r\n", settings->steps_per_mm[AXIS_Y]);
+    len += sprintf(&settings_buffer[len], "$102=%.3f\r\n", settings->steps_per_mm[AXIS_Z]);
+    len += sprintf(&settings_buffer[len], "$103=%.3f\r\n", settings->steps_per_mm[AXIS_A]);
     
-    len += sprintf(&settings_buffer[len], "$110=%.3f\r\n", settings->max_rate_x);
-    len += sprintf(&settings_buffer[len], "$111=%.3f\r\n", settings->max_rate_y);
-    len += sprintf(&settings_buffer[len], "$112=%.3f\r\n", settings->max_rate_z);
-    len += sprintf(&settings_buffer[len], "$113=%.3f\r\n", settings->max_rate_a);
+    // Max rates ($110-$113) - Array-based
+    len += sprintf(&settings_buffer[len], "$110=%.3f\r\n", settings->max_rate[AXIS_X]);
+    len += sprintf(&settings_buffer[len], "$111=%.3f\r\n", settings->max_rate[AXIS_Y]);
+    len += sprintf(&settings_buffer[len], "$112=%.3f\r\n", settings->max_rate[AXIS_Z]);
+    len += sprintf(&settings_buffer[len], "$113=%.3f\r\n", settings->max_rate[AXIS_A]);
     
-    len += sprintf(&settings_buffer[len], "$120=%.3f\r\n", settings->acceleration_x);
-    len += sprintf(&settings_buffer[len], "$121=%.3f\r\n", settings->acceleration_y);
-    len += sprintf(&settings_buffer[len], "$122=%.3f\r\n", settings->acceleration_z);
-    len += sprintf(&settings_buffer[len], "$123=%.3f\r\n", settings->acceleration_a);
+    // Acceleration ($120-$123) - Array-based
+    len += sprintf(&settings_buffer[len], "$120=%.3f\r\n", settings->acceleration[AXIS_X]);
+    len += sprintf(&settings_buffer[len], "$121=%.3f\r\n", settings->acceleration[AXIS_Y]);
+    len += sprintf(&settings_buffer[len], "$122=%.3f\r\n", settings->acceleration[AXIS_Z]);
+    len += sprintf(&settings_buffer[len], "$123=%.3f\r\n", settings->acceleration[AXIS_A]);
     
-    len += sprintf(&settings_buffer[len], "$130=%.3f\r\n", settings->max_travel_x);
-    len += sprintf(&settings_buffer[len], "$131=%.3f\r\n", settings->max_travel_y);
-    len += sprintf(&settings_buffer[len], "$132=%.3f\r\n", settings->max_travel_z);
+    // Max travel ($130-$132) - Array-based
+    len += sprintf(&settings_buffer[len], "$130=%.3f\r\n", settings->max_travel[AXIS_X]);
+    len += sprintf(&settings_buffer[len], "$131=%.3f\r\n", settings->max_travel[AXIS_Y]);
+    len += sprintf(&settings_buffer[len], "$132=%.3f\r\n", settings->max_travel[AXIS_Z]);
     
 
 
@@ -455,94 +451,62 @@ CNC_Settings* SETTINGS_GetCurrent(void)
 bool SETTINGS_GetWorkCoordinateSystem(uint8_t wcs_number, float* x, float* y, float* z) {
     if (wcs_number > 5 || !x || !y || !z) return false;  // G54-G59 only
     
+    // Array-based access - cleaner and scalable
+    const float* wcs = NULL;
     switch (wcs_number) {
-        case 0:  // G54
-            *x = current_settings.wcs_g54_x;
-            *y = current_settings.wcs_g54_y;
-            *z = current_settings.wcs_g54_z;
-            break;
-        case 1:  // G55
-            *x = current_settings.wcs_g55_x;
-            *y = current_settings.wcs_g55_y;
-            *z = current_settings.wcs_g55_z;
-            break;
-        case 2:  // G56
-            *x = current_settings.wcs_g56_x;
-            *y = current_settings.wcs_g56_y;
-            *z = current_settings.wcs_g56_z;
-            break;
-        case 3:  // G57
-            *x = current_settings.wcs_g57_x;
-            *y = current_settings.wcs_g57_y;
-            *z = current_settings.wcs_g57_z;
-            break;
-        case 4:  // G58
-            *x = current_settings.wcs_g58_x;
-            *y = current_settings.wcs_g58_y;
-            *z = current_settings.wcs_g58_z;
-            break;
-        case 5:  // G59
-            *x = current_settings.wcs_g59_x;
-            *y = current_settings.wcs_g59_y;
-            *z = current_settings.wcs_g59_z;
-            break;
+        case 0: wcs = current_settings.wcs_g54; break;  // G54
+        case 1: wcs = current_settings.wcs_g55; break;  // G55
+        case 2: wcs = current_settings.wcs_g56; break;  // G56
+        case 3: wcs = current_settings.wcs_g57; break;  // G57
+        case 4: wcs = current_settings.wcs_g58; break;  // G58
+        case 5: wcs = current_settings.wcs_g59; break;  // G59
     }
-    return true;
+    
+    if (wcs) {
+        *x = wcs[0];  // X
+        *y = wcs[1];  // Y
+        *z = wcs[2];  // Z
+        return true;
+    }
+    return false;
 }
 
 /* Set work coordinate system offset and save to flash */
 bool SETTINGS_SetWorkCoordinateSystem(uint8_t wcs_number, float x, float y, float z) {
     if (wcs_number > 5) return false;  // G54-G59 only
     
+    // Array-based access - cleaner and scalable
+    float* wcs = NULL;
     switch (wcs_number) {
-        case 0:  // G54
-            current_settings.wcs_g54_x = x;
-            current_settings.wcs_g54_y = y;
-            current_settings.wcs_g54_z = z;
-            break;
-        case 1:  // G55
-            current_settings.wcs_g55_x = x;
-            current_settings.wcs_g55_y = y;
-            current_settings.wcs_g55_z = z;
-            break;
-        case 2:  // G56
-            current_settings.wcs_g56_x = x;
-            current_settings.wcs_g56_y = y;
-            current_settings.wcs_g56_z = z;
-            break;
-        case 3:  // G57
-            current_settings.wcs_g57_x = x;
-            current_settings.wcs_g57_y = y;
-            current_settings.wcs_g57_z = z;
-            break;
-        case 4:  // G58
-            current_settings.wcs_g58_x = x;
-            current_settings.wcs_g58_y = y;
-            current_settings.wcs_g58_z = z;
-            break;
-        case 5:  // G59
-            current_settings.wcs_g59_x = x;
-            current_settings.wcs_g59_y = y;
-            current_settings.wcs_g59_z = z;
-            break;
+        case 0: wcs = current_settings.wcs_g54; break;  // G54
+        case 1: wcs = current_settings.wcs_g55; break;  // G55
+        case 2: wcs = current_settings.wcs_g56; break;  // G56
+        case 3: wcs = current_settings.wcs_g57; break;  // G57
+        case 4: wcs = current_settings.wcs_g58; break;  // G58
+        case 5: wcs = current_settings.wcs_g59; break;  // G59
     }
     
-    // Save to flash immediately
-    return SETTINGS_SaveToFlash(&current_settings);
+    if (wcs) {
+        wcs[0] = x;  // X
+        wcs[1] = y;  // Y
+        wcs[2] = z;  // Z
+        return SETTINGS_SaveToFlash(&current_settings);  // Save to flash immediately
+    }
+    return false;
 }
 
 /* Get G92 coordinate offset */
 void SETTINGS_GetG92Offset(float* x, float* y, float* z) {
-    if (x) *x = current_settings.g92_offset_x;
-    if (y) *y = current_settings.g92_offset_y;
-    if (z) *z = current_settings.g92_offset_z;
+    if (x) *x = current_settings.g92_offset[0];  // X
+    if (y) *y = current_settings.g92_offset[1];  // Y
+    if (z) *z = current_settings.g92_offset[2];  // Z
 }
 
 /* Set G92 coordinate offset */
 void SETTINGS_SetG92Offset(float x, float y, float z) {
-    current_settings.g92_offset_x = x;
-    current_settings.g92_offset_y = y;
-    current_settings.g92_offset_z = z;
+    current_settings.g92_offset[0] = x;  // X
+    current_settings.g92_offset[1] = y;  // Y
+    current_settings.g92_offset[2] = z;  // Z
     // Note: G92 is typically not saved to flash (temporary offset)
 }
 
