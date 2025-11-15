@@ -195,15 +195,14 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         feedrate_mm_sec = 600.0f / 60.0f;
     }
     
-    // Get max_rate and acceleration for limiting axis using axis config
-    const AxisConfig* axis_cfg = UTILS_GetAxisConfig(limiting_axis);
-    if (!axis_cfg) {
-        // Fallback to X axis if invalid
-        axis_cfg = UTILS_GetAxisConfig(AXIS_X);
+    // Get max_rate and acceleration for limiting axis using direct array access
+    E_AXIS cfg_axis = limiting_axis;
+    if (cfg_axis >= NUM_AXIS) {
+        cfg_axis = AXIS_X;  // Fallback to X axis if invalid
     }
     
-    float max_rate_mm_min = *(axis_cfg->max_rate);
-    float acceleration_mm_sec2 = *(axis_cfg->acceleration);
+    float max_rate_mm_min = *(g_axis_settings[cfg_axis].max_rate);
+    float acceleration_mm_sec2 = *(g_axis_settings[cfg_axis].acceleration);
     
     // Clamp feedrate to max rate
     float max_rate_mm_sec = max_rate_mm_min / 60.0f;
@@ -215,7 +214,7 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     const float TIMER_FREQ = (float)TMR4_FrequencyGet();
     
     // Array-based steps_per_mm lookup (replaces switch statement)
-    float steps_per_mm_dominant = *g_axis_config[segment_buffer->dominant_axis].steps_per_mm;
+    float steps_per_mm_dominant = *g_axis_settings[segment_buffer->dominant_axis].steps_per_mm;
     
     // Calculate nominal step interval (cruise speed)
     // steps_per_sec = feedrate_mm_sec * steps_per_mm
@@ -426,12 +425,9 @@ void KINEMATICS_ResetAccumulators(void) {
 CoordinatePoint KINEMATICS_GetCurrentPosition(void) {
     CoordinatePoint current;
     
-    // Use axis config abstraction for clean access
+    // Use direct array access for clean access
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        const AxisConfig* cfg = UTILS_GetAxisConfig(axis);
-        if (!cfg) continue;
-        
-        float position = (float)AXIS_GetSteps(axis) / (*cfg->steps_per_mm);
+        float position = (float)AXIS_GetSteps(axis) / (*g_axis_settings[axis].steps_per_mm);
         
         // Array-based coordinate setting (replaces switch statement)
         SET_COORDINATE_AXIS(&current, axis, position);
@@ -442,11 +438,10 @@ CoordinatePoint KINEMATICS_GetCurrentPosition(void) {
 
 // Set machine position for a single axis (used during homing)
 void KINEMATICS_SetAxisMachinePosition(E_AXIS axis, float position) {
-    const AxisConfig* cfg = UTILS_GetAxisConfig(axis);
-    if (!cfg) return;  // Invalid axis
+    if (axis >= NUM_AXIS) return;  // Invalid axis
     
     // Convert position to steps and update using abstracted inline helper
-    int32_t steps = (int32_t)(position * (*cfg->steps_per_mm));
+    int32_t steps = (int32_t)(position * (*g_axis_settings[axis].steps_per_mm));
     AXIS_SetSteps(axis, steps);
 }
 

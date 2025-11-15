@@ -119,16 +119,6 @@ void STEPPER_Initialize(APP_DATA* appData) {
     
     steppers_enabled = true;
     
-    // ✅ DEBUG: Verify enable pins are set correctly after enabling
-    DEBUG_PRINT_STEPPER("[STEPPER_Init] Enable invert mask: 0x%02X\r\n", enable_invert);
-    DEBUG_EXEC_STEPPER({
-        int enx_state = EnX_Get();
-        int eny_state = EnY_Get();
-        int enz_state = EnZ_Get();
-        int ena_state = EnA_Get();
-        UART_Printf("[STEPPER_Init] EnX=%d EnY=%d EnZ=%d EnA=%d (0=low/enabled for active-low)\r\n",
-            enx_state, eny_state, enz_state, ena_state);
-    });
 }
 
 // ============================================================================
@@ -471,18 +461,18 @@ StepperPosition* STEPPER_GetPosition(void)
 
     // ✅ ARRAY-BASED: Copy live step counters (single loop!)
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        if (g_axis_config[axis].step_count) {
-            snap.steps[axis] = *g_axis_config[axis].step_count;
+        if (g_axis_settings[axis].step_count) {
+            snap.steps[axis] = *g_axis_settings[axis].step_count;
         }
-        if (g_axis_config[axis].steps_per_mm) {
-            snap.steps_per_mm[axis] = *g_axis_config[axis].steps_per_mm;
+        if (g_axis_settings[axis].steps_per_mm) {
+            snap.steps_per_mm[axis] = *g_axis_settings[axis].steps_per_mm;
         }
     }
 
     return &snap;
 }
 
-// Get pointer to LIVE position counters (for g_axis_config initialization)
+// Get pointer to LIVE position counters (for g_axis_settings initialization)
 StepperPosition* STEPPER_GetPositionPointer(void)
 {
     return &stepper_pos;

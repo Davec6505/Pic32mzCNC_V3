@@ -7,220 +7,119 @@
 #include <sys/kmem.h>  // For register address macros
 #include <string.h>
 #include <ctype.h>
+#include "../config/default/peripheral/gpio/plib_gpio.h"
 
 // ===== AXIS HARDWARE CONFIGURATION =====
 
-// Global axis configuration array (indexed by E_AXIS enum)
-AxisConfig g_axis_config[NUM_AXIS];
 
-// ===== MCC WRAPPER FUNCTIONS (preserves pin assignment abstraction) =====
-// X Axis Wrappers
-static inline void __attribute__((always_inline)) Wrapper_StepX_Set(void)    { StepX_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_StepX_Clear(void)  { StepX_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_StepX_Toggle(void) { StepX_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_StepX_Get(void)    { return StepX_Get(); }
+// ===== SIMPLE GPIO HARDWARE ABSTRACTION (LED pattern - clean and scalable!) =====
+static inline void __attribute__((always_inline)) led1_toggle(void) { LED1_Toggle(); }
+static inline void __attribute__((always_inline)) led2_toggle(void) { LED2_Toggle(); }
+GPIO_ToggleFunc led_toggle[] = {led1_toggle, led2_toggle};
 
-static inline void __attribute__((always_inline)) Wrapper_DirX_Set(void)     { DirX_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_DirX_Clear(void)   { DirX_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_DirX_Toggle(void)  { DirX_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_DirX_Get(void)     { return DirX_Get(); }
+// ===== AXIS GPIO WRAPPERS (following clean LED pattern) =====
+// Step pin wrappers (one per axis)
+static inline void __attribute__((always_inline)) step_x_set(void)   { StepX_Set(); }
+static inline void __attribute__((always_inline)) step_x_clear(void) { StepX_Clear(); }
+static inline void __attribute__((always_inline)) step_y_set(void)   { StepY_Set(); }
+static inline void __attribute__((always_inline)) step_y_clear(void) { StepY_Clear(); }
+static inline void __attribute__((always_inline)) step_z_set(void)   { StepZ_Set(); }
+static inline void __attribute__((always_inline)) step_z_clear(void) { StepZ_Clear(); }
+static inline void __attribute__((always_inline)) step_a_set(void)   { StepA_Set(); }
+static inline void __attribute__((always_inline)) step_a_clear(void) { StepA_Clear(); }
 
-static inline void __attribute__((always_inline)) Wrapper_EnX_Set(void)      { EnX_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_EnX_Clear(void)    { EnX_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_EnX_Toggle(void)   { EnX_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_EnX_Get(void)      { return EnX_Get(); }
+// Direction pin wrappers (one per axis)
+static inline void __attribute__((always_inline)) dir_x_set(void)   { DirX_Set(); }
+static inline void __attribute__((always_inline)) dir_x_clear(void) { DirX_Clear(); }
+static inline void __attribute__((always_inline)) dir_y_set(void)   { DirY_Set(); }
+static inline void __attribute__((always_inline)) dir_y_clear(void) { DirY_Clear(); }
+static inline void __attribute__((always_inline)) dir_z_set(void)   { DirZ_Set(); }
+static inline void __attribute__((always_inline)) dir_z_clear(void) { DirZ_Clear(); }
+static inline void __attribute__((always_inline)) dir_a_set(void)   { DirA_Set(); }
+static inline void __attribute__((always_inline)) dir_a_clear(void) { DirA_Clear(); }
 
-// Y Axis Wrappers
-static inline void __attribute__((always_inline)) Wrapper_StepY_Set(void)    { StepY_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_StepY_Clear(void)  { StepY_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_StepY_Toggle(void) { StepY_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_StepY_Get(void)    { return StepY_Get(); }
+// Enable pin wrappers (one per axis)
+static inline void __attribute__((always_inline)) enable_x_set(void)   { EnX_Set(); }
+static inline void __attribute__((always_inline)) enable_x_clear(void) { EnX_Clear(); }
+static inline void __attribute__((always_inline)) enable_y_set(void)   { EnY_Set(); }
+static inline void __attribute__((always_inline)) enable_y_clear(void) { EnY_Clear(); }
+static inline void __attribute__((always_inline)) enable_z_set(void)   { EnZ_Set(); }
+static inline void __attribute__((always_inline)) enable_z_clear(void) { EnZ_Clear(); }
+static inline void __attribute__((always_inline)) enable_a_set(void)   { EnA_Set(); }
+static inline void __attribute__((always_inline)) enable_a_clear(void) { EnA_Clear(); }
 
-static inline void __attribute__((always_inline)) Wrapper_DirY_Set(void)     { DirY_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_DirY_Clear(void)   { DirY_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_DirY_Toggle(void)  { DirY_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_DirY_Get(void)     { return DirY_Get(); }
+// Limit switch wrappers (min/max per axis)
+static inline bool __attribute__((always_inline)) x_min_get(void) { return X_Min_Get(); }
+static inline bool __attribute__((always_inline)) x_max_get(void) { return X_Max_Get(); }
+static inline bool __attribute__((always_inline)) y_min_get(void) { return Y_Min_Get(); }
+static inline bool __attribute__((always_inline)) y_max_get(void) { return Y_Max_Get(); }
+static inline bool __attribute__((always_inline)) z_min_get(void) { return Z_Min_Get(); }
+static inline bool __attribute__((always_inline)) z_max_get(void) { return Z_Max_Get(); }
+static inline bool __attribute__((always_inline)) a_min_get(void) { return A_Min_Get(); }
+static inline bool __attribute__((always_inline)) a_max_get(void) { return A_Max_Get(); }
 
-static inline void __attribute__((always_inline)) Wrapper_EnY_Set(void)      { EnY_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_EnY_Clear(void)    { EnY_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_EnY_Toggle(void)   { EnY_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_EnY_Get(void)      { return EnY_Get(); }
-
-// Z Axis Wrappers
-static inline void __attribute__((always_inline)) Wrapper_StepZ_Set(void)    { StepZ_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_StepZ_Clear(void)  { StepZ_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_StepZ_Toggle(void) { StepZ_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_StepZ_Get(void)    { return StepZ_Get(); }
-
-static inline void __attribute__((always_inline)) Wrapper_DirZ_Set(void)     { DirZ_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_DirZ_Clear(void)   { DirZ_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_DirZ_Toggle(void)  { DirZ_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_DirZ_Get(void)     { return DirZ_Get(); }
-
-static inline void __attribute__((always_inline)) Wrapper_EnZ_Set(void)      { EnZ_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_EnZ_Clear(void)    { EnZ_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_EnZ_Toggle(void)   { EnZ_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_EnZ_Get(void)      { return EnZ_Get(); }
-
-// A Axis Wrappers
-static inline void __attribute__((always_inline)) Wrapper_StepA_Set(void)    { StepA_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_StepA_Clear(void)  { StepA_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_StepA_Toggle(void) { StepA_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_StepA_Get(void)    { return StepA_Get(); }
-
-static inline void __attribute__((always_inline)) Wrapper_DirA_Set(void)     { DirA_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_DirA_Clear(void)   { DirA_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_DirA_Toggle(void)  { DirA_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_DirA_Get(void)     { return DirA_Get(); }
-
-static inline void __attribute__((always_inline)) Wrapper_EnA_Set(void)      { EnA_Set(); }
-static inline void __attribute__((always_inline)) Wrapper_EnA_Clear(void)    { EnA_Clear(); }
-static inline void __attribute__((always_inline)) Wrapper_EnA_Toggle(void)   { EnA_Toggle(); }
-static inline bool __attribute__((always_inline)) Wrapper_EnA_Get(void)      { return EnA_Get(); }
-
-// ===== LIMIT SWITCH MCC WRAPPERS =====
-// X Axis Limit Wrappers
-static inline bool __attribute__((always_inline)) Wrapper_X_Min_Get(void)    { return X_Min_Get(); }
-static inline bool __attribute__((always_inline)) Wrapper_X_Max_Get(void)    { return X_Max_Get(); }
-
-// Y Axis Limit Wrappers
-static inline bool __attribute__((always_inline)) Wrapper_Y_Min_Get(void)    { return Y_Min_Get(); }
-static inline bool __attribute__((always_inline)) Wrapper_Y_Max_Get(void)    { return Y_Max_Get(); }
-
-// Z Axis Limit Wrappers
-static inline bool __attribute__((always_inline)) Wrapper_Z_Min_Get(void)    { return Z_Min_Get(); }
-static inline bool __attribute__((always_inline)) Wrapper_Z_Max_Get(void)    { return Z_Max_Get(); }
-
-// A Axis Limit Wrappers
-static inline bool __attribute__((always_inline)) Wrapper_A_Min_Get(void)    { return A_Min_Get(); }
-static inline bool __attribute__((always_inline)) Wrapper_A_Max_Get(void)    { return A_Max_Get(); }
-
-// ✅ ARRAY-BASED FUNCTION POINTER TABLES (indexed by E_AXIS enum)
-// This eliminates 72 lines of repetitive assignments!
-static GPIO_SetFunc axis_step_set[NUM_AXIS] = {
-    Wrapper_StepX_Set, Wrapper_StepY_Set, Wrapper_StepZ_Set, Wrapper_StepA_Set
+// ✅ CLEAN FUNCTION POINTER ARRAYS (following LED pattern - much simpler!)
+GPIO_SetFunc axis_step_set[NUM_AXIS] = {
+    step_x_set, step_y_set, step_z_set, step_a_set
 };
-static GPIO_ClearFunc axis_step_clear[NUM_AXIS] = {
-    Wrapper_StepX_Clear, Wrapper_StepY_Clear, Wrapper_StepZ_Clear, Wrapper_StepA_Clear
-};
-static GPIO_ToggleFunc axis_step_toggle[NUM_AXIS] = {
-    Wrapper_StepX_Toggle, Wrapper_StepY_Toggle, Wrapper_StepZ_Toggle, Wrapper_StepA_Toggle
-};
-static GPIO_GetFunc axis_step_get[NUM_AXIS] = {
-    Wrapper_StepX_Get, Wrapper_StepY_Get, Wrapper_StepZ_Get, Wrapper_StepA_Get
+GPIO_ClearFunc axis_step_clear[NUM_AXIS] = {
+    step_x_clear, step_y_clear, step_z_clear, step_a_clear
 };
 
-static GPIO_SetFunc axis_dir_set[NUM_AXIS] = {
-    Wrapper_DirX_Set, Wrapper_DirY_Set, Wrapper_DirZ_Set, Wrapper_DirA_Set
+GPIO_SetFunc axis_dir_set[NUM_AXIS] = {
+    dir_x_set, dir_y_set, dir_z_set, dir_a_set
 };
-static GPIO_ClearFunc axis_dir_clear[NUM_AXIS] = {
-    Wrapper_DirX_Clear, Wrapper_DirY_Clear, Wrapper_DirZ_Clear, Wrapper_DirA_Clear
-};
-static GPIO_ToggleFunc axis_dir_toggle[NUM_AXIS] = {
-    Wrapper_DirX_Toggle, Wrapper_DirY_Toggle, Wrapper_DirZ_Toggle, Wrapper_DirA_Toggle
-};
-static GPIO_GetFunc axis_dir_get[NUM_AXIS] = {
-    Wrapper_DirX_Get, Wrapper_DirY_Get, Wrapper_DirZ_Get, Wrapper_DirA_Get
+GPIO_ClearFunc axis_dir_clear[NUM_AXIS] = {
+    dir_x_clear, dir_y_clear, dir_z_clear, dir_a_clear
 };
 
-static GPIO_SetFunc axis_enable_set[NUM_AXIS] = {
-    Wrapper_EnX_Set, Wrapper_EnY_Set, Wrapper_EnZ_Set, Wrapper_EnA_Set
+GPIO_SetFunc axis_enable_set[NUM_AXIS] = {
+    enable_x_set, enable_y_set, enable_z_set, enable_a_set
 };
-static GPIO_ClearFunc axis_enable_clear[NUM_AXIS] = {
-    Wrapper_EnX_Clear, Wrapper_EnY_Clear, Wrapper_EnZ_Clear, Wrapper_EnA_Clear
+GPIO_ClearFunc axis_enable_clear[NUM_AXIS] = {
+    enable_x_clear, enable_y_clear, enable_z_clear, enable_a_clear
 };
-static GPIO_ToggleFunc axis_enable_toggle[NUM_AXIS] = {
-    Wrapper_EnX_Toggle, Wrapper_EnY_Toggle, Wrapper_EnZ_Toggle, Wrapper_EnA_Toggle
+
+GPIO_GetFunc axis_limit_min_get[NUM_AXIS] = {
+    x_min_get, y_min_get, z_min_get, a_min_get
 };
-static GPIO_GetFunc axis_enable_get[NUM_AXIS] = {
-    Wrapper_EnX_Get, Wrapper_EnY_Get, Wrapper_EnZ_Get, Wrapper_EnA_Get
+GPIO_GetFunc axis_limit_max_get[NUM_AXIS] = {
+    x_max_get, y_max_get, z_max_get, a_max_get
 };
+
+// Global arrays (simple and direct!)
+AxisSettings g_axis_settings[NUM_AXIS];
+HomingSettings g_homing_settings[NUM_AXIS];
 
 // Initialize axis configuration - MUST be called during app initialization
 void UTILS_InitAxisConfig(void) {
     CNC_Settings* settings = SETTINGS_GetCurrent();
-    StepperPosition* stepper_pos = STEPPER_GetPositionPointer();  // Get LIVE counters, not snapshot!
+    StepperPosition* stepper_pos = STEPPER_GetPositionPointer();
     
-    // ✅ ARRAY-BASED: Loop through all axes and assign function pointers
-    // Adding a 5th axis now requires ONLY adding entries to the function pointer arrays above!
+    // Simple loop - assign settings pointers for all axes
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        // Step pin function pointers
-        g_axis_config[axis].step.Set = axis_step_set[axis];
-        g_axis_config[axis].step.Clear = axis_step_clear[axis];
-        g_axis_config[axis].step.Toggle = axis_step_toggle[axis];
-        g_axis_config[axis].step.Get = axis_step_get[axis];
-        
-        // Direction pin function pointers
-        g_axis_config[axis].dir.Set = axis_dir_set[axis];
-        g_axis_config[axis].dir.Clear = axis_dir_clear[axis];
-        g_axis_config[axis].dir.Toggle = axis_dir_toggle[axis];
-        g_axis_config[axis].dir.Get = axis_dir_get[axis];
-        
-        // Enable pin function pointers
-        g_axis_config[axis].enable.Set = axis_enable_set[axis];
-        g_axis_config[axis].enable.Clear = axis_enable_clear[axis];
-        g_axis_config[axis].enable.Toggle = axis_enable_toggle[axis];
-        g_axis_config[axis].enable.Get = axis_enable_get[axis];
+        g_axis_settings[axis].max_rate = &settings->max_rate[axis];
+        g_axis_settings[axis].acceleration = &settings->acceleration[axis];
+        g_axis_settings[axis].steps_per_mm = &settings->steps_per_mm[axis];
+        g_axis_settings[axis].step_count = &stepper_pos->steps[axis];
     }
-    
-    // ✅ ARRAY-BASED: Assign settings pointers for all axes (loop for scalability)
-    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        g_axis_config[axis].max_rate = &settings->max_rate[axis];
-        g_axis_config[axis].acceleration = &settings->acceleration[axis];
-        g_axis_config[axis].steps_per_mm = &settings->steps_per_mm[axis];
-        g_axis_config[axis].step_count = &stepper_pos->steps[axis];
-    }
-}
-
-// Get axis configuration (safe accessor with bounds checking)
-const AxisConfig* UTILS_GetAxisConfig(E_AXIS axis) {
-    if (axis >= NUM_AXIS) {
-        return &g_axis_config[AXIS_X];  // Safe fallback
-    }
-    return &g_axis_config[axis];
 }
 
 // ===== LIMIT SWITCH HARDWARE CONFIGURATION =====
-
-// Global limit configuration array (indexed by E_AXIS enum)
-LimitConfig g_limit_config[NUM_AXIS];
-
-// ✅ ARRAY-BASED LIMIT SWITCH FUNCTION POINTER TABLES
-static GPIO_GetFunc axis_limit_min_get[NUM_AXIS] = {
-    Wrapper_X_Min_Get, Wrapper_Y_Min_Get, Wrapper_Z_Min_Get, Wrapper_A_Min_Get
-};
-static GPIO_GetFunc axis_limit_max_get[NUM_AXIS] = {
-    Wrapper_X_Max_Get, Wrapper_Y_Max_Get, Wrapper_Z_Max_Get, Wrapper_A_Max_Get
-};
 
 // Initialize limit switch configuration - MUST be called during app initialization
 void UTILS_InitLimitConfig(void) {
     CNC_Settings* settings = SETTINGS_GetCurrent();
     
-    // ✅ ARRAY-BASED: Loop through all axes and assign limit switch function pointers
+    // Simple loop - all axes share same homing settings
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        g_limit_config[axis].limit.GetMin = axis_limit_min_get[axis];
-        g_limit_config[axis].limit.GetMax = axis_limit_max_get[axis];
+        g_homing_settings[axis].homing_enable = &settings->homing_enable;
+        g_homing_settings[axis].homing_dir_mask = &settings->homing_dir_mask;
+        g_homing_settings[axis].homing_feed_rate = &settings->homing_feed_rate;
+        g_homing_settings[axis].homing_seek_rate = &settings->homing_seek_rate;
+        g_homing_settings[axis].homing_debounce = &settings->homing_debounce;
+        g_homing_settings[axis].homing_pull_off = &settings->homing_pull_off;
     }
-    
-    // ✅ ARRAY-BASED: Assign homing settings pointers for all axes (loop for scalability)
-    // All axes share the same homing settings (system-wide configuration)
-    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        g_limit_config[axis].homing_enable = &settings->homing_enable;
-        g_limit_config[axis].homing_dir_mask = &settings->homing_dir_mask;
-        g_limit_config[axis].homing_feed_rate = &settings->homing_feed_rate;
-        g_limit_config[axis].homing_seek_rate = &settings->homing_seek_rate;
-        g_limit_config[axis].homing_debounce = &settings->homing_debounce;
-        g_limit_config[axis].homing_pull_off = &settings->homing_pull_off;
-    }
-}
-
-// Get limit configuration (safe accessor with bounds checking)
-const LimitConfig* UTILS_GetLimitConfig(E_AXIS axis) {
-    if (axis >= NUM_AXIS) {
-        return &g_limit_config[AXIS_X];  // Safe fallback
-    }
-    return &g_limit_config[axis];
 }
 
 // Forward declarations

@@ -552,24 +552,21 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                         
                         // Get settings for junction calculation
                         CNC_Settings* settings = SETTINGS_GetCurrent();
-                        const AxisConfig* axis_cfg = UTILS_GetAxisConfig(AXIS_X);  // Use X axis for junction accel
-                        if (axis_cfg && settings) {
-                            float junction_speed = KINEMATICS_CalculateJunctionSpeed(prev_dir, curr_dir, 
-                                                                                    settings->junction_deviation,
-                                                                                    *(axis_cfg->acceleration));
-                            
-                            // Limit junction speed to reasonable maximum (feedrate / 60)
-                            float max_junction = feedrate / 60.0f;  // Convert mm/min to mm/sec
-                            if (junction_speed > max_junction) {
-                                junction_speed = max_junction;
-                            }
-                            
-                            // Update previous segment's exit velocity for smoother transition
-                            entry_velocity = junction_speed;
-                            
-                            DEBUG_PRINT_MOTION("[JUNCTION] Junction speed: %.1f mm/sec (entry to current segment)\r\n", 
-                                             junction_speed);
+                        float junction_speed = KINEMATICS_CalculateJunctionSpeed(prev_dir, curr_dir, 
+                                                                                settings->junction_deviation,
+                                                                                *(g_axis_settings[AXIS_X].acceleration));  // Use X axis for junction accel
+                        
+                        // Limit junction speed to reasonable maximum (feedrate / 60)
+                        float max_junction = feedrate / 60.0f;  // Convert mm/min to mm/sec
+                        if (junction_speed > max_junction) {
+                            junction_speed = max_junction;
                         }
+                        
+                        // Update previous segment's exit velocity for smoother transition
+                        entry_velocity = junction_speed;
+                        
+                        DEBUG_PRINT_MOTION("[JUNCTION] Junction speed: %.1f mm/sec (entry to current segment)\r\n", 
+                                         junction_speed);
                     }
                 }
             }

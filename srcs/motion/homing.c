@@ -36,9 +36,7 @@ bool HOMING_Start(APP_DATA* appData, uint32_t axes_mask) {
     }
     
     // Check if homing enabled via settings
-    // Access through limit config (first axis pointer is sufficient for global enable)
-    const LimitConfig* cfg = UTILS_GetLimitConfig(AXIS_X);
-    if (cfg == NULL || !(*cfg->homing_enable)) {
+    if (!(*g_homing_settings[AXIS_X].homing_enable)) {
         return false;  // Homing disabled
     }
     
@@ -180,16 +178,8 @@ void HOMING_ClearAlarm(void) {
 // ===== INTERNAL HELPERS =====
 
 void HOMING_StartSeek(APP_DATA* appData) {
-    const LimitConfig* limit_cfg = UTILS_GetLimitConfig(g_homing.current_axis);
-    
-    if (limit_cfg == NULL) {
-        g_homing.state = HOMING_STATE_ALARM;
-        g_homing.alarm_code = 9;
-        return;
-    }
-    
     // Determine homing direction from $23 mask
-    bool home_positive = (*limit_cfg->homing_dir_mask >> g_homing.current_axis) & 0x01;
+    bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask >> g_homing.current_axis) & 0x01;
     
     // Calculate large search distance (assume 300mm max travel)
     float search_distance = home_positive ? 300.0f : -300.0f;
@@ -204,7 +194,7 @@ void HOMING_StartSeek(APP_DATA* appData) {
     // Generate motion segment at seek rate
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMoveSimple(current, target, *limit_cfg->homing_seek_rate, segment);
+        KINEMATICS_LinearMoveSimple(current, target, *g_homing_settings[g_homing.current_axis].homing_seek_rate, segment);
         
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
@@ -217,16 +207,8 @@ void HOMING_StartSeek(APP_DATA* appData) {
 }
 
 void HOMING_StartLocate(APP_DATA* appData) {
-    const LimitConfig* limit_cfg = UTILS_GetLimitConfig(g_homing.current_axis);
-    
-    if (limit_cfg == NULL) {
-        g_homing.state = HOMING_STATE_ALARM;
-        g_homing.alarm_code = 9;
-        return;
-    }
-    
-    // Determine homing direction (opposite of seek to back off)
-    bool home_positive = (*limit_cfg->homing_dir_mask >> g_homing.current_axis) & 0x01;
+    // Determine homing direction from $23 mask
+    bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask >> g_homing.current_axis) & 0x01;
     
     // Back off 5mm to clear switch, then approach slowly
     float backoff_distance = home_positive ? -5.0f : 5.0f;
@@ -242,7 +224,7 @@ void HOMING_StartLocate(APP_DATA* appData) {
     // Generate backoff motion segment at slow rate
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMoveSimple(current, target, *limit_cfg->homing_feed_rate, segment);
+        KINEMATICS_LinearMoveSimple(current, target, *g_homing_settings[g_homing.current_axis].homing_feed_rate, segment);
         
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
@@ -256,7 +238,7 @@ void HOMING_StartLocate(APP_DATA* appData) {
     
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMoveSimple(current, target, *limit_cfg->homing_feed_rate, segment);
+        KINEMATICS_LinearMoveSimple(current, target, *g_homing_settings[g_homing.current_axis].homing_feed_rate, segment);
         
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
@@ -266,17 +248,9 @@ void HOMING_StartLocate(APP_DATA* appData) {
 }
 
 void HOMING_StartPulloff(APP_DATA* appData) {
-    const LimitConfig* limit_cfg = UTILS_GetLimitConfig(g_homing.current_axis);
-    
-    if (limit_cfg == NULL) {
-        g_homing.state = HOMING_STATE_ALARM;
-        g_homing.alarm_code = 9;
-        return;
-    }
-    
-    // Determine pulloff direction (opposite of homing direction)
-    bool home_positive = (*limit_cfg->homing_dir_mask >> g_homing.current_axis) & 0x01;
-    float pulloff_distance = home_positive ? -*limit_cfg->homing_pull_off : *limit_cfg->homing_pull_off;
+    // Determine homing direction from $23 mask
+    bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask >> g_homing.current_axis) & 0x01;
+    float pulloff_distance = home_positive ? -*g_homing_settings[g_homing.current_axis].homing_pull_off : *g_homing_settings[g_homing.current_axis].homing_pull_off;
     
     // Build target position
     CoordinatePoint current = KINEMATICS_GetCurrentPosition();
@@ -288,7 +262,7 @@ void HOMING_StartPulloff(APP_DATA* appData) {
     // Generate pulloff motion segment
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMoveSimple(current, target, *limit_cfg->homing_feed_rate, segment);
+        KINEMATICS_LinearMoveSimple(current, target, *g_homing_settings[g_homing.current_axis].homing_feed_rate, segment);
         
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
@@ -298,14 +272,8 @@ void HOMING_StartPulloff(APP_DATA* appData) {
 }
 
 bool HOMING_LimitTriggered(void) {
-    const LimitConfig* limit_cfg = UTILS_GetLimitConfig(g_homing.current_axis);
-    
-    if (limit_cfg == NULL) {
-        return false;
-    }
-    
     // Determine which limit to check based on homing direction
-    bool home_positive = (*limit_cfg->homing_dir_mask >> g_homing.current_axis) & 0x01;
+    bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask >> g_homing.current_axis) & 0x01;
     bool limit_state = home_positive ? LIMIT_GetMax(g_homing.current_axis) : 
                                        LIMIT_GetMin(g_homing.current_axis);
     
@@ -327,7 +295,7 @@ bool HOMING_LimitTriggered(void) {
         uint32_t elapsed_ticks = now - g_homing.debounce_start;
         
         // Convert debounce microseconds to core timer ticks (200MHz = 5ns per tick)
-        uint32_t debounce_ticks = (*limit_cfg->homing_debounce * 200) / 1000;  // μs to ticks
+        uint32_t debounce_ticks = (*g_homing_settings[g_homing.current_axis].homing_debounce * 200) / 1000;  // μs to ticks
         
         if (elapsed_ticks >= debounce_ticks) {
             // Debounce complete - limit confirmed

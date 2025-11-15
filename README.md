@@ -1,224 +1,445 @@
-# Pic32mzCNC_V3 - CNC Motion Control System
+# Pic32mzCNC_V3 - CNC Motion Control System# Pic32mzCNC_V3 - CNC Motion Control System
 
-## 🚀 Project Status: **Under test** ✅
 
-**Pic32mzCNC_V3** is a CNC motion control system for PIC32MZEFH microcontrollers featuring, and **robust GRBL v1.1 protocol** for stepper motor control.
 
-### ✅ **Latest Production Release** (November 13, 2025) 🚀
+**Production-Ready CNC Controller for PIC32MZ Microcontrollers**## 🚀 Project Status: **Under test** ✅
+
+
+
+A professional-grade CNC motion control system featuring GRBL v1.1 protocol compatibility, 4-axis coordinated motion, and hardware-optimized stepper control.**Pic32mzCNC_V3** is a CNC motion control system for PIC32MZEFH microcontrollers featuring, and **robust GRBL v1.1 protocol** for stepper motor control.
+
+
+
+## 🚀 Status### ✅ **Latest Production Release** (November 13, 2025) 🚀
+
 **All features merged to master and pushed to GitHub!**
 
-- ✅ **Aggressive Flow Control**: Single-threshold system defers "ok" until motion queue empty
-- ✅ **GRBL v1.1 Protocol Compliance**: Full blank line/comment handling with proper "ok" responses
+**Production Ready** - Validated with UGS, Candle, bCNC  
+
+**Firmware**: `bins/Release/CS23.hex` (264KB)  - ✅ **Aggressive Flow Control**: Single-threshold system defers "ok" until motion queue empty
+
+**Latest Release**: November 15, 2025- ✅ **GRBL v1.1 Protocol Compliance**: Full blank line/comment handling with proper "ok" responses
+
 - ✅ **Motion Completion Synchronization**: Deferred "ok" only sent when `motionQueueCount == 0`
-- ✅ **File Streaming Success**: Rectangle test, circle test, and complex toolpaths complete flawlessly
+
+## ⚡ Key Features- ✅ **File Streaming Success**: Rectangle test, circle test, and complex toolpaths complete flawlessly
+
 - ✅ **UGS Integration**: Automatic file completion without manual reset, perfect visualization
-- ✅ **Counter-Based Deferred OK**: Burst sending of all deferred responses when motion completes
-- ✅ **Arc Radius Compensation**: GRBL v1.1 $13 setting with 0.002mm tolerance (SETTINGS_VERSION=2)
-- ✅ **Control Character Cleanup**: Proper CR/LF consumption prevents spurious "ok" responses
 
-### ✅ **Validated Production Fixes** (November 10-13, 2025)
-- ✅ **UGS Soft Reset Recovery**: Motion automatically restarts after Ctrl+X soft reset
-- ✅ **Optimal Timer Configuration**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs pulses
+### Motion Control- ✅ **Counter-Based Deferred OK**: Burst sending of all deferred responses when motion completes
+
+- **4-Axis Coordination**: XYZA stepper control with Bresenham interpolation- ✅ **Arc Radius Compensation**: GRBL v1.1 $13 setting with 0.002mm tolerance (SETTINGS_VERSION=2)
+
+- **Hardware Timing**: TMR4 (781.25kHz) + OC modules for precise step generation- ✅ **Control Character Cleanup**: Proper CR/LF consumption prevents spurious "ok" responses
+
+- **Optimal Performance**: 2.5µs pulse width, 256 microstepping support
+
+- **Trapezoidal Profiling**: Acceleration/deceleration with velocity planning### ✅ **Validated Production Fixes** (November 10-13, 2025)
+
+- **Arc Interpolation**: G2/G3 with radius compensation ($13 setting)- ✅ **UGS Soft Reset Recovery**: Motion automatically restarts after Ctrl+X soft reset
+
+- **Emergency Stop**: Real-time response with hardware limit support- ✅ **Optimal Timer Configuration**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs pulses
+
 - ✅ **Hardware Validation Guards**: OC1/TMR4 startup checks prevent motion failures
-- ✅ **Production-Ready G-Code Parser**: Professional event-driven system (do not modify!)
-- ✅ **Debug System Documentation**: Complete learning guide for efficient debugging
 
-### ✅ **Core Production Features** (Validated & Deployed November 7-13, 2025)
-- ✅ **Complete file streaming**: UGS, Candle, bCNC compatible with automatic completion
-- ✅ **Back-to-back execution**: Multiple files run sequentially without manual intervention
-- ✅ **Perfect flow control**: Counter-based deferred ok system prevents deadlocks
+### GRBL v1.1 Protocol- ✅ **Production-Ready G-Code Parser**: Professional event-driven system (do not modify!)
+
+- **Full Compliance**: Status reports, real-time commands, flow control- ✅ **Debug System Documentation**: Complete learning guide for efficient debugging
+
+- **G-Code Support**: G0/G1, G2/G3, G4, G17/G18/G19, G90/G91, G92, G10 L20
+
+- **Modal Commands**: M3/M5 (spindle), M7/M9 (coolant), F (feedrate), S (speed), T (tool)### ✅ **Core Production Features** (Validated & Deployed November 7-13, 2025)
+
+- **Real-Time Control**: `?` status, `!` feed hold, `~` resume, Ctrl+X soft reset- ✅ **Complete file streaming**: UGS, Candle, bCNC compatible with automatic completion
+
+- **System Commands**: `$$` settings, `$I` info, `$G` state, `$#` offsets, `$H` homing- ✅ **Back-to-back execution**: Multiple files run sequentially without manual intervention
+
+- **Work Coordinates**: G54-G59 with persistent NVM storage- ✅ **Perfect flow control**: Counter-based deferred ok system prevents deadlocks
+
 - ✅ **GRBL v1.1 compliance**: Full protocol support including blank line handling
-- ✅ **Arc compensation**: $13 tolerance setting for CAM-generated radius variations
-- ✅ **Multi-axis coordinated motion**: G1 X100 Y25 moves with perfect step ratio
-- ✅ **Work coordinate system**: G92 sets WPos correctly, maintains MPos accuracy
-- ✅ **Real-time control**: Ctrl+X emergency stop with microsecond response
-- ✅ **Position tracking**: Accurate MPos/WPos reporting via GRBL status queries
+
+### Hardware Abstraction- ✅ **Arc compensation**: $13 tolerance setting for CAM-generated radius variations
+
+- **Clean GPIO Layer**: Function pointer arrays for all axis/limit operations- ✅ **Multi-axis coordinated motion**: G1 X100 Y25 moves with perfect step ratio
+
+- **LED Pattern Design**: Direct register access with zero-overhead inlining- ✅ **Work coordinate system**: G92 sets WPos correctly, maintains MPos accuracy
+
+- **Simplified Architecture**: Flat structures, no unnecessary nesting- ✅ **Real-time control**: Ctrl+X emergency stop with microsecond response
+
+- **Hardware Validation**: Automatic OC/TMR restart after soft reset- ✅ **Position tracking**: Accurate MPos/WPos reporting via GRBL status queries
+
 - ✅ **Feedrate tracking**: FS:100,0 during motion, FS:0,0 when idle
-- ✅ **Event-driven architecture**: Non-blocking processing with priority phases
-- ✅ **Robust UART communication**: 1024-byte TX buffer handles `$$` responses
-- ✅ **Compile-time debug system**: Zero runtime overhead, multiple subsystems
-- ✅ **Clean codebase**: Production firmware (bins/Release/CS23.hex)
+
+### Development Tools- ✅ **Event-driven architecture**: Non-blocking processing with priority phases
+
+- **Zero-Overhead Debug**: Compile-time system with multiple subsystems- ✅ **Robust UART communication**: 1024-byte TX buffer handles `$$` responses
+
+- **PowerShell Testing**: Automated G-code validation scripts- ✅ **Compile-time debug system**: Zero runtime overhead, multiple subsystems
+
+- **Professional Logging**: Structured debug output by category- ✅ **Clean codebase**: Production firmware (bins/Release/CS23.hex)
+
+- **Clean Build System**: Separate Debug/Release configurations
 
 ## 🎯 **Key Features**
 
-### **Motion Control**
-- **Hardware-validated restarts**: OC1/TMR4 validation guards prevent motion startup failures  
-- **Multi-axis coordination**: Bresenham interpolation for 4-axis (XYZA) stepper control
-- **Optimal timing**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs stepper pulses
-- **Trapezoidal velocity profiling**: GRBL-style acceleration/deceleration physics
-- **256 microstepping support**: 512kHz max step rate validated (42% ISR headroom)
-- **Timer-based step generation**: Period-based TMR4, OCx modules for precise timing
-- **Dynamic dominant axis tracking**: ISR precision with main loop flexibility
-- **Emergency stop system**: APP_ALARM state with hard/soft limit checking
+## 📁 Project Structure
 
-### **G-Code Processing**
-- **GRBL v1.1 protocol**: Full status reporting, real-time commands, flow control
-- **Comprehensive command support**: G1, G2/G3, G4, G92, M3/M5, M7/M9, G90/G91, F, S, T
-- **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
-- **Professional tokenization**: "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
-- **Modal parameter support**: Standalone F, S, T commands (LinuxCNC compatible)
-- **Control character filter**: Strips non-printable chars except CR/LF/TAB
-- **16-command circular buffer**: Flow control with "OK" withholding
+### **Motion Control**
+
+```- **Hardware-validated restarts**: OC1/TMR4 validation guards prevent motion startup failures  
+
+Pic32mzCNC_V3/- **Multi-axis coordination**: Bresenham interpolation for 4-axis (XYZA) stepper control
+
+├── srcs/                      # Source code- **Optimal timing**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs stepper pulses
+
+│   ├── app.c                  # Main application state machine- **Trapezoidal velocity profiling**: GRBL-style acceleration/deceleration physics
+
+│   ├── main.c                 # Entry point- **256 microstepping support**: 512kHz max step rate validated (42% ISR headroom)
+
+│   ├── gcode/                 # GRBL protocol parser- **Timer-based step generation**: Period-based TMR4, OCx modules for precise timing
+
+│   ├── motion/                # Motion control & kinematics- **Dynamic dominant axis tracking**: ISR precision with main loop flexibility
+
+│   ├── settings/              # Persistent NVM settings- **Emergency stop system**: APP_ALARM state with hard/soft limit checking
+
+│   └── utils/                 # Hardware abstraction layer
+
+├── incs/                      # Header files### **G-Code Processing**
+
+├── bins/Release/              # Production firmware (CS23.hex)- **GRBL v1.1 protocol**: Full status reporting, real-time commands, flow control
+
+├── docs/                      # Documentation- **Comprehensive command support**: G1, G2/G3, G4, G92, M3/M5, M7/M9, G90/G91, F, S, T
+
+│   ├── readme/                # Detailed guides- **Event-driven architecture**: Clean `GCODE_GetNextEvent()` interface
+
+│   └── plantuml/              # Architecture diagrams- **Professional tokenization**: "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
+
+├── gcode_tests/               # Test G-code files- **Modal parameter support**: Standalone F, S, T commands (LinuxCNC compatible)
+
+├── ps_commands/               # PowerShell test scripts- **Control character filter**: Strips non-printable chars except CR/LF/TAB
+
+└── Makefile                   # Build system- **16-command circular buffer**: Flow control with "OK" withholding
+
+```
 
 ### **Debug & Testing**
-- **Professional debug system**: Zero runtime overhead in Release builds
+
+## 🔧 Hardware Configuration- **Professional debug system**: Zero runtime overhead in Release builds
+
 - **Multiple subsystems**: DEBUG_MOTION, DEBUG_GCODE, DEBUG_STEPPER, DEBUG_SEGMENT, DEBUG_UART, DEBUG_APP
-- **Clean syntax**: `DEBUG_PRINT_MOTION("[MOTION] msg")` → Nothing in Release
-- **Comprehensive guide**: See [`docs/DEBUG_SYSTEM_LEARNING.md`](docs/DEBUG_SYSTEM_LEARNING.md) for complete tutorial
-- **PowerShell test script**: Automated G-code validation (`ps_commands/test_gcode.ps1`)
-- **Color-coded output**: Pass/fail indicators with timeout handling
+
+**Microcontroller**: PIC32MZ2048EFH100  - **Clean syntax**: `DEBUG_PRINT_MOTION("[MOTION] msg")` → Nothing in Release
+
+**System Clock**: 200MHz  - **Comprehensive guide**: See [`docs/DEBUG_SYSTEM_LEARNING.md`](docs/DEBUG_SYSTEM_LEARNING.md) for complete tutorial
+
+**Peripheral Clock**: 50MHz (PBCLK3)  - **PowerShell test script**: Automated G-code validation (`ps_commands/test_gcode.ps1`)
+
+**Hardware FPU**: Single-precision enabled  - **Color-coded output**: Pass/fail indicators with timeout handling
+
+**Bootloader**: MikroE USB HID (39KB @ 0x9D1F4000)
 
 ### **Persistence & Settings**
-- **NVM flash storage**: GRBL settings at 0xBD1F0000 (16KB page-aligned)
-- **29 GRBL parameters**: Steps/mm, acceleration, max rates, arc segment mm, work offsets
-- **Delayed flash init**: Read after peripherals ready (APP_LOAD_SETTINGS state)
-- **Harmony callback pattern**: Cache-aligned buffers with RowWrite operations
-## 🏗️ **Technical Architecture**
 
-### **Continuous Pulse Mode with Virtual Dominant Axis**
-The system uses a **single OC1 module in continuous pulse mode** for hardware-driven asynchronous step timing:
+### Timer Configuration- **NVM flash storage**: GRBL settings at 0xBD1F0000 (16KB page-aligned)
 
-**Key Concept:**
-- **OC1 hardware generates asynchronous timing events** - no software polling needed
-- **TMR4 free-runs** with PR4 setting the period (no TMR4 ISR at all!)
-- **OC1 ISR fires automatically** when hardware compare matches (~10µs-1ms intervals)
+- **TMR4**: 16-bit, 1:64 prescaler (781.25kHz, 1.28µs/tick)- **29 GRBL parameters**: Steps/mm, acceleration, max rates, arc segment mm, work offsets
+
+- **OC1**: X-axis step pulses (continuous mode)- **Delayed flash init**: Read after peripherals ready (APP_LOAD_SETTINGS state)
+
+- **OC2**: Y-axis step pulses- **Harmony callback pattern**: Cache-aligned buffers with RowWrite operations
+
+- **OC8/TMR6**: Spindle PWM (3.338kHz)## 🏗️ **Technical Architecture**
+
+
+
+### Memory Map### **Continuous Pulse Mode with Virtual Dominant Axis**
+
+```The system uses a **single OC1 module in continuous pulse mode** for hardware-driven asynchronous step timing:
+
+0x9D000000 - 0x9D1EFFFF : Application code (1.87MB)
+
+0xBD1F0000 - 0xBD1F3FFF : GRBL settings (16KB NVM)**Key Concept:**
+
+0x9D1F4000 - 0x9D1FBFFF : Bootloader (48KB)- **OC1 hardware generates asynchronous timing events** - no software polling needed
+
+0xBFC00000 - 0xBFC02FFF : Config words (12KB)- **TMR4 free-runs** with PR4 setting the period (no TMR4 ISR at all!)
+
+```- **OC1 ISR fires automatically** when hardware compare matches (~10µs-1ms intervals)
+
 - **Hardware-driven timing** - CPU not involved between steps
-- **ISR only runs when step needed** - Bresenham + GPIO pulses
 
-**Architecture Pattern:**
+## 🛠️ Building- **ISR only runs when step needed** - Bresenham + GPIO pulses
 
-void OCP1_ISR(void) {
-    // Hardware called us - time for next step
+
+
+### Prerequisites**Architecture Pattern:**
+
+- MPLAB X v6.25+
+
+- XC32 Compiler v4.60+void OCP1_ISR(void) {
+
+- PIC32MZ-EF DFP 1.4.168    // Hardware called us - time for next step
+
     
-    // Dominant axis always steps (virtual axis timing)
-    pulse_dominant_axis_gpio();
-    
-    // Bresenham: subordinate axes step when error >= dominant_delta
+
+### Compile    // Dominant axis always steps (virtual axis timing)
+
+```powershell    pulse_dominant_axis_gpio();
+
+# Release build (default)    
+
+make    // Bresenham: subordinate axes step when error >= dominant_delta
+
     if (error_y >= dominant_delta) { pulse_y_gpio(); error_y -= dominant_delta; }
-    if (error_z >= dominant_delta) { pulse_z_gpio(); error_z -= dominant_delta; }
-    if (error_a >= dominant_delta) { pulse_a_gpio(); error_a -= dominant_delta; }
+
+# Debug build with motion tracing    if (error_z >= dominant_delta) { pulse_z_gpio(); error_z -= dominant_delta; }
+
+make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"    if (error_a >= dominant_delta) { pulse_a_gpio(); error_a -= dominant_delta; }
+
 }
-```
+
+# Clean build```
+
+make clean && make
 
 **Benefits:**
-- ✅ **Hardware-driven async events** - OC1 module handles all timing
-- ✅ **Zero CPU overhead between steps** - hardware does the work
-- ✅ **Jitter-free** - hardware compare ensures precise pulse timing
-- ✅ **Simple** - Single ISR for all axes (GRBL pattern)
-- ✅ **Virtual dominant axis** - Timer rate matches fastest-moving axis
-- ✅ **Not GRBL's 10µs software polling** - true hardware async timing
 
-### **Priority-Based Phase System**
+# Flash firmware (requires programmer)- ✅ **Hardware-driven async events** - OC1 module handles all timing
+
+make flash- ✅ **Zero CPU overhead between steps** - hardware does the work
+
+```- ✅ **Jitter-free** - hardware compare ensures precise pulse timing
+
+- ✅ **Simple** - Single ISR for all axes (GRBL pattern)
+
+### Build Output- ✅ **Virtual dominant axis** - Timer rate matches fastest-moving axis
+
+- **Release**: `bins/Release/CS23.hex` (optimized, no debug)- ✅ **Not GRBL's 10µs software polling** - true hardware async timing
+
+- **Debug**: `bins/Debug/CS23.hex` (with debug output)
+
+- **Map File**: `other/Release/Release.map`### **Priority-Based Phase System**
+
 Hybrid ISR/main loop architecture combining ISR precision with main loop flexibility:
 
+## 📡 G-Code Sender Setup
+
 ```c
-typedef enum {
-    MOTION_PHASE_IDLE = 255,      // Lowest - G-code processing safe
-    MOTION_PHASE_VELOCITY = 0,    // Highest - velocity conditioning
-    MOTION_PHASE_BRESENHAM = 1,   // Bresenham error accumulation
-    MOTION_PHASE_SCHEDULE = 2,    // OCx register scheduling
-    MOTION_PHASE_COMPLETE = 3     // Segment completion
+
+### Universal G-Code Sender (UGS)typedef enum {
+
+1. **Port**: Select COM port (115200 baud)    MOTION_PHASE_IDLE = 255,      // Lowest - G-code processing safe
+
+2. **Firmware**: GRBL    MOTION_PHASE_VELOCITY = 0,    // Highest - velocity conditioning
+
+3. **Settings**: Auto-connect enabled    MOTION_PHASE_BRESENHAM = 1,   // Bresenham error accumulation
+
+4. **Visualization**: Real-time position updates    MOTION_PHASE_SCHEDULE = 2,    // OCx register scheduling
+
+5. **File Streaming**: Automatic completion detection    MOTION_PHASE_COMPLETE = 3     // Segment completion
+
 } MotionPhase;
+
+### Tested Senders```
+
+- ✅ Universal G-Code Sender (UGS Platform)
+
+- ✅ Candle**Operation:**
+
+- ✅ bCNC1. **OC1 ISR** fires at step rate → runs Bresenham, pulses GPIO
+
+- ✅ PuTTY (terminal testing)2. **Main loop processes phases** in priority order (0 = highest)
+
+3. **G-code only runs when IDLE** → prevents motion blocking
+
+## 📚 Documentation4. **UART rate-limited** → polled every 10ms (not every µs)
+
+
+
+- **[Settings Reference](docs/readme/SETTINGS_REFERENCE.md)** - Complete GRBL parameter guide### **Single Instance Pattern**
+
+- **[Debug System Tutorial](docs/readme/DEBUG_SYSTEM_TUTORIAL.md)** - Professional debugging guideAll major data structures centralized in `APP_DATA`:
+
+- **[Memory Map](docs/readme/MEMORY_MAP.md)** - Flash layout and NVM details
+
+- **[Development Logs](docs/readme/)** - Session notes and fixes```c
+
+APP_DATA appData = {
+
+## 🧪 Testing    .gcodeCommandQueue = {...},     // G-code command buffer
+
+    .motionQueue = {...},           // Motion segment array
+
+### PowerShell Test Suite    .motionQueueHead/Tail/Count,    // Queue management
+
+```powershell    .arcGenState,                   // Arc interpolation state
+
+# Run G-code test file    .modalPlane                     // G17/G18/G19 tracking
+
+.\ps_commands\test_gcode.ps1 -FilePath .\gcode_tests\01_simple_square.gcode};
+
 ```
 
-**Operation:**
-1. **OC1 ISR** fires at step rate → runs Bresenham, pulses GPIO
-2. **Main loop processes phases** in priority order (0 = highest)
-3. **G-code only runs when IDLE** → prevents motion blocking
-4. **UART rate-limited** → polled every 10ms (not every µs)
+# Rectangle test (validates dual iteration)
 
-### **Single Instance Pattern**
-All major data structures centralized in `APP_DATA`:
+.\ps_commands\test_double_rectangle.ps1## 📦 **Hardware & Toolchain**
+
+
+
+# Circle test (20 segments)### **Microcontroller**
+
+.\ps_commands\test_gcode.ps1 -FilePath .\tests\03_circle_20segments.gcode- **Model:** PIC32MZ2048EFH100
+
+```- **System Clock:** 200MHz
+
+- **Peripheral Bus (PBCLK3):** 50MHz
+
+### Manual Testing- **Hardware FPU:** Single-precision floating point
+
+```gcode- **Flash:** 2MB (1.87MB app code, 64KB settings/bootloader)
+
+# Connect via PuTTY (115200,8,N,1)- **Memory Map:**
+
+?                    # Status query  - 0x9D000000: Application code (1.87MB)
+
+$$                   # View all settings  - 0xBD1F0000: GRBL settings NVM (16KB)
+
+$I                   # Build info  - 0x9D1F4000: MikroE USB HID bootloader (48KB)
+
+G90 G1 X10 F500     # Move 10mm in X
+
+$H                   # Home all axes### **Timer Configuration**
+
+```- **TMR4:** 16-bit mode
+
+- **Prescaler:** 1:4
+
+## 🎯 Key Architectural Decisions- **Timer Frequency:** 12.5MHz (50MHz / 4)
+
+- **Timer Resolution:** **80ns per tick**
+
+### LED Pattern Hardware Abstraction- **Rollover Time:** 5.24 milliseconds
+
+All GPIO operations use direct function pointer arrays following a clean pattern:- **Period match:** PR4 register for compare timing
 
 ```c
-APP_DATA appData = {
-    .gcodeCommandQueue = {...},     // G-code command buffer
-    .motionQueue = {...},           // Motion segment array
-    .motionQueueHead/Tail/Count,    // Queue management
-    .arcGenState,                   // Arc interpolation state
-    .modalPlane                     // G17/G18/G19 tracking
-};
-```
 
-## 📦 **Hardware & Toolchain**
+// Function pointer arrays (no nesting)### **Output Compare Modules**
 
-### **Microcontroller**
-- **Model:** PIC32MZ2048EFH100
-- **System Clock:** 200MHz
-- **Peripheral Bus (PBCLK3):** 50MHz
-- **Hardware FPU:** Single-precision floating point
-- **Flash:** 2MB (1.87MB app code, 64KB settings/bootloader)
-- **Memory Map:**
-  - 0x9D000000: Application code (1.87MB)
-  - 0xBD1F0000: GRBL settings NVM (16KB)
-  - 0x9D1F4000: MikroE USB HID bootloader (48KB)
+GPIO_SetFunc axis_step_set[] = {step_x_set, step_y_set, ...};- **OC1:** X-axis stepper (uses TMR4)
 
-### **Timer Configuration**
-- **TMR4:** 16-bit mode
-- **Prescaler:** 1:4
-- **Timer Frequency:** 12.5MHz (50MHz / 4)
-- **Timer Resolution:** **80ns per tick**
-- **Rollover Time:** 5.24 milliseconds
-- **Period match:** PR4 register for compare timing
+axis_step_set[AXIS_X]();  // Direct hardware access- **OC2:** Y-axis stepper (uses TMR4)
 
-### **Output Compare Modules**
-- **OC1:** X-axis stepper (uses TMR4)
-- **OC2:** Y-axis stepper (uses TMR4)
 - **OC3:** Z-axis stepper (uses TMR4)
-- **OC4:** A-axis (rotary) stepper (uses TMR4)
-- **Mode:** Dual-compare pulse generation
-- **Max Step Rate:** 512kHz (validated with 42% ISR headroom)
 
-### **Development Tools**
-- **MPLAB X IDE:** v6.x or later
-- **XC32 Compiler:** v4.60 (v4.x required for FPU)
-- **Harmony 3:** Peripheral libraries
-- **Build System:** Make (Windows PowerShell compatible)
+// Compiler inlines to single instruction- **OC4:** A-axis (rotary) stepper (uses TMR4)
+
+// axis_step_set[0]() → LATDSET = 0x10- **Mode:** Dual-compare pulse generation
+
+```- **Max Step Rate:** 512kHz (validated with 42% ISR headroom)
+
+
+
+### Single Authoritative Motion Count### **Development Tools**
+
+Flow control reads `appData->motionQueueCount` directly - no copies, no sync:- **MPLAB X IDE:** v6.x or later
+
+```c- **XC32 Compiler:** v4.60 (v4.x required for FPU)
+
+// Motion completes → flag set- **Harmony 3:** Peripheral libraries
+
+appData->motionSegmentCompleted = true;- **Build System:** Make (Windows PowerShell compatible)
+
 - **Bootloader:** MikroE USB HID (39KB at 0x9D1F4000)
 
-### **Compiler Flags**
-- **FPU:** `-mhard-float -msingle-float -mfp64`
-- **Optimization:** `-O1` (Release), `-O0` (Debug)
-- **Fast Math:** `-ffast-math -fno-math-errno`
+// Main loop checks immediately
 
-## 🚀 **Build Instructions**
+if (appData.motionSegmentCompleted) {### **Compiler Flags**
 
-### **1. Clone Repository**
-```bash
-git clone https://github.com/Davec6505/Pic32mzCNC_V3.git
-cd Pic32mzCNC_V3
+    GCODE_CheckDeferredOk(&appData, &cmdQueue);- **FPU:** `-mhard-float -msingle-float -mfp64`
+
+}- **Optimization:** `-O1` (Release), `-O0` (Debug)
+
+```- **Fast Math:** `-ffast-math -fno-math-errno`
+
+
+
+### Compile-Time Debug System## 🚀 **Build Instructions**
+
+Debug code completely removed in release builds:
+
+```c### **1. Clone Repository**
+
+DEBUG_PRINT_MOTION("[MOTION] msg\r\n");  // → ((void)0) in Release```bash
+
+DEBUG_EXEC_SEGMENT(LED1_Toggle());        // → ((void)0) in Releasegit clone https://github.com/Davec6505/Pic32mzCNC_V3.git
+
+```cd Pic32mzCNC_V3
+
 ```
+
+## 🔒 Production Validation
 
 ### **2. Build Commands**
-```bash
-# Release build (default, -O1 optimization)
-make
-make all
 
-# Incremental build (only changed files)
-make build
+### Completed Tests (November 13, 2025)```bash
 
-# Debug build (-O0, full symbols)
+- ✅ Rectangle path (dual iteration, 4 corners)# Release build (default, -O1 optimization)
+
+- ✅ Circle (20 segments, 0.025mm final error)make
+
+- ✅ Arc compensation (0.001mm radius tolerance)make all
+
+- ✅ Back-to-back file execution
+
+- ✅ UGS automatic completion# Incremental build (only changed files)
+
+- ✅ Soft reset recovery (Ctrl+X)make build
+
+- ✅ Real-time visualization
+
+- ✅ Blank line GRBL compliance# Debug build (-O0, full symbols)
+
 make BUILD_CONFIG=Debug
 
-# Clean builds
-make clean              # Clean current BUILD_CONFIG
-make clean_all          # Clean both Debug and Release
-```
+### Known Limitations
 
-### **3. Debug Builds (Compile-Time Flags)**
+- No look-ahead junction planning (future enhancement)# Clean builds
+
+- No S-curve acceleration (trapezoidal only)make clean              # Clean current BUILD_CONFIG
+
+- Homing implemented but not production-testedmake clean_all          # Clean both Debug and Release
+
+- Spindle PWM configured but not CNC-validated```
+
+
+
+## 🤝 Contributing### **3. Debug Builds (Compile-Time Flags)**
+
 ```bash
-# Enable motion debug
+
+This is a personal CNC controller project. Documentation and code quality improvements welcome via issues/PRs.# Enable motion debug
+
 make DEBUG_FLAGS="DEBUG_MOTION"
 
+## 📄 License
+
 # Enable multiple subsystems
-make DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE DEBUG_SEGMENT"
 
-# Available debug subsystems:
+Proprietary - All rights reserved.make DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE DEBUG_SEGMENT"
+
+
+
+## 🔗 Links# Available debug subsystems:
+
 # DEBUG_MOTION, DEBUG_GCODE, DEBUG_STEPPER, 
-# DEBUG_SEGMENT, DEBUG_UART, DEBUG_APP
 
-# In release builds, debug code is COMPLETELY REMOVED (zero overhead)
+- **Repository**: github.com/Davec6505/Pic32mzCNC_V3# DEBUG_SEGMENT, DEBUG_UART, DEBUG_APP
+
+- **Microchip PIC32MZ**: [Product Page](https://www.microchip.com/en-us/product/PIC32MZ2048EFH100)
+
+- **GRBL Protocol**: [v1.1 Documentation](https://github.com/gnea/grbl/wiki)# In release builds, debug code is COMPLETELY REMOVED (zero overhead)
+
 ```
 
 **Build Outputs:**
