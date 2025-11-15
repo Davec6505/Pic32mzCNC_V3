@@ -1266,18 +1266,45 @@ GND           → Signal Ground
 
 For complete MCC configuration and pin alternate function settings, refer to the project's `.mcc` configuration files and GPIO PLIB generated code in `srcs/config/default/peripheral/gpio/`.
 
-## 📋 **TODO: Future Features** (November 13, 2025)
+## 📋 **TODO: Future Features** (November 15, 2025)
 
-### **Priority 1: Production Testing** 
-**Status**: ⏳ In Progress  
-**Goal**: Validate current implementation with real CNC operations before adding features
+### **Priority 1: Production Hardware Testing** ⭐ **HIGHEST PRIORITY**
+**Status**: ⏳ Ready for Testing  
+**Goal**: Validate production-ready firmware (264KB) on actual CNC hardware before adding features
 
-Tasks:
-- [ ] Test with actual stepper motors and drivers
+**Why**: You have production-ready firmware but haven't tested on actual CNC hardware yet.
+
+**Tasks**:
+- [ ] Test with real stepper motors and drivers
 - [ ] Validate position accuracy over full travel range
-- [ ] Test complex toolpaths from CAM software
-- [ ] Verify junction deviation behavior on real cuts
-- [ ] Tune GRBL settings ($-parameters) for specific machine
+- [ ] Run complex CAM-generated toolpaths
+- [ ] Tune GRBL settings ($-parameters) for your machine
+- [ ] Document any issues found
+
+**Benefit**: Validates everything works in real-world conditions before adding more features
+
+---
+
+### **Priority 2: Probing System (G38.x)** ⭐ **HIGH VALUE**
+**Status**: ❌ Not Started  
+**Dependencies**: Production testing complete  
+**Use Case**: Automatic work coordinate zero-setting, tool length measurement, edge finding
+
+**Why**: Extremely practical for real CNC work - used in almost every setup operation
+
+**Features to implement**:
+- [ ] G38.2 - Probe toward workpiece, stop on contact, error if not triggered
+- [ ] G38.3 - Probe toward workpiece, stop on contact, no error
+- [ ] G38.4 - Probe away from workpiece, stop on loss of contact, error if not triggered
+- [ ] G38.5 - Probe away from workpiece, stop on loss of contact, no error
+- [ ] Probe hardware integration (digital input pin)
+- [ ] Probe position storage and reporting in `$#` command
+- [ ] Probe feed rate limits and safety checks
+- [ ] Integration with tool length offset (G43)
+
+**Estimated Effort**: 6-8 hours  
+**Files to modify**: `gcode_parser.c`, `motion.c`, `app.c`, `settings.c`  
+**Practical Value**: HIGH - Used in almost every CNC setup operation
 
 ### **Priority 2: Probing System (G38.x)**
 **Status**: ❌ Not Started  
