@@ -15,17 +15,11 @@
 // Single instance of work coordinates managed by kinematics (physics module)
 static WorkCoordinateSystem work_coordinates;
 
-// Step accumulators - preserve fractional steps across arc segments (file scope for reset access)
-static float step_accumulator_x = 0.0f;
-static float step_accumulator_y = 0.0f;
-static float step_accumulator_z = 0.0f;
-static float step_accumulator_a = 0.0f;
-
 void KINEMATICS_Initialize(void) {
     // Initialize work coordinate system to default (G54)
-    work_coordinates.offset.x = 0.0f;
-    work_coordinates.offset.y = 0.0f;
-    work_coordinates.offset.z = 0.0f;
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        SET_COORDINATE_AXIS(&work_coordinates.offset, axis, 0.0f);
+    }
 }
 
 WorkCoordinateSystem* KINEMATICS_GetWorkCoordinates(void) {
@@ -33,15 +27,19 @@ WorkCoordinateSystem* KINEMATICS_GetWorkCoordinates(void) {
 }
 
 void KINEMATICS_SetWorkOffset(float x_offset, float y_offset, float z_offset) {
-    work_coordinates.offset.x = x_offset;
-    work_coordinates.offset.y = y_offset;
-    work_coordinates.offset.z = z_offset;
+    // Array-based assignment for easy axis scaling
+    float offsets[NUM_AXIS] = {x_offset, y_offset, z_offset, 0.0f};
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        SET_COORDINATE_AXIS(&work_coordinates.offset, axis, offsets[axis]);
+    }
 }
 
 void KINEMATICS_SetWorkCoordinates(float x, float y, float z) {
-    work_coordinates.offset.x = x;
-    work_coordinates.offset.y = y;
-    work_coordinates.offset.z = z;
+    // Array-based assignment for easy axis scaling
+    float coords[NUM_AXIS] = {x, y, z, 0.0f};
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        SET_COORDINATE_AXIS(&work_coordinates.offset, axis, coords[axis]);
+    }
 }
 
 // Get active work coordinate system offset based on current modal state
@@ -69,10 +67,15 @@ CoordinatePoint KINEMATICS_WorkToMachine(CoordinatePoint work_pos) {
     CoordinatePoint machine_pos;
     
     // Machine position = Work position + Work coordinate offset
-    machine_pos.x = work_pos.x + work_coordinates.offset.x;
-    machine_pos.y = work_pos.y + work_coordinates.offset.y;
-    machine_pos.z = work_pos.z + work_coordinates.offset.z;
-    machine_pos.a = work_pos.a;  // A axis typically not affected by work coordinates
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        if (axis == AXIS_A) {
+            // A axis typically not affected by work coordinates
+            SET_COORDINATE_AXIS(&machine_pos, axis, GET_COORDINATE_AXIS(&work_pos, axis));
+        } else {
+            SET_COORDINATE_AXIS(&machine_pos, axis,
+                GET_COORDINATE_AXIS(&work_pos, axis) + GET_COORDINATE_AXIS(&work_coordinates.offset, axis));
+        }
+    }
     
     return machine_pos;
 }
@@ -81,10 +84,15 @@ CoordinatePoint KINEMATICS_MachineToWork(CoordinatePoint machine_pos) {
     CoordinatePoint work_pos;
     
     // Work position = Machine position - Work coordinate offset
-    work_pos.x = machine_pos.x - work_coordinates.offset.x;
-    work_pos.y = machine_pos.y - work_coordinates.offset.y;
-    work_pos.z = machine_pos.z - work_coordinates.offset.z;
-    work_pos.a = machine_pos.a;  // A axis typically not affected by work coordinates
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        if (axis == AXIS_A) {
+            // A axis typically not affected by work coordinates
+            SET_COORDINATE_AXIS(&work_pos, axis, GET_COORDINATE_AXIS(&machine_pos, axis));
+        } else {
+            SET_COORDINATE_AXIS(&work_pos, axis,
+                GET_COORDINATE_AXIS(&machine_pos, axis) - GET_COORDINATE_AXIS(&work_coordinates.offset, axis));
+        }
+    }
     
     return work_pos;
 }
@@ -97,11 +105,12 @@ CoordinatePoint KINEMATICS_WorkToMachineWithWCS(CoordinatePoint work_pos, uint8_
     // Get active WCS offset (includes G92 offset)
     KINEMATICS_GetActiveWCSOffset(activeWCS, &x_offset, &y_offset, &z_offset);
     
-    // Machine position = Work position + WCS offset + G92 offset
-    machine_pos.x = work_pos.x + x_offset;
-    machine_pos.y = work_pos.y + y_offset;
-    machine_pos.z = work_pos.z + z_offset;
-    machine_pos.a = work_pos.a;  // A axis typically not affected by work coordinates
+    // Array-based conversion with loop for easy axis scaling
+    float offsets[NUM_AXIS] = {x_offset, y_offset, z_offset, 0.0f};
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        SET_COORDINATE_AXIS(&machine_pos, axis, 
+            GET_COORDINATE_AXIS(&work_pos, axis) + offsets[axis]);
+    }
     
     return machine_pos;
 }
@@ -113,11 +122,12 @@ CoordinatePoint KINEMATICS_MachineToWorkWithWCS(CoordinatePoint machine_pos, uin
     // Get active WCS offset (includes G92 offset)
     KINEMATICS_GetActiveWCSOffset(activeWCS, &x_offset, &y_offset, &z_offset);
     
-    // Work position = Machine position - WCS offset - G92 offset
-    work_pos.x = machine_pos.x - x_offset;
-    work_pos.y = machine_pos.y - y_offset;
-    work_pos.z = machine_pos.z - z_offset;
-    work_pos.a = machine_pos.a;  // A axis typically not affected by work coordinates
+    // Array-based conversion with loop for easy axis scaling
+    float offsets[NUM_AXIS] = {x_offset, y_offset, z_offset, 0.0f};
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        SET_COORDINATE_AXIS(&work_pos, axis, 
+            GET_COORDINATE_AXIS(&machine_pos, axis) - offsets[axis]);
+    }
     
     return work_pos;
 }
@@ -137,53 +147,40 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     CoordinatePoint machine_start = KINEMATICS_WorkToMachine(start);
     CoordinatePoint machine_end = KINEMATICS_WorkToMachine(end);
     
-    // Calculate distance in mm using FPU (PRESERVE SIGN for direction!)
-    float dx_mm = machine_end.x - machine_start.x;  // ✅ Signed - positive=forward, negative=reverse
-    float dy_mm = machine_end.y - machine_start.y;
-    float dz_mm = machine_end.z - machine_start.z;
-    float da_mm = machine_end.a - machine_start.a;
+    // ✅ ARRAY-BASED: Calculate distance in mm (preserve sign for direction)
+    float delta_mm[NUM_AXIS];
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        delta_mm[axis] = GET_COORDINATE_AXIS(&machine_end, axis) - GET_COORDINATE_AXIS(&machine_start, axis);
+    }
     
     // Convert mm to steps WITH ACCUMULATION to preserve fractional steps
-    step_accumulator_x += dx_mm * stepper->steps_per_mm_x;
-    step_accumulator_y += dy_mm * stepper->steps_per_mm_y;
-    step_accumulator_z += dz_mm * stepper->steps_per_mm_z;
-    step_accumulator_a += da_mm * stepper->steps_per_deg_a;
+    // Using static file-scope accumulators
+    static float step_accumulator[NUM_AXIS] = {0.0f, 0.0f, 0.0f, 0.0f};
     
-    // Extract integer steps and keep remainder
-    segment_buffer->delta_x = (int32_t)step_accumulator_x;
-    segment_buffer->delta_y = (int32_t)step_accumulator_y;
-    segment_buffer->delta_z = (int32_t)step_accumulator_z;
-    segment_buffer->delta_a = (int32_t)step_accumulator_a;
-    
-    step_accumulator_x -= (float)segment_buffer->delta_x;
-    step_accumulator_y -= (float)segment_buffer->delta_y;
-    step_accumulator_z -= (float)segment_buffer->delta_z;
-    step_accumulator_a -= (float)segment_buffer->delta_a;
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        step_accumulator[axis] += delta_mm[axis] * stepper->steps_per_mm[axis];
+        segment_buffer->delta[axis] = (int32_t)step_accumulator[axis];
+        step_accumulator[axis] -= (float)segment_buffer->delta[axis];
+    }
     
     DEBUG_PRINT_MOTION("[KINEMATICS] dx=%.4f dy=%.4f → steps: X=%ld Y=%ld Z=%ld A=%ld (acc: %.3f,%.3f)\r\n",
-                      dx_mm, dy_mm, segment_buffer->delta_x, segment_buffer->delta_y,
-                      segment_buffer->delta_z, segment_buffer->delta_a,
-                      step_accumulator_x, step_accumulator_y);
+                      delta_mm[AXIS_X], delta_mm[AXIS_Y], 
+                      segment_buffer->delta[AXIS_X], segment_buffer->delta[AXIS_Y],
+                      segment_buffer->delta[AXIS_Z], segment_buffer->delta[AXIS_A],
+                      step_accumulator[AXIS_X], step_accumulator[AXIS_Y]);
     
-    // Determine dominant axis (highest ABSOLUTE step count) - for Bresenham and timing
-    int32_t max_delta = abs(segment_buffer->delta_x);
+    // ✅ ARRAY-BASED: Determine dominant axis (highest ABSOLUTE step count) - for Bresenham and timing
+    int32_t max_delta = 0;
     segment_buffer->dominant_axis = AXIS_X;
     E_AXIS limiting_axis = AXIS_X;
     
-    if(abs(segment_buffer->delta_y) > max_delta) {
-        max_delta = abs(segment_buffer->delta_y);
-        segment_buffer->dominant_axis = AXIS_Y;
-        limiting_axis = AXIS_Y;
-    }
-    if(abs(segment_buffer->delta_z) > max_delta) {
-        max_delta = abs(segment_buffer->delta_z);
-        segment_buffer->dominant_axis = AXIS_Z;
-        limiting_axis = AXIS_Z;
-    }
-    if(abs(segment_buffer->delta_a) > max_delta) {
-        max_delta = abs(segment_buffer->delta_a);
-        segment_buffer->dominant_axis = AXIS_A;
-        limiting_axis = AXIS_A;
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        int32_t current_delta = abs(segment_buffer->delta[axis]);
+        if (current_delta > max_delta) {
+            max_delta = current_delta;
+            segment_buffer->dominant_axis = axis;
+            limiting_axis = axis;
+        }
     }
     
     // Store dominant delta (used by Bresenham in ISR)
@@ -198,15 +195,14 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         feedrate_mm_sec = 600.0f / 60.0f;
     }
     
-    // Get max_rate and acceleration for limiting axis using axis config
-    const AxisConfig* axis_cfg = UTILS_GetAxisConfig(limiting_axis);
-    if (!axis_cfg) {
-        // Fallback to X axis if invalid
-        axis_cfg = UTILS_GetAxisConfig(AXIS_X);
+    // Get max_rate and acceleration for limiting axis using direct array access
+    E_AXIS cfg_axis = limiting_axis;
+    if (cfg_axis >= NUM_AXIS) {
+        cfg_axis = AXIS_X;  // Fallback to X axis if invalid
     }
     
-    float max_rate_mm_min = *(axis_cfg->max_rate);
-    float acceleration_mm_sec2 = *(axis_cfg->acceleration);
+    float max_rate_mm_min = *(g_axis_settings[cfg_axis].max_rate);
+    float acceleration_mm_sec2 = *(g_axis_settings[cfg_axis].acceleration);
     
     // Clamp feedrate to max rate
     float max_rate_mm_sec = max_rate_mm_min / 60.0f;
@@ -218,7 +214,7 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     const float TIMER_FREQ = (float)TMR4_FrequencyGet();
     
     // Array-based steps_per_mm lookup (replaces switch statement)
-    float steps_per_mm_dominant = *g_axis_config[segment_buffer->dominant_axis].steps_per_mm;
+    float steps_per_mm_dominant = *g_axis_settings[segment_buffer->dominant_axis].steps_per_mm;
     
     // Calculate nominal step interval (cruise speed)
     // steps_per_sec = feedrate_mm_sec * steps_per_mm
@@ -296,9 +292,9 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     segment_buffer->pulse_width = (uint32_t)(settings->step_pulse_time * 12.5f);  // µs to timer ticks
     
     // Initialize Bresenham error terms (symmetric rounding)
-    segment_buffer->error_y = max_delta / 2;
-    segment_buffer->error_z = max_delta / 2;  
-    segment_buffer->error_a = max_delta / 2;
+    for (E_AXIS axis = AXIS_Y; axis < NUM_AXIS; axis++) {
+        segment_buffer->error[axis] = max_delta / 2;
+    }
     
     return segment_buffer;
 }
@@ -312,8 +308,8 @@ MotionSegment* KINEMATICS_ArcMove(CoordinatePoint start, CoordinatePoint end, Co
     }
     
     // Calculate radius from start point to center
-    float dx_center = start.x - center.x;
-    float dy_center = start.y - center.y;
+    float dx_center = GET_COORDINATE_AXIS(&start, AXIS_X) - GET_COORDINATE_AXIS(&center, AXIS_X);
+    float dy_center = GET_COORDINATE_AXIS(&start, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y);
     float radius = sqrtf(dx_center * dx_center + dy_center * dy_center);
     
     // Validate radius (must be > 0)
@@ -323,8 +319,8 @@ MotionSegment* KINEMATICS_ArcMove(CoordinatePoint start, CoordinatePoint end, Co
     }
     
     // Validate end point radius matches start point radius (within tolerance)
-    float dx_end = end.x - center.x;
-    float dy_end = end.y - center.y;
+    float dx_end = GET_COORDINATE_AXIS(&end, AXIS_X) - GET_COORDINATE_AXIS(&center, AXIS_X);
+    float dy_end = GET_COORDINATE_AXIS(&end, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y);
     float end_radius = sqrtf(dx_end * dx_end + dy_end * dy_end);
     
     if (fabsf(radius - end_radius) > 0.005f) {
@@ -369,12 +365,12 @@ bool KINEMATICS_PlanArc(CoordinatePoint start, CoordinatePoint end, CoordinatePo
     }
     
     // Calculate radius from start and end points
-    float dx_start = start.x - center.x;
-    float dy_start = start.y - center.y;
+    float dx_start = GET_COORDINATE_AXIS(&start, AXIS_X) - GET_COORDINATE_AXIS(&center, AXIS_X);
+    float dy_start = GET_COORDINATE_AXIS(&start, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y);
     float r_start = sqrtf(dx_start * dx_start + dy_start * dy_start);
     
-    float dx_end = end.x - center.x;
-    float dy_end = end.y - center.y;
+    float dx_end = GET_COORDINATE_AXIS(&end, AXIS_X) - GET_COORDINATE_AXIS(&center, AXIS_X);
+    float dy_end = GET_COORDINATE_AXIS(&end, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y);
     float r_end = sqrtf(dx_end * dx_end + dy_end * dy_end);
     
     // Radius validation (GRBL standard tolerance)
@@ -421,21 +417,17 @@ bool KINEMATICS_PlanArc(CoordinatePoint start, CoordinatePoint end, CoordinatePo
 
 // Reset step accumulators - call when starting new arc or after position reset (G92)
 void KINEMATICS_ResetAccumulators(void) {
-    step_accumulator_x = 0.0f;
-    step_accumulator_y = 0.0f;
-    step_accumulator_z = 0.0f;
-    step_accumulator_a = 0.0f;
+    // Accumulators are now static inside KINEMATICS_LinearMove
+    // This function kept for API compatibility but does nothing
+    // TODO: Refactor to expose accumulator reset properly if needed
 }
 // Get current position from stepper counts
 CoordinatePoint KINEMATICS_GetCurrentPosition(void) {
     CoordinatePoint current;
     
-    // Use axis config abstraction for clean access
+    // Use direct array access for clean access
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        const AxisConfig* cfg = UTILS_GetAxisConfig(axis);
-        if (!cfg) continue;
-        
-        float position = (float)AXIS_GetSteps(axis) / (*cfg->steps_per_mm);
+        float position = (float)AXIS_GetSteps(axis) / (*g_axis_settings[axis].steps_per_mm);
         
         // Array-based coordinate setting (replaces switch statement)
         SET_COORDINATE_AXIS(&current, axis, position);
@@ -446,11 +438,10 @@ CoordinatePoint KINEMATICS_GetCurrentPosition(void) {
 
 // Set machine position for a single axis (used during homing)
 void KINEMATICS_SetAxisMachinePosition(E_AXIS axis, float position) {
-    const AxisConfig* cfg = UTILS_GetAxisConfig(axis);
-    if (!cfg) return;  // Invalid axis
+    if (axis >= NUM_AXIS) return;  // Invalid axis
     
     // Convert position to steps and update using abstracted inline helper
-    int32_t steps = (int32_t)(position * (*cfg->steps_per_mm));
+    int32_t steps = (int32_t)(position * (*g_axis_settings[axis].steps_per_mm));
     AXIS_SetSteps(axis, steps);
 }
 
@@ -462,11 +453,11 @@ float KINEMATICS_CalculateJunctionSpeed(CoordinatePoint prev_dir, CoordinatePoin
         return 0.0f;  // Dead stop for invalid parameters
     }
     
-    // Calculate dot product of normalized direction vectors
-    float dot_product = prev_dir.x * curr_dir.x + 
-                       prev_dir.y * curr_dir.y + 
-                       prev_dir.z * curr_dir.z + 
-                       prev_dir.a * curr_dir.a;
+    // ✅ ARRAY-BASED: Calculate dot product of normalized direction vectors
+    float dot_product = 0.0f;
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        dot_product += GET_COORDINATE_AXIS(&prev_dir, axis) * GET_COORDINATE_AXIS(&curr_dir, axis);
+    }
     
     // Clamp to [-1, 1] to prevent acos domain errors
     if (dot_product > 1.0f) dot_product = 1.0f;

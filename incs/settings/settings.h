@@ -23,25 +23,11 @@ typedef struct {
     float mm_per_arc_segment;      // $12 - Arc segment length in mm (default 0.1mm)
     float arc_tolerance;           // $13 - Arc tolerance in mm (default 0.002mm, GRBL v1.1)
     
-    // Motion configuration ($100-$132)
-    float steps_per_mm_x;          // $100 - X-axis steps per mm
-    float steps_per_mm_y;          // $101 - Y-axis steps per mm
-    float steps_per_mm_z;          // $102 - Z-axis steps per mm
-    float steps_per_mm_a;          // $103 - A-axis steps per mm
-    
-    float max_rate_x;              // $110 - X-axis max rate (mm/min)
-    float max_rate_y;              // $111 - Y-axis max rate (mm/min)
-    float max_rate_z;              // $112 - Z-axis max rate (mm/min)
-    float max_rate_a;              // $113 - A-axis max rate (mm/min)
-    
-    float acceleration_x;          // $120 - X-axis acceleration (mm/sec^2)
-    float acceleration_y;          // $121 - Y-axis acceleration (mm/sec^2)
-    float acceleration_z;          // $122 - Z-axis acceleration (mm/sec^2)
-    float acceleration_a;          // $123 - A-axis acceleration (mm/sec^2)
-    
-    float max_travel_x;            // $130 - X-axis max travel (mm)
-    float max_travel_y;            // $131 - Y-axis max travel (mm)
-    float max_travel_z;            // $132 - Z-axis max travel (mm)
+    // Motion configuration ($100-$132) - Array-based for scalability
+    float steps_per_mm[4];         // $100-$103 - Steps per mm [X, Y, Z, A]
+    float max_rate[4];             // $110-$113 - Max rate (mm/min) [X, Y, Z, A]
+    float acceleration[4];         // $120-$123 - Acceleration (mm/sec^2) [X, Y, Z, A]
+    float max_travel[4];           // $130-$133 - Max travel (mm) [X, Y, Z, A]
     
     // Spindle configuration
     float spindle_max_rpm;         // $30 - Max spindle speed (RPM)
@@ -61,14 +47,15 @@ typedef struct {
     
     // Work coordinate systems (G54-G59, G92 offset, Tool length offset)
     // GRBL v1.1 standard: 6 work coordinate systems + G92 offset + TLO
-    float wcs_g54_x, wcs_g54_y, wcs_g54_z;  // G54 work coordinate system
-    float wcs_g55_x, wcs_g55_y, wcs_g55_z;  // G55 work coordinate system  
-    float wcs_g56_x, wcs_g56_y, wcs_g56_z;  // G56 work coordinate system
-    float wcs_g57_x, wcs_g57_y, wcs_g57_z;  // G57 work coordinate system
-    float wcs_g58_x, wcs_g58_y, wcs_g58_z;  // G58 work coordinate system
-    float wcs_g59_x, wcs_g59_y, wcs_g59_z;  // G59 work coordinate system
-    float g92_offset_x, g92_offset_y, g92_offset_z;  // G92 coordinate offset
-    float tool_length_offset;                        // Tool length offset (TLO)
+    // Array-based for scalability: [WCS_INDEX][AXIS]
+    float wcs_g54[3];              // G54 work coordinate system [X, Y, Z]
+    float wcs_g55[3];              // G55 work coordinate system [X, Y, Z]
+    float wcs_g56[3];              // G56 work coordinate system [X, Y, Z]
+    float wcs_g57[3];              // G57 work coordinate system [X, Y, Z]
+    float wcs_g58[3];              // G58 work coordinate system [X, Y, Z]
+    float wcs_g59[3];              // G59 work coordinate system [X, Y, Z]
+    float g92_offset[3];           // G92 coordinate offset [X, Y, Z]
+    float tool_length_offset;      // Tool length offset (TLO)
     
     // CRC32 checksum (for validation)
     uint32_t checksum;

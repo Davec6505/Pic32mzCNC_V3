@@ -102,11 +102,10 @@ void APP_Initialize ( void )
   // ✅ Initialize flow control capacity (single source of truth is appData.motionQueueCount)
   appData.gcodeCommandQueue.maxMotionSegments = MAX_MOTION_SEGMENTS;
     
-    // ✅ Initialize current position (work coordinates) to origin
-    appData.currentX = 0.0f;
-    appData.currentY = 0.0f;
-    appData.currentZ = 0.0f;
-    appData.currentA = 0.0f;
+    // ✅ ARRAY-BASED: Initialize current position (work coordinates) to zero
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        appData.current[axis] = 0.0f;
+    }
     
     // ✅ Initialize modal state (GRBL defaults)
     appData.modalFeedrate = 0.0f;      // No default feedrate (must be set explicitly)
@@ -124,9 +123,12 @@ void APP_Initialize ( void )
     appData.dominantAxis = AXIS_X;             // Default dominant axis
     appData.currentStepInterval = 0;           // No active motion
     appData.currentSegment = NULL;             // No active segment
-    appData.bresenham_error_y = 0;
-    appData.bresenham_error_z = 0;
-    appData.bresenham_error_a = 0;
+    
+    // ✅ ARRAY-BASED: Initialize Bresenham errors for all axes
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        appData.bresenham_error[axis] = 0;
+    }
+    
     appData.uartPollCounter = 0;               // Rate limiting counter
     
     // ✅ Initialize arc generation state (non-blocking incremental)
@@ -200,10 +202,11 @@ void APP_Tasks ( void )
             // STEPPER_Initialize() ran before settings were loaded, so steps_per_mm might be stale
             CNC_Settings* settings = SETTINGS_GetCurrent();
             StepperPosition* stepper_pos = STEPPER_GetPosition();
-            stepper_pos->steps_per_mm_x = settings->steps_per_mm_x;
-            stepper_pos->steps_per_mm_y = settings->steps_per_mm_y;
-            stepper_pos->steps_per_mm_z = settings->steps_per_mm_z;
-            stepper_pos->steps_per_deg_a = settings->steps_per_mm_a;
+            
+            // ✅ ARRAY-BASED: Update steps_per_mm from settings (loop for scalability)
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                stepper_pos->steps_per_mm[axis] = settings->steps_per_mm[axis];
+            }
             
             appData.state = APP_GCODE_INIT;
             break;

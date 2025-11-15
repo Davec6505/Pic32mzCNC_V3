@@ -1,414 +1,828 @@
-# GitHub Copilot Instructions for Pic32mzCNC_V3
+# GitHub Copilot Instructions for Pic32mzCNC_V3# GitHub Copilot Instructions for Pic32mzCNC_V3
+
+All sub README's are under docs/readme
 
 ## Project Overview
+
+Production-ready CNC motion control system for PIC32MZ microcontrollers with GRBL v1.1 protocol compliance, 4-axis coordinated motion, and hardware-optimized stepper control.## Project Overview
+
 This is a CNC motion control system for PIC32MZ microcontrollers using hardware timers and Bresenham interpolation for precise multi-axis stepper motor control.
 
-##    Always run make from root directory VI
+**Status**: Production Ready (November 15, 2025)  
+
+**Firmware**: `bins/Release/CS23.hex` (264KB)##    Always run make from root directory VI
+
 To ensure proper build configuration and output paths, always execute `make` commands from the root directory of the Pic32mzCNC_V3 project. This guarantees that all relative paths and build settings are correctly applied. makefile incs target is dynamic, it knows the paths no need to add absolute file references, all paths are relative to the root directory.
+
+## Critical Build Rules
 
 ## 🚀 Current Implementation Status (November 13, 2025)
 
-### 🎉 PRODUCTION READY - ALL FEATURES DEPLOYED TO GITHUB ✅
+### Always Run Make from Root Directory
 
-**Successfully Merged to Master and Pushed (November 13, 2025)**:
-- ✅ **Aggressive Flow Control**: Single-threshold system defers "ok" until motion queue empty
+```powershell### 🎉 PRODUCTION READY - ALL FEATURES DEPLOYED TO GITHUB ✅
+
+# CORRECT - from repository root
+
+make**Successfully Merged to Master and Pushed (November 13, 2025)**:
+
+make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION"- ✅ **Aggressive Flow Control**: Single-threshold system defers "ok" until motion queue empty
+
 - ✅ **GRBL v1.1 Protocol Compliance**: Full blank line/comment handling with proper "ok" responses  
-- ✅ **Motion Completion Synchronization**: Deferred "ok" only sent when `motionQueueCount == 0`
-- ✅ **File Streaming Success**: Rectangle, circle, and complex toolpaths complete flawlessly
-- ✅ **UGS Integration**: Automatic file completion without manual reset
+
+# WRONG - never cd into srcs/- ✅ **Motion Completion Synchronization**: Deferred "ok" only sent when `motionQueueCount == 0`
+
+cd srcs && make  # ❌ This breaks paths!- ✅ **File Streaming Success**: Rectangle, circle, and complex toolpaths complete flawlessly
+
+```- ✅ **UGS Integration**: Automatic file completion without manual reset
+
 - ✅ **Counter-Based Deferred OK**: Burst sending of all deferred responses
-- ✅ **Arc Radius Compensation**: GRBL v1.1 $13 setting with 0.002mm tolerance
+
+All Makefile paths are relative to project root. The build system automatically handles subdirectories.- ✅ **Arc Radius Compensation**: GRBL v1.1 $13 setting with 0.002mm tolerance
+
 - ✅ **Control Character Cleanup**: Proper CR/LF consumption prevents spurious responses
 
+## Core Architecture
+
 ### ⚠️ ACTIVE ISSUES
-**None - All major issues resolved and deployed!**
+
+### Hardware Abstraction Layer (utils.c/utils.h)**None - All major issues resolved and deployed!**
+
+**LED Pattern Design** - All GPIO operations use clean function pointer arrays:
 
 **Recently RESOLVED Issues (November 13, 2025)**:
-- ✅ **UGS Premature "Finished" State** - Fixed with aggressive flow control (defer until queue empty)
-- ✅ **File Streaming Completion** - Rectangle test completes both iterations successfully
-- ✅ **Blank Line Handling** - GRBL v1.1 compliant "ok" responses for all lines
-- ✅ **Motion Queue Synchronization** - Deferred "ok" only sent when motion truly completes
-- ✅ **UGS Visualization Delay** - Fixed with startup OK deferral (November 11)
-- ✅ **UGS File Streaming Stalls** - Fixed with deferred "ok" check in IDLE loop (November 11)
+
+```c- ✅ **UGS Premature "Finished" State** - Fixed with aggressive flow control (defer until queue empty)
+
+// Direct function pointer arrays (no nested structures!)- ✅ **File Streaming Completion** - Rectangle test completes both iterations successfully
+
+GPIO_SetFunc axis_step_set[NUM_AXIS] = {step_x_set, step_y_set, step_z_set, step_a_set};- ✅ **Blank Line Handling** - GRBL v1.1 compliant "ok" responses for all lines
+
+GPIO_ClearFunc axis_step_clear[NUM_AXIS] = {...};- ✅ **Motion Queue Synchronization** - Deferred "ok" only sent when motion truly completes
+
+GPIO_SetFunc axis_dir_set[NUM_AXIS] = {...};- ✅ **UGS Visualization Delay** - Fixed with startup OK deferral (November 11)
+
+GPIO_GetFunc axis_limit_min_get[NUM_AXIS] = {x_min_get, y_min_get, z_min_get, a_min_get};- ✅ **UGS File Streaming Stalls** - Fixed with deferred "ok" check in IDLE loop (November 11)
+
 - ✅ Flash save hanging - Fixed with NVM_IsBusy() polling (November 10)
-- ✅ Motion speed slow (98 mm/min) - Fixed, now ~8000 mm/min (November 10)
-- ✅ Settings persistence - Working correctly (November 10)
 
-### ✅ COMPLETED FEATURES
-- **AGGRESSIVE FLOW CONTROL**: Single-threshold system defers "ok" until motion queue empty, prevents UGS premature "Finished" (November 13, 2025)
-- **BLANK LINE GRBL COMPLIANCE**: All lines (blank, comments, G-code) get "ok" responses with flow control applied (November 13, 2025)
-- **MOTION COMPLETION SYNCHRONIZATION**: Deferred "ok" only sent when `motionQueueCount == 0` ensures UGS accuracy (November 13, 2025)
+// Flat settings structures (no nesting!)- ✅ Motion speed slow (98 mm/min) - Fixed, now ~8000 mm/min (November 10)
+
+typedef struct {- ✅ Settings persistence - Working correctly (November 10)
+
+    float* max_rate;
+
+    float* acceleration;### ✅ COMPLETED FEATURES
+
+    float* steps_per_mm;- **AGGRESSIVE FLOW CONTROL**: Single-threshold system defers "ok" until motion queue empty, prevents UGS premature "Finished" (November 13, 2025)
+
+    int32_t* step_count;- **BLANK LINE GRBL COMPLIANCE**: All lines (blank, comments, G-code) get "ok" responses with flow control applied (November 13, 2025)
+
+} AxisSettings;- **MOTION COMPLETION SYNCHRONIZATION**: Deferred "ok" only sent when `motionQueueCount == 0` ensures UGS accuracy (November 13, 2025)
+
 - **SEGMENT COMPLETION TRIGGERS**: `motionSegmentCompleted` flag set when queue drains, triggers deferred ok check (November 13, 2025)
-- **STARTUP OK DEFERRAL FOR UGS VISUALIZATION**: Withholds first 2 motion command OKs until 2nd motion received, preventing UGS premature "Finished" state (November 11, 2025)
-- **SINGLE AUTHORITATIVE COUNT ARCHITECTURE**: Eliminated stale count copies, all flow control reads `appData->motionQueueCount` directly (November 11, 2025)
+
+extern AxisSettings g_axis_settings[NUM_AXIS];- **STARTUP OK DEFERRAL FOR UGS VISUALIZATION**: Withholds first 2 motion command OKs until 2nd motion received, preventing UGS premature "Finished" state (November 11, 2025)
+
+extern HomingSettings g_homing_settings[NUM_AXIS];- **SINGLE AUTHORITATIVE COUNT ARCHITECTURE**: Eliminated stale count copies, all flow control reads `appData->motionQueueCount` directly (November 11, 2025)
+
 - **IMPROVED FLOW CONTROL**: Deferred "ok" check in IDLE loop prevents UGS streaming stalls (November 11, 2025)
-- **MOTION PIPELINE VALIDATED**: Segments execute correctly, position tracking accurate, ISR operates properly (November 11, 2025)
-- **COMPLETE HOMING & LIMIT SWITCH SYSTEM**: Professional GRBL v1.1 compatible homing with $H command, array-based limit configuration, hardware debouncing, and proper inversion logic (November 10, 2025)
-- **COMPLETE SPINDLE PWM CONTROL**: OC8/TMR6 PWM system with 3.338kHz frequency, RPM conversion, M3/M5/S command integration (November 10, 2025)
-- **ARRAY-BASED AXIS CONTROL**: Eliminated all switch statements for axis operations using coordinate array utilities (November 10, 2025)
-- **PRODUCTION-READY G-CODE PARSER**: Professional event-driven system with clean architecture (⚠️ CRITICAL: Do not modify gcode_parser.c - working perfectly!)
+
+// Inline helpers for zero-overhead access- **MOTION PIPELINE VALIDATED**: Segments execute correctly, position tracking accurate, ISR operates properly (November 11, 2025)
+
+static inline void AXIS_StepSet(E_AXIS axis) {- **COMPLETE HOMING & LIMIT SWITCH SYSTEM**: Professional GRBL v1.1 compatible homing with $H command, array-based limit configuration, hardware debouncing, and proper inversion logic (November 10, 2025)
+
+    axis_step_set[axis]();  // Inlines to: LATDSET = 0x10- **COMPLETE SPINDLE PWM CONTROL**: OC8/TMR6 PWM system with 3.338kHz frequency, RPM conversion, M3/M5/S command integration (November 10, 2025)
+
+}- **ARRAY-BASED AXIS CONTROL**: Eliminated all switch statements for axis operations using coordinate array utilities (November 10, 2025)
+
+```- **PRODUCTION-READY G-CODE PARSER**: Professional event-driven system with clean architecture (⚠️ CRITICAL: Do not modify gcode_parser.c - working perfectly!)
+
 - **ROBUST SOFT RESET RECOVERY**: UGS compatible soft reset with proper OC1/TMR4 restart logic (November 10, 2025)
-- **OPTIMAL TIMER CONFIGURATION**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs stepper pulses (November 10, 2025)
-- **HARDWARE VALIDATION GUARDS**: OC1/TMR4 startup checks prevent motion restart failures (November 10, 2025)
-- Event queue implementation respecting APP_DATA abstraction layer
-- Comprehensive G-code support: G0/G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T, G10 L20
-- Core architecture implemented with period-based timer (TMR4/PR4)
-- Single instance pattern in appData for clean separation
+
+**Architecture Principles**:- **OPTIMAL TIMER CONFIGURATION**: TMR4 1:64 prescaler (781.25kHz) with 2.5µs stepper pulses (November 10, 2025)
+
+- ✅ **Direct array access** - No nested structures, no accessor functions- **HARDWARE VALIDATION GUARDS**: OC1/TMR4 startup checks prevent motion restart failures (November 10, 2025)
+
+- ✅ **LED pattern everywhere** - Simple, clean, consistent- Event queue implementation respecting APP_DATA abstraction layer
+
+- ✅ **Always inline** - Compiler optimizes to single instructions- Comprehensive G-code support: G0/G1, G2/G3, G4, M3/M5, M7/M9, G90/G91, F, S, T, G10 L20
+
+- ❌ **NO nested structs** - Removed GPIO_Control, AxisConfig, LimitConfig- Core architecture implemented with period-based timer (TMR4/PR4)
+
+- ❌ **NO accessor functions** - Access `g_axis_settings[axis].field` directly- Single instance pattern in appData for clean separation
+
 - Proper tokenization with combined modal splitting
-  - Examples: "G21G90" → ["G21", "G90"], "G90G0Z5" → ["G90", "G0Z5"]
-- Multi-command line support - "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
+
+### Flow Control System (gcode_parser.c)  - Examples: "G21G90" → ["G21", "G90"], "G90G0Z5" → ["G90", "G0Z5"]
+
+**Single Authoritative Motion Count** - No copies, no sync:- Multi-command line support - "G90G1X10Y10F1000" → ["G90", "G1X10Y10F1000"]
+
 - Modal parameter support - Standalone F, S, T commands (GRBL v1.1 compliant)
-- 16-command circular buffer with flow control and overflow protection ("ok" withholding)
-- Harmony state machine pattern - proper APP_Tasks architecture
-- Non-blocking event processing - one event per iteration
-- Kinematics module complete with physics calculations and velocity profiling
-- Stepper module complete with hardware abstraction and emergency stop
+
+```c- 16-command circular buffer with flow control and overflow protection ("ok" withholding)
+
+// ✅ CORRECT - Read fresh count directly- Harmony state machine pattern - proper APP_Tasks architecture
+
+void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* cmdQueue) {- Non-blocking event processing - one event per iteration
+
+    CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);- Kinematics module complete with physics calculations and velocity profiling
+
+}- Stepper module complete with hardware abstraction and emergency stop
+
 - Persistent GRBL settings with NVM flash storage (29 parameters including arc)
-- Delayed flash initialization - read after peripherals ready (APP_LOAD_SETTINGS state)
-- Unified data structures - no circular dependencies, clean module separation
-- Hardware FPU enabled - Single-precision floating point for motion planning
+
+// ❌ WRONG - Don't create copies- Delayed flash initialization - read after peripherals ready (APP_LOAD_SETTINGS state)
+
+// cmdQueue->motionQueueCount = appData->motionQueueCount;  // NO!- Unified data structures - no circular dependencies, clean module separation
+
+```- Hardware FPU enabled - Single-precision floating point for motion planning
+
 - Trapezoidal velocity profiling IMPLEMENTED - KINEMATICS_LinearMove with full physics
-- Emergency stop system complete - APP_ALARM state with hard/soft limit checking
-- Position tracking and modal state - Work coordinates with G90/G91 support
-- Safety system complete - STEPPER_DisableAll(), MOTION_UTILS_CheckHardLimits()
-- 256 microstepping validated - ISR budget analysis shows 42% headroom at 512kHz
+
+**Aggressive Flow Control**:- Emergency stop system complete - APP_ALARM state with hard/soft limit checking
+
+- Defer "ok" when `motionQueueCount > 0`- Position tracking and modal state - Work coordinates with G90/G91 support
+
+- Send "ok" only when `motionQueueCount == 0`- Safety system complete - STEPPER_DisableAll(), MOTION_UTILS_CheckHardLimits()
+
+- Check deferred ok immediately after `motionSegmentCompleted` flag- 256 microstepping validated - ISR budget analysis shows 42% headroom at 512kHz
+
 - Single ISR architecture designed - GRBL pattern, no multi-ISR complexity
-- PRIORITY PHASE SYSTEM IMPLEMENTED - Hybrid ISR/main loop architecture (best of both worlds!)
-- INCREMENTAL ARC INTERPOLATION COMPLETE - Non-blocking G2/G3 with FPU acceleration
+
+### Timer Configuration (stepper.c)- PRIORITY PHASE SYSTEM IMPLEMENTED - Hybrid ISR/main loop architecture (best of both worlds!)
+
+**Hardware Validation Guards** prevent soft reset failures:- INCREMENTAL ARC INTERPOLATION COMPLETE - Non-blocking G2/G3 with FPU acceleration
+
 - Motion phase system operational - VELOCITY/BRESENHAM/SCHEDULE/COMPLETE phases
-- Project compiles successfully with XC32 compiler
-- UART3 fully functional - TX and RX working, status queries respond
-- Non-blocking UART utilities module - central helpers (UART_SendOK, UART_Printf)
-- Professional compile-time debug system - Zero runtime overhead, multiple subsystems (November 7, 2025)
-- Clean build system - make/make all defaults to Release, make build for incremental (November 7, 2025)
-- ATOMIC INLINE GPIO FUNCTIONS - Zero-overhead ISR with `__attribute__((always_inline))` (November 8, 2025)
-- FUNCTION POINTER ARCHITECTURE - Array-based axis control with GPIO_Control structs (November 8, 2025)
-- ISR STACK OPTIMIZATION - Eliminated 32 bytes/call local arrays with static pointers (November 8, 2025)
-- PRE-CALCULATED DOMINANT AXIS - Stored in MotionSegment, zero ISR overhead (November 8, 2025)
 
-### 🔧 SOFT RESET RECOVERY SYSTEM (November 10, 2025) ⭐ NEW
-Module: `srcs/motion/stepper.c` → `STEPPER_LoadSegment()`
+```c- Project compiles successfully with XC32 compiler
 
-**Problem Solved**: UGS soft reset (Ctrl+X) would stop motion, but subsequent G-code commands wouldn't restart motion system.
+void STEPPER_LoadSegment(MotionSegment* segment) {- UART3 fully functional - TX and RX working, status queries respond
 
-**Root Cause**: After soft reset, OC1 (Output Compare) module wasn't being re-enabled when motion resumed.
+    // ✅ Always validate hardware state- Non-blocking UART utilities module - central helpers (UART_SendOK, UART_Printf)
 
-**Solution**: Hardware validation guards in segment loading:
-```c
-// Re-enable OC1 if disabled
-if(!(OC1CON & _OC1CON_ON_MASK)) {
-    OCMP1_Enable();
+    if(!(OC1CON & _OC1CON_ON_MASK)) {- Professional compile-time debug system - Zero runtime overhead, multiple subsystems (November 7, 2025)
+
+        OCMP1_Enable();- Clean build system - make/make all defaults to Release, make build for incremental (November 7, 2025)
+
+    }- ATOMIC INLINE GPIO FUNCTIONS - Zero-overhead ISR with `__attribute__((always_inline))` (November 8, 2025)
+
+    if(!(T4CON & _T4CON_ON_MASK)) {- FUNCTION POINTER ARCHITECTURE - Array-based axis control with GPIO_Control structs (November 8, 2025)
+
+        TMR4_Start();- ISR STACK OPTIMIZATION - Eliminated 32 bytes/call local arrays with static pointers (November 8, 2025)
+
+    }- PRE-CALCULATED DOMINANT AXIS - Stored in MotionSegment, zero ISR overhead (November 8, 2025)
+
+    
+
+    // Configure timing### 🔧 SOFT RESET RECOVERY SYSTEM (November 10, 2025) ⭐ NEW
+
+    uint32_t step_interval = /* calculated */;Module: `srcs/motion/stepper.c` → `STEPPER_LoadSegment()`
+
+    uint32_t pulse_width = 2;  // 2.5µs at 781.25kHz
+
+    TMR4_PeriodSet(max(7, step_interval + pulse_width + 2));**Problem Solved**: UGS soft reset (Ctrl+X) would stop motion, but subsequent G-code commands wouldn't restart motion system.
+
 }
+
+```**Root Cause**: After soft reset, OC1 (Output Compare) module wasn't being re-enabled when motion resumed.
+
+
+
+**Timer Facts**:**Solution**: Hardware validation guards in segment loading:
+
+- TMR4: 1:64 prescaler → 781.25kHz (1.28µs/tick)```c
+
+- Pulse width: 2.5µs (2 ticks) - safe for all stepper drivers// Re-enable OC1 if disabled
+
+- Minimum period: 7 ticks (ensures pulse completion)if(!(OC1CON & _OC1CON_ON_MASK)) {
+
+    OCMP1_Enable();
+
+### Debug System (common.h, uart_utils.h)}
+
+**Zero Runtime Overhead** - Debug code completely removed in Release builds:
 
 // Re-start TMR4 if stopped  
-if(!(T4CON & _T4CON_ON_MASK)) {
-    TMR4_Start();
-}
+
+```cif(!(T4CON & _T4CON_ON_MASK)) {
+
+// Enable in Makefile    TMR4_Start();
+
+make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"}
+
 ```
 
-**Timer Configuration Fixed**:
-- TMR4 Prescaler: 1:64 (781.25kHz, 1.28µs per tick)
+// Use in code
+
+DEBUG_PRINT_MOTION("[MOTION] Loading segment: steps=%lu\r\n", steps);**Timer Configuration Fixed**:
+
+DEBUG_EXEC_SEGMENT(LED1_Toggle());- TMR4 Prescaler: 1:64 (781.25kHz, 1.28µs per tick)
+
 - Pulse Width: 2.5µs (2 ticks) - safe for stepper drivers
-- Period Clamping: Minimum 7 ticks to accommodate pulse timing
-- Uses PLIB functions: `TMR4_FrequencyGet()`, `TMR4_PeriodSet()`
+
+// Release build compiles to:- Period Clamping: Minimum 7 ticks to accommodate pulse timing
+
+((void)0)  // Nothing - zero bytes!- Uses PLIB functions: `TMR4_FrequencyGet()`, `TMR4_PeriodSet()`
+
+```
 
 **Benefits**:
-- Motion always restarts after UGS soft reset
-- Optimal stepper driver compatibility (2.5µs pulse width)
-- Hardware state validation prevents startup failures
-- Debug output shows timer frequency and timing calculations
 
-### 🔧 FLOW CONTROL ARCHITECTURE (November 11, 2025) ⭐ UPDATED
-**Single Authoritative Count Source**
+**Available Flags**:- Motion always restarts after UGS soft reset
 
-Problem Solved: Stale count copies causing deferred "ok" to never send when buffer drained.
+- `DEBUG_MOTION` - Motion planning and segment execution- Optimal stepper driver compatibility (2.5µs pulse width)
 
-Root Cause Analysis:
-- `appData->motionQueueCount` was being synced to `gcodeCommandQueue.motionQueueCount` once per iteration
-- Flow control checked the STALE copy instead of FRESH authoritative count
-- When buffer drained, copied value hadn't updated yet, so deferred "ok" was never sent
-- UGS waited indefinitely for "ok", stopped sending remaining commands
+- `DEBUG_GCODE` - G-code parsing and event processing- Hardware state validation prevents startup failures
 
-Solution: Single Authoritative Source
+- `DEBUG_STEPPER` - Low-level stepper ISR- Debug output shows timer frequency and timing calculations
+
+- `DEBUG_SEGMENT` - Segment loading and queue management
+
+- `DEBUG_UART` - UART communication### 🔧 FLOW CONTROL ARCHITECTURE (November 11, 2025) ⭐ UPDATED
+
+- `DEBUG_APP` - Application state machine**Single Authoritative Count Source**
+
+
+
+## Code Style RulesProblem Solved: Stale count copies causing deferred "ok" to never send when buffer drained.
+
+
+
+### ✅ DO Use Direct Array AccessRoot Cause Analysis:
+
+```c- `appData->motionQueueCount` was being synced to `gcodeCommandQueue.motionQueueCount` once per iteration
+
+// ✅ GOOD - Direct access like LED pattern- Flow control checked the STALE copy instead of FRESH authoritative count
+
+float rate = *(g_axis_settings[axis].max_rate);- When buffer drained, copied value hadn't updated yet, so deferred "ok" was never sent
+
+AXIS_StepSet(AXIS_X);- UGS waited indefinitely for "ok", stopped sending remaining commands
+
+bool triggered = LIMIT_GetMin(axis);
+
+```Solution: Single Authoritative Source
+
 ```c
-// REMOVED from GCODE_CommandQueue structure:
-// uint32_t motionQueueCount;  // DELETE - was stale copy
 
-// REMOVED from app.c APP_IDLE:
-// appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;  // DELETE sync
+### ❌ DON'T Create Nested Structures// REMOVED from GCODE_CommandQueue structure:
 
-// Flow control now reads fresh count directly:
+```c// uint32_t motionQueueCount;  // DELETE - was stale copy
+
+// ❌ BAD - Removed from codebase
+
+typedef struct {// REMOVED from app.c APP_IDLE:
+
+    GPIO_SetFunc Set;// appData.gcodeCommandQueue.motionQueueCount = appData.motionQueueCount;  // DELETE sync
+
+    GPIO_ClearFunc Clear;
+
+} GPIO_Control;  // Don't recreate this!// Flow control now reads fresh count directly:
+
 CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
-SendOrDeferOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
-```
 
-Files Modified:
-- `incs/data_structures.h` - Removed `motionQueueCount` field from `GCODE_CommandQueue`
-- `srcs/app.c` - Removed sync at line 241
+typedef struct {SendOrDeferOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+
+    GPIO_Control step;  // 3 levels deep!```
+
+    GPIO_Control dir;
+
+    float* max_rate;Files Modified:
+
+} AxisConfig;  // Don't recreate this!- `incs/data_structures.h` - Removed `motionQueueCount` field from `GCODE_CommandQueue`
+
+```- `srcs/app.c` - Removed sync at line 241
+
 - `srcs/gcode/gcode_parser.c` - Flow control reads `appData->motionQueueCount` directly
 
-Idle Loop Enhancement:
-```c
-case GCODE_STATE_IDLE:
-    // ... UART processing ...
-    
+### ✅ DO Use Coordinate Array Utilities
+
+```cIdle Loop Enhancement:
+
+// ✅ GOOD - Loop instead of individual assignments```c
+
+for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {case GCODE_STATE_IDLE:
+
+    SET_COORDINATE_AXIS(&target, axis, value[axis]);    // ... UART processing ...
+
+}    
+
     if (nBytesRead == 0) {
-        // ✅ Check for deferred "ok" even when no new data
-        CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
-        break;
-    }
+
+// ❌ BAD - Individual assignments        // ✅ Check for deferred "ok" even when no new data
+
+target.x = value_x;        CheckAndSendDeferredOk(appData->motionQueueCount, cmdQueue->maxMotionSegments);
+
+target.y = value_y;        break;
+
+target.z = value_z;    }
+
+target.a = value_a;```
+
 ```
 
 Benefits:
-- ✅ No stale copies - always reads current buffer occupancy
-- ✅ Deferred "ok" sent during idle loop when buffer drains
-- ✅ UGS file streaming completes full programs
-- ✅ Cleaner architecture - single source of truth
 
-### 🔧 STARTUP OK DEFERRAL FOR UGS VISUALIZATION (November 11, 2025) ⭐ NEW
-Module: `srcs/gcode/gcode_parser.c` → Startup deferral state machine
+### ✅ DO Use Debug Macros- ✅ No stale copies - always reads current buffer occupancy
 
-**Problem Solved**: UGS (Universal G-Code Sender) would receive all "ok" responses before motion started, mark file as "Finished", and stop automatic status polling. Motion wouldn't visualize until manual `?` query sent.
+```c- ✅ Deferred "ok" sent during idle loop when buffer drains
+
+// ✅ GOOD - Clean debug that compiles to nothing in Release- ✅ UGS file streaming completes full programs
+
+DEBUG_PRINT_MOTION("[MOTION] Message\r\n");- ✅ Cleaner architecture - single source of truth
+
+
+
+// ❌ BAD - Manual UART writes that clutter code### 🔧 STARTUP OK DEFERRAL FOR UGS VISUALIZATION (November 11, 2025) ⭐ NEW
+
+char buf[64];Module: `srcs/gcode/gcode_parser.c` → Startup deferral state machine
+
+snprintf(buf, sizeof(buf), "[DEBUG] Message\r\n");
+
+UART3_Write((uint8_t*)buf, strlen(buf));**Problem Solved**: UGS (Universal G-Code Sender) would receive all "ok" responses before motion started, mark file as "Finished", and stop automatic status polling. Motion wouldn't visualize until manual `?` query sent.
+
+```
 
 **Root Cause**: Setup commands (G21, G90, G17, G92, G1F500) received "ok" immediately. By the time first motion command executed, UGS had all expected "ok" responses and considered file complete.
 
+## G-Code Parser Rules
+
 **Solution**: Startup OK Deferral with Motion Detection
-- Withholds first 2 **motion command** "ok" responses
-- Flushes both OKs together after 2nd motion command received
-- UGS sees motion start before receiving all OKs → continues automatic polling
 
-**Implementation Architecture**:
-```c
-// Static state variables (gcode_parser.c lines 62-64)
+### ⚠️ CRITICAL: DO NOT MODIFY gcode_parser.c!- Withholds first 2 **motion command** "ok" responses
+
+The G-code parser is **production-ready and fully validated**. It handles:- Flushes both OKs together after 2nd motion command received
+
+- GRBL v1.1 protocol compliance- UGS sees motion start before receiving all OKs → continues automatic polling
+
+- Blank line/comment handling
+
+- Flow control synchronization**Implementation Architecture**:
+
+- Real-time character processing```c
+
+- Combined modal splitting (G90G1X10 → ["G90", "G1X10"])// Static state variables (gcode_parser.c lines 62-64)
+
 static bool startupDeferralActive = false;
-static uint8_t startupDeferralRemaining = 0;  // Counts down from 2
-static uint8_t startupDeferredOkCredits = 0;  // Accumulates withheld OKs
 
-// Motion detection function (lines 549-585)
+**If you think the parser needs changes**, you're probably wrong. Check:static uint8_t startupDeferralRemaining = 0;  // Counts down from 2
+
+1. Is the issue in event handling (app.c)?static uint8_t startupDeferredOkCredits = 0;  // Accumulates withheld OKs
+
+2. Is the issue in motion generation (kinematics.c)?
+
+3. Is the issue in flow control timing?// Motion detection function (lines 549-585)
+
 static bool LineHasMotionWord(const char* line, uint32_t len) {
-    // Two-stage check:
+
+The parser itself is **working perfectly** - all UGS/Candle/bCNC tests pass.    // Two-stage check:
+
     // 1. Find G0/G1/G2/G3 (excluding G10, G17, G21, etc.)
-    // 2. Verify at least one axis parameter (X/Y/Z/A) present
+
+## Data Structure Patterns    // 2. Verify at least one axis parameter (X/Y/Z/A) present
+
     
-    // Stage 1: Scan for G followed by 0-3
-    bool found_g_code = false;
-    for (uint32_t i = 0; i < len - 1; i++) {
-        char c = line[i];
-        if (c == 'G' || c == 'g') {
-            char next = line[i+1];
-            if (next >= '0' && next <= '3') {
-                // Exclude G10, G17, G21, G28, G30, etc.
-                if (i+2 < len && line[i+2] >= '0' && line[i+2] <= '9') {
-                    continue;  // Skip G10+
-                }
-                found_g_code = true;
+
+### Single Instance Pattern    // Stage 1: Scan for G followed by 0-3
+
+```c    bool found_g_code = false;
+
+// All major structures in APP_DATA (app.h, data_structures.h)    for (uint32_t i = 0; i < len - 1; i++) {
+
+typedef struct {        char c = line[i];
+
+    APP_STATES state;        if (c == 'G' || c == 'g') {
+
+    GCODE_CommandQueue gcodeCommandQueue;            char next = line[i+1];
+
+    MotionSegment motionQueue[MAX_MOTION_SEGMENTS];            if (next >= '0' && next <= '3') {
+
+    uint32_t motionQueueHead, motionQueueTail, motionQueueCount;                // Exclude G10, G17, G21, G28, G30, etc.
+
+    bool motionSegmentCompleted;  // Triggers deferred ok check                if (i+2 < len && line[i+2] >= '0' && line[i+2] <= '9') {
+
+    // ...                    continue;  // Skip G10+
+
+} APP_DATA;                }
+
+```                found_g_code = true;
+
                 break;
-            }
+
+**Pass by reference** through function calls - no static module data.            }
+
         }
-    }
-    if (!found_g_code) return false;
-    
-    // Stage 2: Verify axis parameters exist
-    // Prevents false positives like "G1F500" (feedrate only, no movement)
-    for (uint32_t i = 0; i < len; i++) {
+
+### Coordinate Structures    }
+
+```c    if (!found_g_code) return false;
+
+// CoordinatePoint as float array (guaranteed memory layout)    
+
+typedef struct {    // Stage 2: Verify axis parameters exist
+
+    float x, y, z, a;  // Sequential in memory: [0]=x, [1]=y, [2]=z, [3]=a    // Prevents false positives like "G1F500" (feedrate only, no movement)
+
+} CoordinatePoint;    for (uint32_t i = 0; i < len; i++) {
+
         char c = line[i];
-        if (c == 'X' || c == 'x' || c == 'Y' || c == 'y' || 
-            c == 'Z' || c == 'z' || c == 'A' || c == 'a') {
-            return true;  // Motion command with axis movement
-        }
-    }
+
+// Array-based helpers        if (c == 'X' || c == 'x' || c == 'Y' || c == 'y' || 
+
+static inline void SET_COORDINATE_AXIS(CoordinatePoint* coord, E_AXIS axis, float value) {            c == 'Z' || c == 'z' || c == 'A' || c == 'a') {
+
+    ((float*)coord)[axis] = value;            return true;  // Motion command with axis movement
+
+}        }
+
+```    }
+
     return false;  // G-code present but no axis parameters
-}
+
+## File Organization}
+
 ```
 
-**Deferral Logic** (lines 715-743 IDLE, 1045-1070 GCODE_COMMAND):
-```c
-bool isMotion = LineHasMotionWord(rxBuffer, terminator_pos);
+```
 
-// Arm deferral on first motion command
-if (!startupDeferralActive && isMotion) {
-    startupDeferralActive = true;
-    startupDeferralRemaining = 2;
-    startupDeferredOkCredits = 0;
-}
+srcs/**Deferral Logic** (lines 715-743 IDLE, 1045-1070 GCODE_COMMAND):
 
-// Withhold OKs for first 2 motion commands
-if (startupDeferralActive && isMotion && startupDeferralRemaining > 0) {
-    startupDeferralRemaining--;
-    startupDeferredOkCredits++;
-    
+├── app.c                   # Main state machine, event loop```c
+
+├── main.c                  # Entry pointbool isMotion = LineHasMotionWord(rxBuffer, terminator_pos);
+
+├── gcode/
+
+│   └── gcode_parser.c      # ⚠️ DO NOT MODIFY - working perfectly!// Arm deferral on first motion command
+
+├── motion/if (!startupDeferralActive && isMotion) {
+
+│   ├── stepper.c           # Hardware abstraction, ISR    startupDeferralActive = true;
+
+│   ├── kinematics.c        # Physics, velocity profiling    startupDeferralRemaining = 2;
+
+│   ├── motion.c            # Motion queue management    startupDeferredOkCredits = 0;
+
+│   ├── homing.c            # $H command, limit switches}
+
+│   └── spindle.c           # M3/M5, PWM control
+
+├── settings/// Withhold OKs for first 2 motion commands
+
+│   └── settings.c          # Persistent NVM storageif (startupDeferralActive && isMotion && startupDeferralRemaining > 0) {
+
+└── utils/    startupDeferralRemaining--;
+
+    ├── utils.c             # ✅ LED pattern GPIO abstraction    startupDeferredOkCredits++;
+
+    └── uart_utils.c        # Non-blocking UART helpers    
+
     // Flush both OKs when 2nd motion command received
-    if (startupDeferralRemaining == 0) {
-        while (startupDeferredOkCredits > 0) {
-            UART_SendOK();
-            startupDeferredOkCredits--;
-        }
+
+incs/    if (startupDeferralRemaining == 0) {
+
+├── common.h                # Debug flags, shared constants        while (startupDeferredOkCredits > 0) {
+
+├── data_structures.h       # Unified structures (no circular deps)            UART_SendOK();
+
+└── utils/utils.h           # GPIO function pointer arrays            startupDeferredOkCredits--;
+
+```        }
+
         startupDeferralActive = false;
-    }
+
+## Hardware Details    }
+
 } else {
-    SendOrDeferOk(appData, cmdQueue);  // Normal flow control
-}
-```
+
+**Microcontroller**: PIC32MZ2048EFH100      SendOrDeferOk(appData, cmdQueue);  // Normal flow control
+
+**Clock**: 200MHz system, 50MHz peripheral (PBCLK3)  }
+
+**FPU**: Single-precision enabled (`-mhard-float -msingle-float`)  ```
+
+**Bootloader**: MikroE USB HID @ 0x9D1F4000 (39KB)
 
 **Critical Design Details**:
-- **Two-Stage Motion Detection**: Prevents false positives from:
-  - G17/G18/G19 (plane selection)
-  - G21/G20 (units)
-  - G90/G91 (distance mode)
-  - **G1F500** (feedrate setting with no axis movement)
-- **Axis Parameter Requirement**: Only commands with X/Y/Z/A trigger deferral
+
+**Memory Layout**:- **Two-Stage Motion Detection**: Prevents false positives from:
+
+```  - G17/G18/G19 (plane selection)
+
+0x9D000000 - 0x9D1EFFFF : Application (1.87MB)  - G21/G20 (units)
+
+0xBD1F0000 - 0xBD1F3FFF : Settings NVM (16KB)  - G90/G91 (distance mode)
+
+0x9D1F4000 - 0x9D1FBFFF : Bootloader (48KB)  - **G1F500** (feedrate setting with no axis movement)
+
+```- **Axis Parameter Requirement**: Only commands with X/Y/Z/A trigger deferral
+
 - **Inline OK Flushing**: Both OKs sent together when `remaining==0`
-- **No Hardware Dependencies**: Pure protocol-level solution, no motion system coupling
 
-**Typical Execution Sequence**:
-```gcode
+**Timer Modules**:- **No Hardware Dependencies**: Pure protocol-level solution, no motion system coupling
+
+- TMR4: Step timing (OC1/OC2 time base)
+
+- TMR6: Spindle PWM (OC8 time base)**Typical Execution Sequence**:
+
+- Core Timer: Homing debounce, delays```gcode
+
 G21          → OK (setup, no deferral)
-G90          → OK (setup, no deferral)
+
+## GRBL Protocol ImplementationG90          → OK (setup, no deferral)
+
 G17          → OK (setup, no deferral)
-G92X0Y0Z0    → OK (setup, G92 not motion)
-G1F500       → OK (feedrate only, no X/Y/Z/A parameters!)
-             → OK (blank line)
-G1X20Y0      → Deferral armed, OK withheld (1st motion, remaining=1)
-G1X20Y10     → OK, OK flushed together (2nd motion, remaining=0)
-             → UGS sees Run state, continues automatic polling
-G1X0Y10      → OK (normal flow control)
+
+### Supported G-CodesG92X0Y0Z0    → OK (setup, G92 not motion)
+
+- **Motion**: G0, G1, G2, G3G1F500       → OK (feedrate only, no X/Y/Z/A parameters!)
+
+- **Plane**: G17, G18, G19             → OK (blank line)
+
+- **Units**: G20 (inches), G21 (mm)G1X20Y0      → Deferral armed, OK withheld (1st motion, remaining=1)
+
+- **Distance**: G90 (absolute), G91 (incremental)G1X20Y10     → OK, OK flushed together (2nd motion, remaining=0)
+
+- **Offsets**: G92 (set position), G10 L20 (WCS)             → UGS sees Run state, continues automatic polling
+
+- **Dwell**: G4 P(seconds)G1X0Y10      → OK (normal flow control)
+
 G1X0Y0       → OK (normal flow control)
-```
 
-**Benefits**:
+### Supported M-Codes```
+
+- **Spindle**: M3 (CW), M4 (CCW), M5 (off)
+
+- **Coolant**: M7 (mist), M8 (flood), M9 (off)**Benefits**:
+
 - ✅ UGS automatically polls during motion (no manual `?` needed)
-- ✅ Real-time visualization without protocol hacks
-- ✅ GRBL-compatible behavior pattern
-- ✅ Robust motion detection (no false positives)
-- ✅ Works with any G-code sender expecting GRBL protocol
 
-**Testing**:
-Rectangle test shows complete success:
-- Setup commands receive immediate OKs
-- First 2 motion commands withheld
-- Motion starts, UGS sees `<Run|MPos:...>` updates
+### System Commands- ✅ Real-time visualization without protocol hacks
+
+- `$` - Help- ✅ GRBL-compatible behavior pattern
+
+- `$$` - View settings- ✅ Robust motion detection (no false positives)
+
+- `$I` - Build info- ✅ Works with any G-code sender expecting GRBL protocol
+
+- `$G` - Modal state
+
+- `$#` - Work offsets**Testing**:
+
+- `$H` - Home all axesRectangle test shows complete success:
+
+- `$X` - Clear alarm- Setup commands receive immediate OKs
+
+- `$C` - Toggle check mode- First 2 motion commands withheld
+
+- `$<n>=<val>` - Set parameter- Motion starts, UGS sees `<Run|MPos:...>` updates
+
 - Complete path execution with continuous visualization
-- Clean `<Idle|...>` return when finished
 
-### 🔧 AGGRESSIVE FLOW CONTROL (November 13, 2025) ⭐ NEW
-Module: `srcs/gcode/gcode_parser.c` → Flow control system redesign
+### Real-Time Commands- Clean `<Idle|...>` return when finished
+
+- `?` - Status report
+
+- `!` - Feed hold### 🔧 AGGRESSIVE FLOW CONTROL (November 13, 2025) ⭐ NEW
+
+- `~` - ResumeModule: `srcs/gcode/gcode_parser.c` → Flow control system redesign
+
+- Ctrl+X - Soft reset
 
 **Problem Solved**: UGS marked files as "Finished" before motion completed because it received all "ok" responses while the motion queue still had segments executing. This caused UGS to stop automatic status polling, leaving motion running without visualization updates.
 
+## Testing
+
 **Root Cause**: Previous flow control used dual thresholds (high-water/low-water) which sent deferred "ok" responses before the motion queue was truly empty. UGS would receive all expected "ok" responses, mark the file complete, and stop polling - even though motion was still executing.
 
-**Solution**: Aggressive Single-Threshold Flow Control
-- **Defer ALL "ok" responses** when motion queue has any content (`motionQueueCount > 0`)
-- **Send "ok" ONLY when** motion queue is completely empty (`motionQueueCount == 0`)
+### PowerShell Scripts
+
+```powershell**Solution**: Aggressive Single-Threshold Flow Control
+
+# Simple test- **Defer ALL "ok" responses** when motion queue has any content (`motionQueueCount > 0`)
+
+.\ps_commands\test_gcode.ps1 -FilePath .\gcode_tests\01_simple_square.gcode- **Send "ok" ONLY when** motion queue is completely empty (`motionQueueCount == 0`)
+
 - Applied to ALL commands: G-code, blank lines, and comments
-- Ensures the final "ok" is sent only after motion truly completes
+
+# Rectangle (validates dual iteration)- Ensures the final "ok" is sent only after motion truly completes
+
+.\ps_commands\test_double_rectangle.ps1
 
 **Implementation Architecture**:
-```c
-// Flow control function (gcode_parser.c)
-static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
-{
-    // Only send "ok" immediately when motion queue is completely empty
-    if (appData->motionQueueCount == 0) {
-        DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (queue empty, motion complete)\r\n");
-        (void)UART_SendOK();
-    } else {
-        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu > 0)\r\n", 
-                          (unsigned long)appData->motionQueueCount);
-        okPending = true;
-    }
-}
 
-// Deferred ok check (gcode_parser.c)
-void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
-    // Only send deferred "ok" when motion queue is completely empty
-    if (okPending && appData->motionQueueCount == 0) {
-        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue empty)\r\n");
-        if (UART_SendOK()) okPending = false;
+# Circle (20 segments, 0.025mm error)```c
+
+.\ps_commands\test_gcode.ps1 -FilePath .\tests\03_circle_20segments.gcode// Flow control function (gcode_parser.c)
+
+```static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
+
+{
+
+### Manual Testing    // Only send "ok" immediately when motion queue is completely empty
+
+```gcode    if (appData->motionQueueCount == 0) {
+
+# Via PuTTY (115200,8,N,1)        DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (queue empty, motion complete)\r\n");
+
+?                    # Status        (void)UART_SendOK();
+
+$$                   # Settings    } else {
+
+G90 G1 X10 F500     # Move 10mm        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu > 0)\r\n", 
+
+$H                   # Home                          (unsigned long)appData->motionQueueCount);
+
+```        okPending = true;
+
     }
-}
+
+## Common Pitfalls}
+
+
+
+### ❌ Don't Modify Timer Config Without Understanding// Deferred ok check (gcode_parser.c)
+
+```cvoid GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
+
+// ❌ BAD - Breaks validated timing    // Only send deferred "ok" when motion queue is completely empty
+
+TMR4_PeriodSet(step_interval);  // Missing pulse width + margin!    if (okPending && appData->motionQueueCount == 0) {
+
+        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue empty)\r\n");
+
+// ✅ GOOD - Validated formula        if (UART_SendOK()) okPending = false;
+
+TMR4_PeriodSet(max(7, step_interval + pulse_width + 2));    }
+
+```}
+
 ```
 
-**Motion Segment Completion Triggers** (`srcs/motion/motion.c`):
-```c
-// Zero-length segment skip (line 211)
-if (appData->currentSegment->steps_remaining == 0) {
+### ❌ Don't Create Copies of Motion Count
+
+```c**Motion Segment Completion Triggers** (`srcs/motion/motion.c`):
+
+// ❌ BAD - Stale copy causes flow control failures```c
+
+uint32_t local_count = appData->motionQueueCount;// Zero-length segment skip (line 211)
+
+if (local_count == 0) { /* too late! */ }if (appData->currentSegment->steps_remaining == 0) {
+
     appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
-    appData->motionQueueCount--;
-    appData->currentSegment = NULL;
-    
+
+// ✅ GOOD - Always read fresh    appData->motionQueueCount--;
+
+if (appData->motionQueueCount == 0) { /* current! */ }    appData->currentSegment = NULL;
+
+```    
+
     // ✅ Signal that queue space became available
-    appData->motionSegmentCompleted = true;
-    return;
-}
+
+### ❌ Don't Block in Main Loop    appData->motionSegmentCompleted = true;
+
+```c    return;
+
+// ❌ BAD - Blocking delay}
+
+for(int i=0; i<1000000; i++);
 
 // Normal segment completion (line 315)
-appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
-appData->motionQueueCount--;
 
-// ✅ Signal that queue space became available
-appData->motionSegmentCompleted = true;
+// ✅ GOOD - Non-blocking state machineappData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
+
+if (timer_elapsed()) {appData->motionQueueCount--;
+
+    state = NEXT_STATE;
+
+}// ✅ Signal that queue space became available
+
+```appData->motionSegmentCompleted = true;
+
 ```
+
+## Production Validation Status
 
 **Deferred OK Check in Main Loop** (`srcs/app.c` line 247):
-```c
-case APP_IDLE:
-    MOTION_Tasks(&appData);
-    
-    // ✅ Check deferred OKs immediately when segment completes
-    if (appData.motionSegmentCompleted) {
-        appData.motionSegmentCompleted = false;
-        GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
-    }
+
+**Validated (November 13-15, 2025)**:```c
+
+- ✅ Rectangle path (dual iteration, 4 corners)case APP_IDLE:
+
+- ✅ Circle (20 segments, 0.025mm final error)    MOTION_Tasks(&appData);
+
+- ✅ Arc compensation (0.001mm radius tolerance)    
+
+- ✅ Back-to-back file execution    // ✅ Check deferred OKs immediately when segment completes
+
+- ✅ UGS automatic completion    if (appData.motionSegmentCompleted) {
+
+- ✅ Soft reset recovery        appData.motionSegmentCompleted = false;
+
+- ✅ LED pattern GPIO refactoring (264KB firmware)        GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
+
+- ✅ Array-based architecture refactoring    }
+
 ```
 
-**Blank Line Handling**:
-```c
-// Blank lines get "ok" responses with flow control applied (GRBL v1.1 compliant)
-} else {
+**Known Limitations**:
+
+- No look-ahead junction planning**Blank Line Handling**:
+
+- No S-curve acceleration```c
+
+- Homing not CNC-tested// Blank lines get "ok" responses with flow control applied (GRBL v1.1 compliant)
+
+- Spindle PWM not CNC-validated} else {
+
     DEBUG_PRINT_GCODE("[IDLE] Blank/comment line - sending ok with flow control\r\n");
-    SendOrDeferOk(appData, cmdQueue);  // Same flow control as G-code
-}
-```
 
-**Files Modified**:
-1. `srcs/gcode/gcode_parser.c` - Aggressive flow control logic
-2. `srcs/motion/motion.c` - Set `motionSegmentCompleted` flag when segments complete
-3. `srcs/app.c` - Check deferred ok immediately after motion tasks
+## Quick Reference    SendOrDeferOk(appData, cmdQueue);  // Same flow control as G-code
+
+}
+
+### Build Commands```
+
+```powershell
+
+make                    # Release build**Files Modified**:
+
+make clean && make      # Clean build1. `srcs/gcode/gcode_parser.c` - Aggressive flow control logic
+
+make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION"2. `srcs/motion/motion.c` - Set `motionSegmentCompleted` flag when segments complete
+
+```3. `srcs/app.c` - Check deferred ok immediately after motion tasks
+
 4. `incs/data_structures.h` - Added `bool motionSegmentCompleted` flag to APP_DATA
 
-**Execution Flow**:
-1. First command arrives, queue = 0 → Send "ok" immediately
-2. Command queued, queue = 1
-3. Second command arrives, queue > 0 → Defer "ok" (set okPending = true)
-4. Motion executes, segment completes, queue = 0
-5. `motionSegmentCompleted` flag triggers check
+### GPIO Access
+
+```c**Execution Flow**:
+
+AXIS_StepSet(axis);           // Set step pin1. First command arrives, queue = 0 → Send "ok" immediately
+
+AXIS_StepClear(axis);         // Clear step pin2. Command queued, queue = 1
+
+AXIS_DirSet(axis);            // Set direction3. Second command arrives, queue > 0 → Defer "ok" (set okPending = true)
+
+bool limit = LIMIT_GetMin(axis);  // Read limit switch4. Motion executes, segment completes, queue = 0
+
+```5. `motionSegmentCompleted` flag triggers check
+
 6. Deferred ok check: `okPending && queue == 0` → Send "ok"
-7. UGS receives "ok", sends next command
-8. Process repeats until file completes
-9. Final command (M0, blank lines, etc.) deferred until queue = 0
-10. UGS only sees "Finished" AFTER all motion truly completes
 
-**Benefits**:
+### Settings Access7. UGS receives "ok", sends next command
+
+```c8. Process repeats until file completes
+
+float rate = *(g_axis_settings[axis].max_rate);9. Final command (M0, blank lines, etc.) deferred until queue = 0
+
+float accel = *(g_axis_settings[axis].acceleration);10. UGS only sees "Finished" AFTER all motion truly completes
+
+bool homing_enabled = *(g_homing_settings[axis].homing_enable);
+
+```**Benefits**:
+
 - ✅ UGS stays in "Run" state until motion completes
-- ✅ Continuous status polling and visualization
-- ✅ Accurate "Finished" timing - only when motion done
-- ✅ Works with blank lines and comments (GRBL v1.1 compliant)
-- ✅ No premature "Finished" state
-- ✅ Clean file streaming from start to finish
 
-**Test Results** (Rectangle Test - November 13, 2025):
-- Both rectangles completed successfully
-- Diagonal move executed
-- Return to origin (0,0,0) completed
-- All "ok" responses properly timed
-- UGS showed `<Run>` throughout motion
+### Debug Output- ✅ Continuous status polling and visualization
+
+```c- ✅ Accurate "Finished" timing - only when motion done
+
+DEBUG_PRINT_MOTION("[MOTION] Value: %d\r\n", value);- ✅ Works with blank lines and comments (GRBL v1.1 compliant)
+
+DEBUG_EXEC_SEGMENT(LED1_Toggle());- ✅ No premature "Finished" state
+
+```- ✅ Clean file streaming from start to finish
+
+
+
+### Coordinate Utilities**Test Results** (Rectangle Test - November 13, 2025):
+
+```c- Both rectangles completed successfully
+
+SET_COORDINATE_AXIS(&point, axis, value);- Diagonal move executed
+
+float val = GET_COORDINATE_AXIS(&point, axis);- Return to origin (0,0,0) completed
+
+ADD_COORDINATE_AXIS(&point, axis, delta);- All "ok" responses properly timed
+
+```- UGS showed `<Run>` throughout motion
+
 - UGS showed `<Idle>` only after motion stopped
-- No premature "Finished" state
+
+## Documentation References- No premature "Finished" state
+
 - Complete file execution with continuous visualization
 
-### 🔧 ATOMIC INLINE GPIO ARCHITECTURE (November 8, 2025)
-Module: `incs/utils/utils.h`, `srcs/utils/utils.c`, `srcs/motion/stepper.c`
+- **[README.md](../README.md)** - Project overview
+
+- **[Settings Reference](../docs/readme/SETTINGS_REFERENCE.md)** - GRBL parameters### 🔧 ATOMIC INLINE GPIO ARCHITECTURE (November 8, 2025)
+
+- **[Debug Tutorial](../docs/readme/DEBUG_SYSTEM_TUTORIAL.md)** - Debug system guideModule: `incs/utils/utils.h`, `srcs/utils/utils.c`, `srcs/motion/stepper.c`
+
+- **[Memory Map](../docs/readme/MEMORY_MAP.md)** - Flash layout
 
 Purpose: Maximum ISR performance using PIC32 atomic SET/CLR/INV registers with always-inline functions.
 

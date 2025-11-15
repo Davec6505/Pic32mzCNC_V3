@@ -6,10 +6,10 @@
 #include "common.h"
 #include "data_structures.h"  // APP_DATA, MotionSegment defined here
 
+// ✅ ARRAY-BASED: Position tracking structure
 typedef struct {
-    int32_t x_steps, y_steps, z_steps, a_steps;  // Signed - can go negative!
-    float steps_per_mm_x, steps_per_mm_y, steps_per_mm_z;
-    float steps_per_deg_a;
+    int32_t steps[NUM_AXIS];          // Step counters [X, Y, Z, A] - signed, can go negative
+    float steps_per_mm[NUM_AXIS];     // Steps per mm for linear axes [X, Y, Z, A]
 } StepperPosition;
 
 // ============================================================================

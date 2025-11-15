@@ -5,127 +5,119 @@
 #include <stdbool.h>
 #include "data_structures.h"  // For E_AXIS enum and NUM_AXIS
 
+
 // ===== AXIS HARDWARE ABSTRACTION =====
 
-// Function pointer types for GPIO operations (MCC abstraction layer)
+
+// ===== SIMPLE GPIO HARDWARE ABSTRACTION (LED pattern) =====
 typedef void (*GPIO_SetFunc)(void);
 typedef void (*GPIO_ClearFunc)(void);
 typedef void (*GPIO_ToggleFunc)(void);
 typedef bool (*GPIO_GetFunc)(void);
 
-// GPIO control structure with function pointers
+// LED function pointer array (simple clean pattern)
+extern GPIO_ToggleFunc led_toggle[];
+
+// Axis function pointer arrays (following LED pattern - simple and direct!)
+extern GPIO_SetFunc axis_step_set[];
+extern GPIO_ClearFunc axis_step_clear[];
+extern GPIO_SetFunc axis_dir_set[];
+extern GPIO_ClearFunc axis_dir_clear[];
+extern GPIO_SetFunc axis_enable_set[];
+extern GPIO_ClearFunc axis_enable_clear[];
+
+// Limit switch function pointer arrays
+extern GPIO_GetFunc axis_limit_min_get[];
+extern GPIO_GetFunc axis_limit_max_get[];
+
+// Settings and position pointers (indexed by axis)
 typedef struct {
-    GPIO_SetFunc Set;
-    GPIO_ClearFunc Clear;
-    GPIO_ToggleFunc Toggle;
-    GPIO_GetFunc Get;
-} GPIO_Control;
+    float* max_rate;
+    float* acceleration;
+    float* steps_per_mm;
+    int32_t* step_count;
+} AxisSettings;
 
-// Array-based axis configuration (respects MCC pin assignments)
-typedef struct {
-    GPIO_Control step;      // Step pin control (wraps MCC macros)
-    GPIO_Control dir;       // Direction pin control
-    GPIO_Control enable;    // Enable pin control
-    
-    // Settings pointers (from GRBL settings structure)
-    float* max_rate;        // Pointer to max_rate_x/y/z/a
-    float* acceleration;    // Pointer to acceleration_x/y/z/a
-    float* steps_per_mm;    // Pointer to steps_per_mm_x/y/z/a
-    
-    // Stepper position pointer
-    int32_t* step_count;    // Pointer to stepper_pos.x_steps/y_steps/z_steps/a_steps
-} AxisConfig;
+extern AxisSettings g_axis_settings[NUM_AXIS];
 
-// Global axis configuration arrays (indexed by axis number 0-3)
-extern AxisConfig g_axis_config[NUM_AXIS];
-extern int32_t g_axis_deltas[NUM_AXIS];      // For Bresenham: delta_x/y/z/a
-extern int32_t* g_axis_errors[NUM_AXIS];     // For Bresenham: &error_x/y/z/a
+// Utility functions
+void UTILS_InitAxisConfig(void);
 
-// Axis utility functions
-void UTILS_InitAxisConfig(void);  // Must be called during initialization
-const AxisConfig* UTILS_GetAxisConfig(E_AXIS axis);  // Get axis configuration
-
-// ===== INLINE GPIO HELPERS (ZERO OVERHEAD WITH MCC ABSTRACTION!) =====
-// These compile to direct function calls that inline the MCC macros
+// ===== INLINE GPIO HELPERS (direct array access - zero overhead!) =====
 
 static inline void __attribute__((always_inline)) AXIS_StepSet(E_AXIS axis) {
-    g_axis_config[axis].step.Set();
+    axis_step_set[axis]();
 }
 
 static inline void __attribute__((always_inline)) AXIS_StepClear(E_AXIS axis) {
-    g_axis_config[axis].step.Clear();
+    axis_step_clear[axis]();
 }
 
 static inline void __attribute__((always_inline)) AXIS_DirSet(E_AXIS axis) {
-    g_axis_config[axis].dir.Set();
+    axis_dir_set[axis]();
 }
 
 static inline void __attribute__((always_inline)) AXIS_DirClear(E_AXIS axis) {
-    g_axis_config[axis].dir.Clear();
+    axis_dir_clear[axis]();
 }
 
 static inline void __attribute__((always_inline)) AXIS_EnableSet(E_AXIS axis) {
-    g_axis_config[axis].enable.Set();
+    axis_enable_set[axis]();
 }
 
 static inline void __attribute__((always_inline)) AXIS_EnableClear(E_AXIS axis) {
-    g_axis_config[axis].enable.Clear();
+    axis_enable_clear[axis]();
 }
 
-// Inline step increment/decrement (direct memory access - no function call)
+static inline bool __attribute__((always_inline)) AXIS_LimitMinGet(E_AXIS axis) {
+    return axis_limit_min_get[axis]();
+}
+
+static inline bool __attribute__((always_inline)) AXIS_LimitMaxGet(E_AXIS axis) {
+    return axis_limit_max_get[axis]();
+}
+
+// Inline step increment/decrement (direct memory access)
 static inline void __attribute__((always_inline)) AXIS_IncrementSteps(E_AXIS axis) {
-    (*g_axis_config[axis].step_count)++;
+    (*g_axis_settings[axis].step_count)++;
 }
 
 static inline void __attribute__((always_inline)) AXIS_DecrementSteps(E_AXIS axis) {
-    (*g_axis_config[axis].step_count)--;
+    (*g_axis_settings[axis].step_count)--;
 }
 
-// Inline step getter/setter (direct memory access for position tracking)
 static inline int32_t __attribute__((always_inline)) AXIS_GetSteps(E_AXIS axis) {
-    return *g_axis_config[axis].step_count;
+    return *g_axis_settings[axis].step_count;
 }
 
 static inline void __attribute__((always_inline)) AXIS_SetSteps(E_AXIS axis, int32_t steps) {
-    *g_axis_config[axis].step_count = steps;
+    *g_axis_settings[axis].step_count = steps;
 }
 
 // ===== LIMIT SWITCH HARDWARE ABSTRACTION =====
 
-// Limit switch control structure (same pattern as GPIO_Control)
+// Homing settings per axis
 typedef struct {
-    GPIO_GetFunc GetMin;    // Read minimum limit switch state
-    GPIO_GetFunc GetMax;    // Read maximum limit switch state
-} GPIO_LimitControl;
+    uint8_t* homing_enable;
+    uint8_t* homing_dir_mask;
+    float* homing_feed_rate;
+    float* homing_seek_rate;
+    uint32_t* homing_debounce;
+    float* homing_pull_off;
+} HomingSettings;
 
-// Limit configuration per axis (respects MCC pin assignments)
-typedef struct {
-    GPIO_LimitControl limit;
-    
-    // Homing settings pointers (from CNC settings structure)
-    uint8_t* homing_enable;      // Pointer to settings->homing_enable
-    uint8_t* homing_dir_mask;    // Pointer to settings->homing_dir_mask
-    float* homing_feed_rate;     // Pointer to settings->homing_feed_rate
-    float* homing_seek_rate;     // Pointer to settings->homing_seek_rate
-    uint32_t* homing_debounce;   // Pointer to settings->homing_debounce
-    float* homing_pull_off;      // Pointer to settings->homing_pull_off
-} LimitConfig;
+extern HomingSettings g_homing_settings[NUM_AXIS];
 
-// Global limit configuration array (indexed by E_AXIS)
-extern LimitConfig g_limit_config[NUM_AXIS];
+void UTILS_InitLimitConfig(void);
 
-// Limit switch utility functions
-void UTILS_InitLimitConfig(void);  // Must be called during initialization
-const LimitConfig* UTILS_GetLimitConfig(E_AXIS axis);  // Get limit configuration
-
-// ===== INLINE LIMIT SWITCH HELPERS (ZERO OVERHEAD!) =====
+// ===== INLINE LIMIT SWITCH HELPERS (direct array access!) =====
 
 static inline bool __attribute__((always_inline)) LIMIT_GetMin(E_AXIS axis) {
-    return g_limit_config[axis].limit.GetMin();
+    return axis_limit_min_get[axis]();
 }
 
 static inline bool __attribute__((always_inline)) LIMIT_GetMax(E_AXIS axis) {
-    return g_limit_config[axis].limit.GetMax();
+    return axis_limit_max_get[axis]();
 }
 
 // Check if any limit triggered for an axis (respects invert mask)
@@ -161,19 +153,19 @@ uint32_t UTILS_SafeStrlen(const char* str, uint32_t max_len);
 
 // ===== COORDINATE ARRAY UTILITIES (ELIMINATES AXIS SWITCH STATEMENTS) =====
 
-// Treat CoordinatePoint as float[4] array using guaranteed memory layout
-// CoordinatePoint { float x, y, z, a; } -> [0]=x, [1]=y, [2]=z, [3]=a
+// CoordinatePoint array utilities
+// CoordinatePoint { float coordinate[NUM_AXIS]; } -> [0]=X, [1]=Y, [2]=Z, [3]=A
 
 static inline void SET_COORDINATE_AXIS(CoordinatePoint* coord, E_AXIS axis, float value) {
-    ((float*)coord)[axis] = value;
+    coord->coordinate[axis] = value;
 }
 
 static inline float GET_COORDINATE_AXIS(const CoordinatePoint* coord, E_AXIS axis) {
-    return ((float*)coord)[axis];
+    return coord->coordinate[axis];
 }
 
 static inline void ADD_COORDINATE_AXIS(CoordinatePoint* coord, E_AXIS axis, float delta) {
-    ((float*)coord)[axis] += delta;
+    coord->coordinate[axis] += delta;
 }
 
 // Usage examples (replaces all switch statements for coordinate manipulation):
