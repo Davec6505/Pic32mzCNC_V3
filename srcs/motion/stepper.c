@@ -54,6 +54,9 @@ void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context);
 // Reference to application data for ISR access
 static APP_DATA* app_data_ref = NULL;
 
+// ✅ HARD LIMIT ALARM FLAG - Set by ISR, cleared by main loop ($X command)
+volatile bool g_hard_limit_alarm = false;
+
 // Position tracking (incremented/decremented by ISR based on direction)
 static StepperPosition stepper_pos = {
     .steps = {0, 0, 0, 0},                    // All axes start at zero
@@ -95,6 +98,9 @@ void STEPPER_Initialize(APP_DATA* appData) {
     step_pulse_invert_mask = settings->step_pulse_invert;
     direction_invert_mask = settings->step_direction_invert;
     enable_invert = settings->step_enable_invert;
+    
+    DEBUG_PRINT_STEPPER("[STEPPER_Init] dir_invert_mask=0x%02X ($3=%u)\r\n", 
+                        direction_invert_mask, direction_invert_mask);
     
     // ✅ ARRAY-BASED: Update steps_per_mm from settings (loop for scalability)
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
@@ -185,12 +191,16 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     
     // ✅ ARRAY-BASED: Set directions (single loop!)
     direction_bits = 0;
+    DEBUG_PRINT_STEPPER("[STEPPER_Load] Direction invert mask = 0x%02X\r\n", direction_invert_mask);
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         if (delta[axis] >= 0) {
             direction_bits |= (1 << axis);
         }
+        bool forward = (delta[axis] >= 0);
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] Axis %d: delta=%ld, forward=%d, invert_bit=%d\r\n",
+            axis, delta[axis], forward, (direction_invert_mask >> axis) & 0x01);
         // Update GPIO direction pin
-        MOTION_UTILS_SetDirection(axis, (delta[axis] >= 0), direction_invert_mask);
+        MOTION_UTILS_SetDirection(axis, forward, direction_invert_mask);
     }
     
     // Set initial step rate (PR4 controls OC1 period in 16-bit mode)
@@ -290,6 +300,19 @@ bool STEPPER_IsDwellComplete(void)
     return false;  // Still waiting
 }
 
+void STEPPER_ReloadSettings(void)
+{
+    // Reload cached settings from flash (called when $0-$5 change at runtime)
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+    
+    step_pulse_invert_mask = settings->step_pulse_invert;
+    direction_invert_mask = settings->step_direction_invert;
+    enable_invert = settings->step_enable_invert;
+    
+    DEBUG_PRINT_STEPPER("[STEPPER_Reload] dir_invert_mask=0x%02X ($3=%u)\r\n", 
+                        direction_invert_mask, direction_invert_mask);
+}
+
 void STEPPER_EnableAll(void)
 {
     if (steppers_enabled) return;
@@ -345,6 +368,22 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 // ============================================================================
 
 void OCP1_ISR(uintptr_t context) {
+    // ✅ CRITICAL: Check hard limits FIRST - emergency stop if triggered
+    // This runs BEFORE any step pulses are generated
+    // Only check if $21 (hard_limits_enable) is set to 1
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+    if (settings->hard_limits_enable && MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+        // EMERGENCY STOP - Hard limit triggered!
+        TMR4_Stop();                    // Stop step generation immediately
+        MOTION_UTILS_EnableAllAxes(false, enable_invert);  // Disable steppers
+        
+        g_hard_limit_alarm = true;      // Signal main loop
+        LED2_Set();                     // Visual alarm indicator
+        
+        DEBUG_PRINT_STEPPER("[STEPPER_ISR] HARD LIMIT TRIGGERED - EMERGENCY STOP!\r\n");
+        return;  // Exit ISR immediately - no steps generated
+    }
+    
     // ✅ CRITICAL DEBUG: Toggle LED to confirm ISR fires
     LED1_Toggle();
     

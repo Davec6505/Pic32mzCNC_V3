@@ -121,18 +121,23 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     appData->modalSpindleRPM  = 0;        /* S */
     appData->modalToolNumber  = 0;        /* T0 */
 
-    /* 5. Application state back to IDLE */
-    appData->state            = APP_IDLE;
+    /* 5. Clear alarm state (soft reset should clear alarms) */
+    extern volatile bool g_hard_limit_alarm;
+    g_hard_limit_alarm = false;
+    appData->alarmCode = 0;
+    grblAlarm = false;
+    
+    /* 6. Application state back to IDLE */
+    appData->state = APP_IDLE;
 
-    /* 6. Reset G-code command queue */
+    /* 7. Reset G-code command queue */
     cmdQueue->head  = 0;
     cmdQueue->tail  = 0;
     cmdQueue->count = 0;
     /* ✅ No sync needed - flow control reads appData->motionQueueCount directly */
 
-    /* 7. Reset G-code parser state */
+    /* 8. Reset G-code parser state */
     okPendingCount = 0;  // Clear all deferred ok responses
-    grblAlarm = false;
     grblCheckMode = false;
     feedHoldActive = false;
     unitsInches = false;
@@ -146,10 +151,10 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
 
-    /* 8. Mark steppers to be re-enabled automatically on first motion command */
+    /* 9. Mark steppers to be re-enabled automatically on first motion command */
     // stepperEnablePending = true;
 
-    /* 9. Save current settings to flash (persist any changes made before reset) */
+    /* 10. Save current settings to flash (persist any changes made before reset) */
     // Flash write now uses CORETIMER delays to prevent hangs
     // CRITICAL: Clear G92 offset before saving - G92 is a temporary offset, not persistent!
     CNC_Settings* settings = SETTINGS_GetCurrent();
@@ -159,7 +164,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
         DEBUG_PRINT_GCODE("[GCODE] Settings saved to flash during soft reset (G92 cleared)\r\n");
     }
 
-    /* 10. Print GRBL startup banner (expected by senders after Ctrl+X) */
+    /* 11. Print GRBL startup banner (expected by senders after Ctrl+X) */
 #ifdef ENABLE_STARTUP_BANNER
     UART_SEND_BANNER();  // Compile-time string and length from common.h
 #endif
@@ -982,6 +987,12 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'X') {
             grblAlarm = false;
+            
+            // ✅ Clear hard limit alarm flag (set by stepper ISR)
+            extern volatile bool g_hard_limit_alarm;
+            g_hard_limit_alarm = false;
+            
+            DEBUG_PRINT_GCODE("[GCODE] Alarm cleared via $X command\r\n");
             handled = true;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'F') {
@@ -1023,6 +1034,12 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 CNC_Settings* s = SETTINGS_GetCurrent();
                 if (SETTINGS_SetValue(s, (uint32_t)param, val)) {
                     s->checksum = SETTINGS_CalculateCRC32(s);
+                    
+                    // Reload stepper cached settings if step/dir/enable invert changed ($0-$5)
+                    if (param <= 5) {
+                        STEPPER_ReloadSettings();
+                    }
+                    
                     handled = true;
                 } else {
                     UART3_Write((uint8_t*)"error:3\r\n", 10);
@@ -1053,6 +1070,8 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         }
         else if (len == 1 && cmd[0] == '$') {
             UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $C $X $F $RST= $SAVE $SLP]\r\n", 50);
+            UART3_Write((uint8_t*)"[MSG:$21 Hard Limits Enable - $21=0 (disabled), $21=1 (enabled)]\r\n", 68);
+            UART3_Write((uint8_t*)"[MSG:$5 Limit Pin Invert - NO switch:$5=0 (pin HIGH triggers), NC switch:$5=255 (pin LOW triggers)]\r\n", 103);
             handled = true;
         }
 

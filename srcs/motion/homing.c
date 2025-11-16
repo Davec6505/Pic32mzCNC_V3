@@ -274,12 +274,20 @@ void HOMING_StartPulloff(APP_DATA* appData) {
 bool HOMING_LimitTriggered(void) {
     // Determine which limit to check based on homing direction
     bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask >> g_homing.current_axis) & 0x01;
+    
+    // Get raw limit pin state
     bool limit_state = home_positive ? LIMIT_GetMax(g_homing.current_axis) : 
                                        LIMIT_GetMin(g_homing.current_axis);
     
-    // Apply invert mask from settings
+    // Apply invert mask from settings ($5)
+    // Current simplified model: One invert bit per axis applies to BOTH Min and Max
+    // GRBL standard: Separate bits for Min (axis*2) and Max (axis*2+1)
     CNC_Settings* settings = SETTINGS_GetCurrent();
     bool inverted = (settings->limit_pins_invert >> g_homing.current_axis) & 0x01;
+    
+    // XOR inverts the trigger logic:
+    // NO switch ($5 bit=0): Pin HIGH (1) triggers → 1^0=1 (alarm)
+    // NC switch ($5 bit=1): Pin LOW (0) triggers → 0^1=1 (alarm)
     limit_state ^= inverted;
     
     // Check for limit trigger

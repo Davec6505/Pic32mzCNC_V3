@@ -16,6 +16,10 @@ typedef struct {
 // Public API
 // ============================================================================
 
+// ✅ HARD LIMIT ALARM FLAG - Shared between ISR and main loop
+// Set by stepper ISR when hard limit triggered, cleared by $X command
+extern volatile bool g_hard_limit_alarm;
+
 void STEPPER_Initialize(APP_DATA* appData);
 void STEPPER_LoadSegment(MotionSegment* segment);         // Load new segment for execution
 void STEPPER_SetStepRate(uint32_t rate_ticks);            // Update PR2 for velocity profiling
@@ -32,5 +36,8 @@ void STEPPER_EnableAll(void);
 
 /* Check if dwell timer has completed (for DWELL segments). */
 bool STEPPER_IsDwellComplete(void);
+
+/* Reload cached settings from flash (call after changing $0-$5 settings). */
+void STEPPER_ReloadSettings(void);
 
 #endif /* STEPPER_H */

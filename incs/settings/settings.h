@@ -34,9 +34,10 @@ typedef struct {
     float spindle_min_rpm;         // $31 - Min spindle speed (RPM)
     
     // Homing configuration ($20-$27)
+    uint8_t hard_limits_enable;    // $21 - Hard limit enable (bool as uint8)
     uint8_t homing_enable;         // $22 - Homing cycle enable (bool as uint8)
     uint8_t homing_dir_mask;       // $23 - Homing dir invert mask
-    uint16_t padding2;             // Alignment padding
+    uint8_t padding2;              // Alignment padding
     float homing_feed_rate;        // $24 - Homing locate feed rate (mm/min)
     float homing_seek_rate;        // $25 - Homing search seek rate (mm/min)
     uint32_t homing_debounce;      // $26 - Homing switch debounce (ms)

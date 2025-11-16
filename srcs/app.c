@@ -22,6 +22,7 @@
 #include "motion/homing.h"  // For homing state machine
 #include "motion/spindle.h"  // For spindle PWM control
 #include "motion_utils.h"  // For hard limit checking
+#include "stepper.h"  // For g_hard_limit_alarm flag
 #include "config/default/peripheral/coretimer/plib_coretimer.h"  // For CORETIMER heartbeat counter
 #include "utils/uart_utils.h"  // Non-blocking UART utilities
 #include "utils/utils.h"       // For UTILS_InitAxisConfig
@@ -295,18 +296,18 @@ void APP_Tasks ( void )
                 }
             }
 
-            // ===== HARD LIMIT CHECK (TEMP DISABLED) =====
-            // Check limit switches with inversion mask from settings
-            // ⚠️ TEMPORARILY DISABLED FOR UART TESTING
-            /*
-            CNC_Settings* settings = SETTINGS_GetCurrent();
-            if(MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
-                // ⚠️ HARD LIMIT TRIGGERED - Emergency stop!
+            // ===== HARD LIMIT CHECK =====
+            // Check if ISR detected hard limit trigger (set g_hard_limit_alarm flag)
+            if (g_hard_limit_alarm) {
+                // Hard limit triggered during motion - enter alarm state
                 appData.alarmCode = 1;  // Alarm code 1 = hard limit
                 appData.state = APP_ALARM;
+                
+                UART_Printf("[MSG:ALARM - Hard limit triggered! Send $X to clear]\r\n");
+                DEBUG_PRINT_APP("[APP] Hard limit alarm from ISR, entering ALARM state\r\n");
+                
                 break;  // Immediate transition to alarm state
             }
-            */
 
             break;
         }
@@ -319,6 +320,19 @@ void APP_Tasks ( void )
             
             // User must acknowledge alarm and reset
             STEPPER_DisableAll();
+            
+            // ✅ Check if alarm cleared by $X command
+            if (!g_hard_limit_alarm && appData.alarmCode == 1) {
+                // Hard limit alarm cleared - return to IDLE
+                DEBUG_PRINT_APP("[APP] Hard limit alarm cleared, returning to IDLE\r\n");
+                appData.alarmCode = 0;
+                appData.state = APP_IDLE;
+                LED2_Clear();  // Turn off alarm LED
+            }
+            
+            // Continue processing G-code (allows $X, $$, $#, ?, etc.)
+            GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
+            
             break;
         }
         

@@ -58,6 +58,7 @@ static const CNC_Settings default_settings = {
     .spindle_min_rpm = 0.0f,
     
     // Homing
+    .hard_limits_enable = 0,       // false as uint8 (disabled by default for safety)
     .homing_enable = 1,            // true as uint8
     .homing_dir_mask = 0,
     .padding2 = 0,
@@ -296,7 +297,8 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 30: settings->spindle_max_rpm = value; break;
         case 31: settings->spindle_min_rpm = value; break;
         
-        // Homing
+        // Homing & Limits
+        case 21: settings->hard_limits_enable = (uint8_t)value; break;
         case 22: settings->homing_enable = (uint8_t)value; break;
         case 23: settings->homing_dir_mask = (uint8_t)value; break;
         case 24: settings->homing_feed_rate = value; break;
@@ -353,6 +355,7 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         case 30: return settings->spindle_max_rpm;
         case 31: return settings->spindle_min_rpm;
         
+        case 21: return (float)settings->hard_limits_enable;
         case 22: return (float)settings->homing_enable;
         case 23: return (float)settings->homing_dir_mask;
         case 24: return settings->homing_feed_rate;
@@ -372,7 +375,7 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     
     // ✅ Buffer entire settings response for reliable transmission
     // Non-blocking UART_Printf() drops messages when TX buffer full
-    static char settings_buffer[2048];  // Large enough for all 29 settings + formatting
+    static char settings_buffer[2048];  // Large enough for all 30 settings + formatting
     int len = 0;
     
     // Format: $<param>=<value> (lowercase 'ok' per GRBL protocol)
@@ -386,6 +389,7 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$12=%.3f\r\n", settings->mm_per_arc_segment);
     len += sprintf(&settings_buffer[len], "$13=%.3f\r\n", settings->arc_tolerance);
         
+    len += sprintf(&settings_buffer[len], "$21=%u\r\n", settings->hard_limits_enable);
     len += sprintf(&settings_buffer[len], "$22=%u\r\n", settings->homing_enable);
     len += sprintf(&settings_buffer[len], "$23=%u\r\n", settings->homing_dir_mask);
     len += sprintf(&settings_buffer[len], "$24=%.3f\r\n", settings->homing_feed_rate);
