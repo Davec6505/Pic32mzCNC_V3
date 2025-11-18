@@ -49,7 +49,7 @@
 /* -------------------------------------------------------------------------- */
 /* Static Buffers / State                                                     */
 /* -------------------------------------------------------------------------- */
-static uint8_t txBuffer[250];
+static uint8_t txBuffer[512];
 static uint8_t rxBuffer[512];  // Increased to match UART3 RX buffer size
 static volatile uint32_t nBytesRead = 0;
 
@@ -968,6 +968,39 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             }
             handled = true;
         }
+        else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'L') {
+            // $L - Debug command: Show limit switch states
+            CNC_Settings* settings = SETTINGS_GetCurrent();
+            
+            DEBUG_PRINT_GCODE("[LIMIT] Pins: X_Min=%d X_Max=%d Y_Min=%d Y_Max=%d Z_Min=%d Z_Max=%d A_Min=%d A_Max=%d\r\n",
+                             LIMIT_GetMin(AXIS_X), LIMIT_GetMax(AXIS_X),
+                             LIMIT_GetMin(AXIS_Y), LIMIT_GetMax(AXIS_Y),
+                             LIMIT_GetMin(AXIS_Z), LIMIT_GetMax(AXIS_Z),
+                             LIMIT_GetMin(AXIS_A), LIMIT_GetMax(AXIS_A));
+            
+            DEBUG_PRINT_GCODE("[LIMIT] Settings: $5=%u $21=%u (%s)\r\n", 
+                             settings->limit_pins_invert,
+                             settings->hard_limits_enable,
+                             settings->hard_limits_enable ? "ENABLED" : "DISABLED");
+            
+            // Show which axes would trigger alarm
+            bool any_triggered = false;
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                bool triggered = LIMIT_CheckAxis(axis, settings->limit_pins_invert);
+                if (triggered) {
+                    DEBUG_EXEC_GCODE({
+                        char axis_name = 'X' + axis;
+                        DEBUG_PRINT_GCODE("[LIMIT] *** AXIS %c TRIGGERED ***\r\n", axis_name);
+                    });
+                    any_triggered = true;
+                }
+            }
+            if (!any_triggered) {
+                DEBUG_PRINT_GCODE("[LIMIT] All clear - no limits triggered\r\n");
+            }
+            
+            handled = true;
+        }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'I') {
             SETTINGS_PrintBuildInfo();
             handled = true;
@@ -1069,9 +1102,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             handled = true;
         }
         else if (len == 1 && cmd[0] == '$') {
-            UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $C $X $F $RST= $SAVE $SLP]\r\n", 50);
+            UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $C $X $F $RST= $SAVE $SLP $L]\r\n", 53);
             UART3_Write((uint8_t*)"[MSG:$21 Hard Limits Enable - $21=0 (disabled), $21=1 (enabled)]\r\n", 68);
             UART3_Write((uint8_t*)"[MSG:$5 Limit Pin Invert - NO switch:$5=0 (pin HIGH triggers), NC switch:$5=255 (pin LOW triggers)]\r\n", 103);
+            UART3_Write((uint8_t*)"[MSG:$L - Show limit switch states (debug)]\r\n", 46);
             handled = true;
         }
 

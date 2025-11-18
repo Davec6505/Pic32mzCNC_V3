@@ -227,18 +227,17 @@ void APP_Tasks ( void )
 
             // ===== LED2 STATUS INDICATOR (CORETIMER-TIMED, NOT LOOP-COUNT) =====
             // Maintain stable heartbeat independent of loop workload
-            // Toggle about once per second when idle (no motion)
+            // ===== LED1 HEARTBEAT (1 SECOND) =====
+            // Toggle LED1 once per second when idle (no motion)
             static uint32_t hb_last = 0;
-            const uint32_t HB_INTERVAL = 100000000U; // ~1s @ 100MHz Core Timer (200MHz CPU / 2)
+            const uint32_t HB_INTERVAL = 100000000U; // 1 second @ 100MHz Core Timer (200MHz CPU / 2)
             if(appData.motionQueueCount == 0) {
                 uint32_t now_ticks = CORETIMER_CounterGet();
                 if ((uint32_t)(now_ticks - hb_last) >= HB_INTERVAL) {
-                  //  LED2_Toggle();
+                    LED1_Toggle();  // LED1 = heartbeat indicator
                     hb_last = now_ticks;
                 }
             }
-            // During motion, ISR toggles LED1 on each step (fast blink)
-            // LED1 will blink at step rate, visible motion indicator
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
             // Flow control uses appData.motionQueueCount directly (no sync needed)
 
@@ -267,6 +266,7 @@ void APP_Tasks ( void )
             // ===== HOMING STATE MACHINE (NON-BLOCKING) =====
             // Process homing cycle if active
             HOMING_Tasks(&appData);
+
 
             // ===== EVENT PROCESSING - CONVERT GCODE TO MOTION =====
             // ⚠️ Only process events if NOT in alarm state
@@ -297,16 +297,89 @@ void APP_Tasks ( void )
             }
 
             // ===== HARD LIMIT CHECK =====
-            // Check if ISR detected hard limit trigger (set g_hard_limit_alarm flag)
-            if (g_hard_limit_alarm) {
-                // Hard limit triggered during motion - enter alarm state
-                appData.alarmCode = 1;  // Alarm code 1 = hard limit
-                appData.state = APP_ALARM;
+            // Check hard limits in main loop (non-blocking, state-aware)
+            // Note: homing_active already calculated above for LED2 indicator
+            CNC_Settings* settings = SETTINGS_GetCurrent();
+   
+            
+            
+            // ===== HOMING STATE CHECK (USED FOR LED2 AND HARD LIMITS) =====
+            extern HomingControl g_homing;  // From homing.c
+            bool homing_active = (g_homing.state != HOMING_STATE_IDLE && 
+                                  g_homing.state != HOMING_STATE_COMPLETE &&
+                                  g_homing.state != HOMING_STATE_ALARM);
+            
+
+            // During homing: Check if limit stays triggered for >5 seconds (failed backoff)
+            if (homing_active) {
+                static uint32_t limit_stuck_counter = 0;
+                static bool limit_was_triggered = false;
+                // Counter-based timeout: ~5 seconds at ~1000 loops/sec = 5000 iterations
+                const uint32_t BACKOFF_TIMEOUT_LOOPS = 5000U;
                 
-                UART_Printf("[MSG:ALARM - Hard limit triggered! Send $X to clear]\r\n");
-                DEBUG_PRINT_APP("[APP] Hard limit alarm from ISR, entering ALARM state\r\n");
+                // ===== LED2 STATE INDICATOR: HOMING =====
+                // Toggle LED2 at 1Hz during homing (rollover-safe pattern)
+                static uint32_t led2_homing_last = 0;
+                const uint32_t LED2_HOMING_INTERVAL = 100000000U; // 1 second @ 100MHz Core Timer
+                uint32_t now = CORETIMER_CounterGet();
+                if ((uint32_t)(now - led2_homing_last) >= LED2_HOMING_INTERVAL) {
+                    LED2_Toggle();
+                    led2_homing_last = now;
+                }
+
+                bool limit_triggered_now = MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert);
                 
-                break;  // Immediate transition to alarm state
+                if (limit_triggered_now && !limit_was_triggered) {
+                    // Limit just triggered - start counter
+                    limit_stuck_counter = 0;
+                    limit_was_triggered = true;
+                } else if (!limit_triggered_now && limit_was_triggered) {
+                    // Limit cleared - successful backoff, reset counter
+                    limit_stuck_counter = 0;
+                    limit_was_triggered = false;
+                } else if (limit_triggered_now && limit_was_triggered) {
+                    // Limit still triggered - increment counter each loop
+                    limit_stuck_counter++;
+                    if (limit_stuck_counter >= BACKOFF_TIMEOUT_LOOPS) {
+                        // ALARM: Failed to back off limit switch within 5 seconds!
+                        TMR4_Stop();
+                        MOTION_UTILS_EnableAllAxes(false, settings->step_enable_invert);
+                        
+                        appData.alarmCode = 1;
+                        appData.state = APP_ALARM;
+                        g_hard_limit_alarm = true;
+                        
+                        UART_Printf("[MSG:ALARM - Homing failed! Axis stuck on limit switch]\r\n");
+                        DEBUG_PRINT_APP("[APP] Homing backoff timeout - limit stuck for >5sec (loops=%lu)\r\n", 
+                                       (unsigned long)limit_stuck_counter);
+                        
+                        break;
+                    }
+                }
+            }
+            // Normal motion: Check hard limits immediately (no delay)
+            else if (settings->hard_limits_enable) {
+                if (MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+                    // Hard limit triggered during normal motion - ALARM!
+                    TMR4_Stop();
+                    MOTION_UTILS_EnableAllAxes(false, settings->step_enable_invert);
+                    
+                    appData.alarmCode = 1;
+                    appData.state = APP_ALARM;
+                    g_hard_limit_alarm = true;
+                    
+                    UART_Printf("[MSG:ALARM - Hard limit triggered! Send $X to clear]\r\n");
+                    DEBUG_PRINT_APP("[APP] Hard limit detected in main loop, entering ALARM state\r\n");
+                    
+                    break;
+                }
+            }
+            else{
+                    
+                // Not homing - turn LED2 off (unless in ALARM state)
+                if (appData.state != APP_ALARM) {
+                    LED2_Clear();
+                }
             }
 
             break;
@@ -315,8 +388,16 @@ void APP_Tasks ( void )
         case APP_ALARM:
         {
             // Emergency stop state - all motion halted
-            // LED2 constant ON to indicate alarm
-            LED2_Set();
+            
+            // ===== LED2 STATE INDICATOR: ALARM =====
+            // Toggle LED2 at 10Hz (100ms) during alarm
+            static uint32_t led2_alarm_last = 0;
+            const uint32_t LED2_ALARM_INTERVAL = 10000000U; // 100ms @ 100MHz Core Timer
+            uint32_t now_ticks = CORETIMER_CounterGet();
+            if ((now_ticks - led2_alarm_last) >= LED2_ALARM_INTERVAL) {
+                LED2_Toggle();
+                led2_alarm_last = now_ticks;
+            }
             
             // User must acknowledge alarm and reset
             STEPPER_DisableAll();

@@ -9,6 +9,7 @@
 #include "motion/stepper.h"
 #include "motion/motion_utils.h"
 #include "utils/utils.h"
+#include "utils/uart_utils.h"
 #include "settings/settings.h"
 #include "../config/default/peripheral/coretimer/plib_coretimer.h"
 #include "../config/default/peripheral/gpio/plib_gpio.h"
@@ -76,13 +77,25 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
         
         case HOMING_STATE_SEEK:
             // Check if limit triggered
+            DEBUG_EXEC_GCODE({
+                static uint32_t last_check = 0;
+                if (CORETIMER_CounterGet() - last_check > 200000000) { // Every second
+                    bool limit = HOMING_LimitTriggered();
+                    DEBUG_PRINT_GCODE("[HOMING] SEEK: limit=%d, motion_active=%d, queue=%lu\r\n", 
+                                     limit, g_homing.motion_active, (unsigned long)appData->motionQueueCount);
+                    last_check = CORETIMER_CounterGet();
+                }
+            });
+            
             if (HOMING_LimitTriggered()) {
                 // Limit hit - transition to locate phase
+                DEBUG_PRINT_GCODE("[HOMING] Limit triggered - transitioning to LOCATE\r\n");
                 g_homing.motion_active = false;
                 g_homing.state = HOMING_STATE_LOCATE;
                 HOMING_StartLocate(appData);
             } else if (!g_homing.motion_active && appData->motionQueueCount == 0) {
                 // Motion completed without hitting limit - ALARM
+                DEBUG_PRINT_GCODE("[HOMING] SEEK motion complete without limit trigger - ALARM\r\n");
                 g_homing.state = HOMING_STATE_ALARM;
                 g_homing.alarm_code = 9;  // GRBL Alarm 9: Homing fail (travel exceeded)
                 STEPPER_DisableAll();
@@ -179,7 +192,8 @@ void HOMING_ClearAlarm(void) {
 
 void HOMING_StartSeek(APP_DATA* appData) {
     // Determine homing direction from $23 mask
-    bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask >> g_homing.current_axis) & 0x01;
+    uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
+    bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
     
     // Calculate large search distance (assume 300mm max travel)
     float search_distance = home_positive ? 300.0f : -300.0f;
@@ -208,7 +222,8 @@ void HOMING_StartSeek(APP_DATA* appData) {
 
 void HOMING_StartLocate(APP_DATA* appData) {
     // Determine homing direction from $23 mask
-    bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask >> g_homing.current_axis) & 0x01;
+    uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
+    bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
     
     // Back off 5mm to clear switch, then approach slowly
     float backoff_distance = home_positive ? -5.0f : 5.0f;
@@ -249,7 +264,8 @@ void HOMING_StartLocate(APP_DATA* appData) {
 
 void HOMING_StartPulloff(APP_DATA* appData) {
     // Determine homing direction from $23 mask
-    bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask >> g_homing.current_axis) & 0x01;
+    uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
+    bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
     float pulloff_distance = home_positive ? -*g_homing_settings[g_homing.current_axis].homing_pull_off : *g_homing_settings[g_homing.current_axis].homing_pull_off;
     
     // Build target position

@@ -2,6 +2,7 @@
 #include "common.h"
 #include "settings.h"
 #include "motion_utils.h"
+#include "homing.h"  // For HomingControl and homing state checking
 #include "utils/utils.h"  // For AxisConfig and AXIS_xxx inline helpers
 #include "utils/uart_utils.h"  // For DEBUG_PRINT_STEPPER
 #include "definitions.h"
@@ -368,25 +369,6 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 // ============================================================================
 
 void OCP1_ISR(uintptr_t context) {
-    // ✅ CRITICAL: Check hard limits FIRST - emergency stop if triggered
-    // This runs BEFORE any step pulses are generated
-    // Only check if $21 (hard_limits_enable) is set to 1
-    CNC_Settings* settings = SETTINGS_GetCurrent();
-    if (settings->hard_limits_enable && MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
-        // EMERGENCY STOP - Hard limit triggered!
-        TMR4_Stop();                    // Stop step generation immediately
-        MOTION_UTILS_EnableAllAxes(false, enable_invert);  // Disable steppers
-        
-        g_hard_limit_alarm = true;      // Signal main loop
-        LED2_Set();                     // Visual alarm indicator
-        
-        DEBUG_PRINT_STEPPER("[STEPPER_ISR] HARD LIMIT TRIGGERED - EMERGENCY STOP!\r\n");
-        return;  // Exit ISR immediately - no steps generated
-    }
-    
-    // ✅ CRITICAL DEBUG: Toggle LED to confirm ISR fires
-    LED1_Toggle();
-    
     // ✅ GUARD: No active segment - skip step generation but keep timer running
     if (app_data_ref == NULL || app_data_ref->currentSegment == NULL) {
         return;  // Main loop will load next segment or stop timer
@@ -405,7 +387,6 @@ void OCP1_ISR(uintptr_t context) {
         static uint32_t debug_counter = 0;
         if (++debug_counter >= 100) {  // Print every 100th step to avoid UART flood
             debug_counter = 0;
-            LED2_Toggle();  // Visual confirmation of debug execution
         }
     });
     
@@ -475,8 +456,7 @@ void OCP1_ISR(uintptr_t context) {
 // ============================================================================
 
 void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context) {
-    // ✅ DEBUG: Toggle LED2 to confirm TMR5 callback fires
-    LED2_Toggle();
+    // LED2 removed - reserved for state indicator (homing/alarm only)
     
     // Stop TMR5 (one-shot mode)
     TMR5_Stop();
