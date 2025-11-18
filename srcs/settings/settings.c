@@ -59,7 +59,7 @@ static const CNC_Settings default_settings = {
     
     // Homing
     .hard_limits_enable = 0,       // false as uint8 (disabled by default for safety)
-    .homing_enable = 1,            // true as uint8
+    .homing_enable = 0x07,         // Bit mask: X=bit0, Y=bit1, Z=bit2, A=bit3 (default: XYZ enabled)
     .homing_dir_mask = 0,
     .padding2 = 0,
     .homing_feed_rate = 100.0f,
@@ -112,11 +112,22 @@ uint32_t SETTINGS_CalculateCRC32(const CNC_Settings* settings)
 /* Initialize settings module */
 void SETTINGS_Initialize(void)
 {
+    // ✅ CRITICAL: Wait for NVM_Initialize() NO_OPERATION to complete
+    // NVM_Initialize() was called earlier in SYS_Initialize() but it's interrupt-driven
+    // and may not have completed yet. Wait with timeout to prevent boot hang.
+    uint32_t timeout = 10000000; // ~100ms timeout at 100MHz core
+    while(NVM_IsBusy() && timeout > 0) {
+        timeout--;
+    }
+    
     // ✅ CRITICAL: Register NVM callback once during initialization (Harmony pattern)
     NVM_CallbackRegister(eventHandler, (uintptr_t)NULL);
     
+    // ✅ NOTE: NVM_Initialize() already cleared LVDERR/WRERR error flags by executing NO_OPERATION
+    // The wait above ensures the NOP completed before we proceed
+    
     // ✅ SIMPLIFIED: Just use defaults, don't read flash during boot
-    // User can read flash later with $ commands if needed
+    // Flash read happens later in APP_LOAD_SETTINGS after all peripherals ready
     SETTINGS_RestoreDefaults(&current_settings);
 }
 
@@ -125,8 +136,16 @@ bool SETTINGS_LoadFromFlash(CNC_Settings* settings)
 {
     if (!settings) return false;
     
+    // ✅ CRITICAL: Disable interrupts during flash read to prevent instability
+    // Flash controller may not be in stable state after soft reset or power glitch
+    // Interrupts during flash access can cause read errors or boot hangs
+    __builtin_disable_interrupts();
+    
     // ✅ PURE HARMONY PATTERN: Read into cache-aligned buffer
     NVM_Read(writeData, sizeof(writeData), SETTINGS_READ_ADDRESS);
+    
+    // Re-enable interrupts immediately after flash read
+    __builtin_enable_interrupts();
     
     // ✅ CRITICAL: Validate BEFORE copying to settings (don't corrupt defaults!)
     CNC_Settings temp_settings;
@@ -234,8 +253,10 @@ bool SETTINGS_SaveToFlash(const CNC_Settings* settings)
         address  += NVM_FLASH_ROWSIZE;
     }
     
-    // ✅ Final delay to ensure flash is stable
-    CORETIMER_DelayUs(100);
+    // ✅ CRITICAL: Extended delay after flash write to ensure flash fully stable
+    // Per datasheet: Flash requires time to complete internal operations
+    // Insufficient delay before power-off/reset can corrupt flash or set LVDERR
+    CORETIMER_DelayUs(1000);  // 1ms delay for flash stabilization
     
     return true;
 }

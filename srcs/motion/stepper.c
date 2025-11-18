@@ -58,6 +58,10 @@ static APP_DATA* app_data_ref = NULL;
 // ✅ HARD LIMIT ALARM FLAG - Set by ISR, cleared by main loop ($X command)
 volatile bool g_hard_limit_alarm = false;
 
+// ✅ HARD LIMIT SUPPRESSION FLAG - Set by soft reset, cleared when all limits physically release
+// Allows motion commands after soft reset even if on limit (operator can jog away)
+volatile bool g_suppress_hard_limits = false;
+
 // Position tracking (incremented/decremented by ISR based on direction)
 static StepperPosition stepper_pos = {
     .steps = {0, 0, 0, 0},                    // All axes start at zero
@@ -162,7 +166,10 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     // ✅ MOTION SEGMENT HANDLING (LINEAR/ARC)
     // Handles soft reset (ox18), emergency stop, or other disabling instructions.
     if(!steppers_enabled){
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] Steppers were disabled, enabling now\r\n");
         STEPPER_EnableAll();
+    } else {
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] Steppers already enabled\r\n");
     }
 
     // ✅ CRITICAL: Ensure OC1 is enabled for motion after soft reset or complete stop
@@ -342,6 +349,24 @@ void STEPPER_DisableAll(void)
     
     steppers_enabled = false;
     DEBUG_PRINT_STEPPER("[STEPPER] Disabled all drivers (invert=0x%02X)\r\n", enable_invert);
+}
+
+// ============================================================================
+// Centralized Motion Stop (Emergency Stop, Soft Reset, Alarms)
+// ============================================================================
+
+void STEPPER_StopMotion(void)
+{
+    // Disable stepper drivers immediately (no movement)
+    STEPPER_DisableAll();
+    
+    // Stop TMR4 timer (halts ISR execution)
+    TMR4_Stop();
+    
+    // Disable OC1 module (stops pulse generation)
+    OCMP1_Disable();
+    
+    DEBUG_PRINT_STEPPER("[STEPPER] Motion stopped (TMR4/OC1 disabled)\r\n");
 }
 
 // ============================================================================

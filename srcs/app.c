@@ -225,19 +225,6 @@ void APP_Tasks ( void )
         case APP_IDLE:
         {
 
-            // ===== LED2 STATUS INDICATOR (CORETIMER-TIMED, NOT LOOP-COUNT) =====
-            // Maintain stable heartbeat independent of loop workload
-            // ===== LED1 HEARTBEAT (1 SECOND) =====
-            // Toggle LED1 once per second when idle (no motion)
-            static uint32_t hb_last = 0;
-            const uint32_t HB_INTERVAL = 100000000U; // 1 second @ 100MHz Core Timer (200MHz CPU / 2)
-            if(appData.motionQueueCount == 0) {
-                uint32_t now_ticks = CORETIMER_CounterGet();
-                if ((uint32_t)(now_ticks - hb_last) >= HB_INTERVAL) {
-                    LED1_Toggle();  // LED1 = heartbeat indicator
-                    hb_last = now_ticks;
-                }
-            }
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
             // Flow control uses appData.motionQueueCount directly (no sync needed)
 
@@ -310,15 +297,9 @@ void APP_Tasks ( void )
                                   g_homing.state != HOMING_STATE_ALARM);
             
 
-            // During homing: Check if limit stays triggered for >5 seconds (failed backoff)
+            // During homing: Use limit check to drive state transitions
             if (homing_active) {
-                static uint32_t limit_stuck_counter = 0;
-                static bool limit_was_triggered = false;
-                // Counter-based timeout: ~5 seconds at ~1000 loops/sec = 5000 iterations
-                const uint32_t BACKOFF_TIMEOUT_LOOPS = 5000U;
-                
                 // ===== LED2 STATE INDICATOR: HOMING =====
-                // Toggle LED2 at 1Hz during homing (rollover-safe pattern)
                 static uint32_t led2_homing_last = 0;
                 const uint32_t LED2_HOMING_INTERVAL = 100000000U; // 1 second @ 100MHz Core Timer
                 uint32_t now = CORETIMER_CounterGet();
@@ -327,21 +308,82 @@ void APP_Tasks ( void )
                     led2_homing_last = now;
                 }
 
-                bool limit_triggered_now = MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert);
+                // Check limit switch (using same logic as hard limits)
+                bool limit_current = MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert);
                 
-                if (limit_triggered_now && !limit_was_triggered) {
-                    // Limit just triggered - start counter
-                    limit_stuck_counter = 0;
-                    limit_was_triggered = true;
-                } else if (!limit_triggered_now && limit_was_triggered) {
-                    // Limit cleared - successful backoff, reset counter
-                    limit_stuck_counter = 0;
-                    limit_was_triggered = false;
-                } else if (limit_triggered_now && limit_was_triggered) {
-                    // Limit still triggered - increment counter each loop
-                    limit_stuck_counter++;
-                    if (limit_stuck_counter >= BACKOFF_TIMEOUT_LOOPS) {
-                        // ALARM: Failed to back off limit switch within 5 seconds!
+                // Update persistent state tracker
+                UTILS_HomingLimitUpdate(limit_current);
+                
+                DEBUG_EXEC_MOTION({
+                    static uint32_t limit_debug = 0;
+                    if (limit_debug++ % 50000 == 0) {
+                        DEBUG_PRINT_MOTION("[APP_HOMING] limit=%d, state=%d, queue=%lu\r\n",
+                                          limit_current, g_homing.state, 
+                                          (unsigned long)appData.motionQueueCount);
+                    }
+                });
+                
+                // ===== EDGE-BASED HOMING: Only edges matter, ignore limit state itself =====
+                
+                // RISING EDGE: Limit triggered (returns true once, then auto-clears)
+                if (UTILS_HomingLimitRisingEdge()) {
+                    DEBUG_PRINT_MOTION("[APP_HOMING] RISING EDGE detected\r\n");
+                    
+                    if (g_homing.state == HOMING_STATE_SEEK) {
+                        DEBUG_PRINT_MOTION("[APP_HOMING] SEEK→LOCATE: Stopping motion, starting backoff\r\n");
+                        
+                        // Stop current motion immediately
+                        TMR4_Stop();
+                        OCMP1_Disable();
+                        
+                        // Clear motion queue
+                        appData.motionQueueHead = 0;
+                        appData.motionQueueTail = 0;
+                        appData.motionQueueCount = 0;
+                        appData.currentSegment = NULL;
+                        
+                        g_homing.motion_active = false;
+                        g_homing.state = HOMING_STATE_LOCATE;
+                        HOMING_StartLocate(&appData);
+                    } else if (g_homing.state == HOMING_STATE_LOCATE) {
+                        DEBUG_PRINT_MOTION("[APP_HOMING] LOCATE→PULLOFF: Stopping motion, precision hit\r\n");
+                        
+                        // Stop current motion immediately
+                        TMR4_Stop();
+                        OCMP1_Disable();
+                        
+                        // Clear motion queue
+                        appData.motionQueueHead = 0;
+                        appData.motionQueueTail = 0;
+                        appData.motionQueueCount = 0;
+                        appData.currentSegment = NULL;
+                        
+                        g_homing.motion_active = false;
+                        g_homing.state = HOMING_STATE_PULLOFF;
+                        HOMING_StartPulloff(&appData);
+                    }
+                }
+                // FALLING EDGE: Limit cleared (returns true once, then auto-clears)
+                else if (UTILS_HomingLimitFallingEdge()) {
+                    DEBUG_PRINT_MOTION("[APP_HOMING] FALLING EDGE detected\r\n");
+                    
+                    if (g_homing.state == HOMING_STATE_PULLOFF) {
+                        DEBUG_PRINT_MOTION("[APP_HOMING] PULLOFF→COMPLETE: Limit cleared\r\n");
+                        g_homing.motion_active = false;
+                        g_homing.state = HOMING_STATE_COMPLETE;
+                    }
+                }
+                
+                // No timeout checks during homing - we only care about edges!
+            }
+            // Normal motion: Check hard limits (ONLY when NOT homing)
+            else {
+                // Hard limit check disabled during homing - limits used for state transitions
+                // Also suppress hard limits after soft reset until operator physically clears limits
+                if (settings->hard_limits_enable && !g_suppress_hard_limits) {
+                    if (MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+                        // Hard limit triggered during normal motion - ALARM!
+                        DEBUG_PRINT_APP("[APP] Hard limit triggered during normal motion, entering ALARM\r\n");
                         TMR4_Stop();
                         MOTION_UTILS_EnableAllAxes(false, settings->step_enable_invert);
                         
@@ -349,37 +391,18 @@ void APP_Tasks ( void )
                         appData.state = APP_ALARM;
                         g_hard_limit_alarm = true;
                         
-                        UART_Printf("[MSG:ALARM - Homing failed! Axis stuck on limit switch]\r\n");
-                        DEBUG_PRINT_APP("[APP] Homing backoff timeout - limit stuck for >5sec (loops=%lu)\r\n", 
-                                       (unsigned long)limit_stuck_counter);
+                        UART_Printf("[MSG:ALARM - Hard limit triggered! Send $X to clear]\r\n");
                         
                         break;
                     }
                 }
-            }
-            // Normal motion: Check hard limits immediately (no delay)
-            else if (settings->hard_limits_enable) {
-                if (MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
-                    // Hard limit triggered during normal motion - ALARM!
-                    TMR4_Stop();
-                    MOTION_UTILS_EnableAllAxes(false, settings->step_enable_invert);
-                    
-                    appData.alarmCode = 1;
-                    appData.state = APP_ALARM;
-                    g_hard_limit_alarm = true;
-                    
-                    UART_Printf("[MSG:ALARM - Hard limit triggered! Send $X to clear]\r\n");
-                    DEBUG_PRINT_APP("[APP] Hard limit detected in main loop, entering ALARM state\r\n");
-                    
-                    break;
+                
+                // ✅ Clear hard limit suppression when all limits physically released
+                if (g_suppress_hard_limits && !MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+                    g_suppress_hard_limits = false;
+                    DEBUG_PRINT_APP("[APP] Hard limit suppression cleared - all limits released\r\n");
                 }
-            }
-            else{
                     
-                // Not homing - turn LED2 off (unless in ALARM state)
-                if (appData.state != APP_ALARM) {
-                    LED2_Clear();
-                }
             }
 
             break;

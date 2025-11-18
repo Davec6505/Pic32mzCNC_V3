@@ -49,7 +49,7 @@
 /* -------------------------------------------------------------------------- */
 /* Static Buffers / State                                                     */
 /* -------------------------------------------------------------------------- */
-static uint8_t txBuffer[512];
+static uint8_t txBuffer[1024];
 static uint8_t rxBuffer[512];  // Increased to match UART3 RX buffer size
 static volatile uint32_t nBytesRead = 0;
 
@@ -94,11 +94,11 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
         return;
     }
 
-    /* 1. Stop all motion immediately */
-    STEPPER_DisableAll();
+    /* 1. Stop all motion immediately using centralized function */
+    STEPPER_StopMotion();  // Disables steppers, stops TMR4, disables OC1
     
-    // Stop TMR4 to prevent ISR from running
-    TMR4_Stop();
+    // Abort homing if in progress
+    HOMING_Abort();
 
     /* 2. Flush any pending RX bytes to avoid processing pre-reset junk */
     uint8_t scratch[64];
@@ -123,7 +123,9 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
 
     /* 5. Clear alarm state (soft reset should clear alarms) */
     extern volatile bool g_hard_limit_alarm;
+    extern volatile bool g_suppress_hard_limits;  // Suppress until limits physically clear
     g_hard_limit_alarm = false;
+    g_suppress_hard_limits = true;  // Ignore hard limits until they physically clear
     appData->alarmCode = 0;
     grblAlarm = false;
     
@@ -154,14 +156,16 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     /* 9. Mark steppers to be re-enabled automatically on first motion command */
     // stepperEnablePending = true;
 
-    /* 10. Save current settings to flash (persist any changes made before reset) */
-    // Flash write now uses CORETIMER delays to prevent hangs
-    // CRITICAL: Clear G92 offset before saving - G92 is a temporary offset, not persistent!
+    /* 10. Clear G92 temporary offset (DO NOT save to flash on soft reset) */
+    // ✅ REMOVED: Flash save on soft reset causes power-up hangs
+    // Problem: User power-cycles immediately after Ctrl+X banner prints,
+    //          but flash hasn't fully stabilized from write operation
+    // Solution: Only save settings when user explicitly changes them ($n=value)
+    //          G92 offset cleared in RAM, not persisted to flash
     CNC_Settings* settings = SETTINGS_GetCurrent();
     if (settings != NULL) {
-        SETTINGS_SetG92Offset(0.0f, 0.0f, 0.0f);  // Reset G92 to zero before saving
-        SETTINGS_SaveToFlash(settings);
-        DEBUG_PRINT_GCODE("[GCODE] Settings saved to flash during soft reset (G92 cleared)\r\n");
+        SETTINGS_SetG92Offset(0.0f, 0.0f, 0.0f);  // Reset G92 to zero (in RAM only)
+        DEBUG_PRINT_GCODE("[GCODE] G92 offset cleared during soft reset (not saved to flash)\r\n");
     }
 
     /* 11. Print GRBL startup banner (expected by senders after Ctrl+X) */
@@ -1067,6 +1071,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 CNC_Settings* s = SETTINGS_GetCurrent();
                 if (SETTINGS_SetValue(s, (uint32_t)param, val)) {
                     s->checksum = SETTINGS_CalculateCRC32(s);
+                    
+                    // ✅ Save to flash immediately so setting persists across resets
+                    SETTINGS_SaveToFlash(s);
                     
                     // Reload stepper cached settings if step/dir/enable invert changed ($0-$5)
                     if (param <= 5) {

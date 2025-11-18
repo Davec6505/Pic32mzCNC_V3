@@ -173,6 +173,16 @@ void UTILS_TrimWhitespace(char* str);
 bool UTILS_IsEmptyString(const char* str);
 uint32_t UTILS_SafeStrlen(const char* str, uint32_t max_len);
 
+// ===== EDGE DETECTION UTILITIES =====
+// Homing limit state change tracker (per-axis, persistent across iterations)
+// Tracks rising/falling edges with one-shot flag behavior
+void UTILS_HomingSetCurrentAxis(E_AXIS axis);   // Set which axis is currently homing
+void UTILS_HomingLimitUpdate(bool limit_active);
+bool UTILS_HomingLimitRisingEdge(void);         // Returns true once on limit trigger
+bool UTILS_HomingLimitFallingEdge(void);        // Returns true once on limit clear
+void UTILS_HomingLimitResetAxis(E_AXIS axis);   // Reset specific axis state
+void UTILS_HomingLimitReset(void);              // Reset all axes (call at start of $H)
+
 // ===== COORDINATE ARRAY UTILITIES (ELIMINATES AXIS SWITCH STATEMENTS) =====
 
 // CoordinatePoint array utilities
