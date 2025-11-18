@@ -195,8 +195,25 @@ void APP_Tasks ( void )
             // Try to load from flash - if invalid signature/CRC, use defaults (already loaded)
             if (SETTINGS_LoadFromFlash(SETTINGS_GetCurrent())) {
                 // Flash settings loaded successfully
+                uint32_t led2_flash_loaded = 0;
+                while(led2_flash_loaded < 10){
+                    LED2_Toggle();
+                    led2_flash_loaded++;
+                    CORETIMER_DelayMs(250);
+                }
+          
             } else {
-                // Flash empty or invalid - defaults already loaded in SETTINGS_Initialize()
+                    // Flash empty or invalid - defaults already loaded in SETTINGS_Initialize()
+                        // Try to load from flash - if invalid signature/CRC, use defaults (already loaded)
+                if (SETTINGS_LoadFromFlash(SETTINGS_GetCurrent())) {
+                    // Flash settings loaded successfully
+                    uint32_t led2_flash_loaded = 0;
+                    while(led2_flash_loaded < 10){
+                        LED2_Toggle();
+                        led2_flash_loaded++;
+                        CORETIMER_DelayMs(50);
+                    }
+                }
             }
             
             // ✅ CRITICAL: Update stepper cached values after settings loaded

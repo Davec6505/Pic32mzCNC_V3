@@ -112,19 +112,12 @@ uint32_t SETTINGS_CalculateCRC32(const CNC_Settings* settings)
 /* Initialize settings module */
 void SETTINGS_Initialize(void)
 {
-    // ✅ CRITICAL: Wait for NVM_Initialize() NO_OPERATION to complete
-    // NVM_Initialize() was called earlier in SYS_Initialize() but it's interrupt-driven
-    // and may not have completed yet. Wait with timeout to prevent boot hang.
-    uint32_t timeout = 10000000; // ~100ms timeout at 100MHz core
-    while(NVM_IsBusy() && timeout > 0) {
-        timeout--;
-    }
+    // ✅ TESTING: Skip NVM wait - may be hanging after soft reset
+    // NVM_IsBusy() might never return false if flash controller is stuck
+    // Just register the callback and load defaults
     
     // ✅ CRITICAL: Register NVM callback once during initialization (Harmony pattern)
     NVM_CallbackRegister(eventHandler, (uintptr_t)NULL);
-    
-    // ✅ NOTE: NVM_Initialize() already cleared LVDERR/WRERR error flags by executing NO_OPERATION
-    // The wait above ensures the NOP completed before we proceed
     
     // ✅ SIMPLIFIED: Just use defaults, don't read flash during boot
     // Flash read happens later in APP_LOAD_SETTINGS after all peripherals ready
