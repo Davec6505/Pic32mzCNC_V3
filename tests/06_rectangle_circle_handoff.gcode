@@ -18,7 +18,7 @@
 G21           ; Millimeters
 G90           ; Absolute positioning
 G94           ; Units per minute feedrate mode
-F1000         ; Set feedrate to 1000 mm/min
+F200         ; Set feedrate to 300 mm/min
 
 ; Zero position
 G92 X0 Y0 Z0
@@ -87,9 +87,11 @@ G2 X40 Y15 I10 J0
 G1 X3 Y0
 
 ; Lift to safe height
+F200
 G0 Z5
 
 ; Move to origin
+F1000
 G0 X0 Y0
 
 ; Program end

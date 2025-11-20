@@ -35,7 +35,7 @@ typedef struct {
     
     // Homing configuration ($20-$27)
     uint8_t hard_limits_enable;    // $21 - Hard limit enable (bool as uint8)
-    uint8_t homing_enable;         // $22 - Homing cycle enable mask (bit 0=X, 1=Y, 2=Z, 3=A)
+    uint8_t homing_enable;         // $22 - Homing cycle enable (bool as uint8, GRBL v1.1: 0=disabled, 1=enabled)
     uint8_t homing_dir_mask;       // $23 - Homing dir invert mask
     uint8_t padding2;              // Alignment padding
     float homing_feed_rate;        // $24 - Homing locate feed rate (mm/min)

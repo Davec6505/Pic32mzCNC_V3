@@ -45,8 +45,8 @@
 // Dual-threshold flow control for UGS compatibility
 // HIGH_WATER: Start deferring "ok" when queue reaches this (almost full)
 // LOW_WATER: Resume sending "ok" when queue drains to this (some space freed)
-// With MAX=16: Defer at 14 (2 free), Resume at 12 (4 drained)
-#define MOTION_BUFFER_HIGH_WATER 2    // Defer when (MAX - 2) = 14 segments used
+// With MAX=16: Defer at 15 (1 free), Resume at 12 (4 drained)
+#define MOTION_BUFFER_HIGH_WATER 1    // Defer when (MAX - 1) = 15 segments used
 #define MOTION_BUFFER_LOW_WATER  4    // Resume when (MAX - 4) = 12 segments used
 
 /* -------------------------------------------------------------------------- */
@@ -72,7 +72,16 @@ static bool unitsInches = false;            /* false=mm (G21), true=inches (G20)
 /* -------------------------------------------------------------------------- */
 /* Forward Declarations                                                       */
 /* -------------------------------------------------------------------------- */
-static inline bool is_control_char(uint8_t c){ return (c == '?' || c == '~' || c == '!' || c == 0x18); }
+// Control characters that should be handled specially (not treated as G-code)
+// 0x18 = Ctrl+X (soft reset)
+// 0x95 = XOFF (flow control - ignored)
+// 0x90 = DLE (data link escape - ignored)  
+// 0x11 = XON (flow control - ignored)
+// 0x13 = DC3/XOFF (flow control - ignored)
+static inline bool is_control_char(uint8_t c){ 
+    return (c == '?' || c == '~' || c == '!' || c == 0x18 || 
+            c == 0x95 || c == 0x90 || c == 0x99 || c == 0x11 || c == 0x13); 
+}
 GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t length, GCODE_CommandQueue* commandQueue);
 
 
@@ -93,38 +102,78 @@ static float parse_float_after(char* start){
 /* -------------------------------------------------------------------------- */
 void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
 {
-    (void)appData;     // Unused - hardware reset doesn't need state cleanup
-    (void)cmdQueue;    // Unused - hardware reset doesn't need state cleanup
+    if (appData == NULL || cmdQueue == NULL) {
+        return;
+    }
+
+    DEBUG_PRINT_GCODE("[SOFT RESET] Software reset - clearing buffers and state\r\n");
     
-    DEBUG_PRINT_GCODE("[SOFT RESET] Executing HARDWARE RESET via RSWRST register\r\n");
+    /* 1. Stop all motion immediately */
+    STEPPER_StopMotion();  // Disables steppers, stops TMR4, disables OC1
+    HOMING_Abort();        // Abort homing if in progress
     
-    /* PIC32MZ Software Reset Sequence (from datasheet Section 6.4.2)
-     * 1. Perform SYSKEY unlock sequence
-     * 2. Write '1' to RSWRST.SWRST bit
-     * 3. Read RSWRST register - triggers reset
-     * 
-     * This is a COMPLETE hardware reset - jumps to reset vector at 0xBFC00000
-     * All peripherals, RAM, registers reset to power-on state
-     * Bootloader takes over, jumps to application start
-     * APP_Initialize() runs automatically on startup
-     */
+    /* 2. Re-initialize stepper module (clears Bresenham state, direction bits, etc.) */
+    // This fixes the X-axis selective disable issue after soft reset
+    STEPPER_Initialize(appData);
     
-    // Disable interrupts during reset sequence
-    __builtin_disable_interrupts();
+    /* 3. Flush UART RX buffer to avoid processing pre-reset commands */
+    uint8_t scratch[64];
+    uint32_t rc;
+    while ((rc = UART3_ReadCountGet()) > 0U) {
+        uint32_t toRead = (rc > sizeof(scratch)) ? (uint32_t)sizeof(scratch) : rc;
+        (void)UART3_Read(scratch, toRead);
+    }
     
-    // SYSKEY unlock sequence (required to write RSWRST)
-    SYSKEY = 0x00000000;  // Force lock
-    SYSKEY = 0xAA996655;  // Key 1
-    SYSKEY = 0x556699AA;  // Key 2 - system now unlocked
+
+        /* 10. Clear RX buffer */
+    nBytesRead = 0;
+    memset(rxBuffer, 0, sizeof(rxBuffer));
+
+    /* 3. Clear motion queue */
+    memset(appData->motionQueue, 0, sizeof(appData->motionQueue));
+    appData->motionQueueHead = 0;
+    appData->motionQueueTail = 0;
+    appData->motionQueueCount = 0;
+    appData->currentSegment = NULL;
+    appData->motionSegmentCompleted = false;
     
-    // Set SWRST bit to trigger software reset
-    RSWRSTSET = _RSWRST_SWRST_MASK;
+    /* 4. Clear arc generator state */
+    appData->arcGenState = ARC_GEN_IDLE;
     
-    // Read RSWRST to trigger the reset (per datasheet Note 2)
-    (void)RSWRST;
+    /* 5. Reset modal state to GRBL defaults */
+    appData->modalPlane = 0;        // G17 (XY plane)
+    appData->absoluteMode = true;   // G90 (absolute mode)
+    appData->modalFeedrate = 0.0f;  // F (no feedrate set)
+    appData->modalSpindleRPM = 0;   // S (spindle off)
+    appData->modalToolNumber = 0;   // T0
     
-    // Execution never reaches here - reset occurs immediately after read
-    while(1);  // Safety loop (never executes)
+    /* 6. Clear alarm state */
+    g_hard_limit_alarm = false;
+    g_suppress_hard_limits = true;  // Ignore hard limits until they clear
+    appData->alarmCode = 0;
+    grblAlarm = false;
+    
+    /* 7. Reset application state to IDLE */
+    appData->state = APP_IDLE;
+    
+    /* 8. Clear G-code command queue */
+    cmdQueue->head = 0;
+    cmdQueue->tail = 0;
+    cmdQueue->count = 0;
+    
+    /* 9. Reset G-code parser state */
+    okPendingCount = 0;  // Clear all deferred ok responses
+    grblCheckMode = false;
+    feedHoldActive = false;
+    unitsInches = false;
+    
+
+    gcodeData.state = GCODE_STATE_IDLE;
+    
+    /* 11. Send GRBL startup banner (UGS expects this after soft reset) */
+    UART_SEND_BANNER();
+    
+    DEBUG_PRINT_GCODE("[SOFT RESET] Complete - ready for new commands\r\n");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -585,18 +634,25 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
  */
 static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 {
-    // ✅ Aggressive flow control to prevent UGS "Finished" before motion completes
-    // Only send "ok" immediately when queue is completely empty
-    // This ensures the last "ok" is sent only after all motion completes
+    // ✅ Dual-threshold flow control to keep motion buffer fed
+    // Defer "ok" when buffer reaches high-water mark (almost full)
+    // Resume sending "ok" when buffer drains to low-water mark
     
-    if (appData->motionQueueCount == 0) {
-        DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (queue empty, motion complete)\r\n");
-        (void)UART_SendOK();
-    } else {
-        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu > 0, total pending=%lu)\r\n", 
+    uint32_t highWater = Flow_HighWater(q);  // maxSegments - 2 (defer when 14/16 used)
+    
+    if (appData->motionQueueCount >= highWater) {
+        // Buffer almost full - defer this "ok" to apply backpressure
+        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu >= highWater=%lu, pending=%lu)\r\n", 
                           (unsigned long)appData->motionQueueCount,
+                          (unsigned long)highWater,
                           (unsigned long)(okPendingCount + 1));
         okPendingCount++;
+    } else {
+        // Buffer has space - send "ok" immediately
+        DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (queue=%lu < highWater=%lu)\r\n",
+                          (unsigned long)appData->motionQueueCount,
+                          (unsigned long)highWater);
+        (void)UART_SendOK();
     }
 }
 
@@ -797,16 +853,28 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 feedHoldActive = true;
                 STEPPER_DisableAll();
                 break;
-            case 0x18: /* Soft reset */
+            case 0x18: /* Soft reset (Ctrl+X) */
             {
                 GCODE_SoftReset(appData, cmdQueue);
                 break;
             }
+            case 0x95: /* XOFF - flow control, ignore */
+            case 0x90: /* DLE - data link escape, ignore */
+            case 0x99: /* Unknown control char - ignore */
+            case 0x11: /* XON - flow control, ignore */
+            case 0x13: /* DC3/XOFF - flow control, ignore */
+                // Flow control characters - silently consume without "ok" response
+                // These are not G-code commands and don't require acknowledgment
+                DEBUG_PRINT_GCODE("[GCODE] Ignoring flow control byte: 0x%02X\r\n", rxBuffer[0]);
+                break;
             default:
+                // Unknown control character - ignore
+                DEBUG_PRINT_GCODE("[GCODE] Unknown control char: 0x%02X\r\n", rxBuffer[0]);
                 break;
         }
 
-        // ✅ GRBL PROTOCOL: Real-time commands NEVER generate "ok" responses
+        // ✅ GRBL PROTOCOL: Real-time commands (? ! ~) NEVER generate "ok" responses
+        // ✅ Flow control characters (0x95, 0x90, etc.) also don't generate "ok"
         // Consume control character at position 0, plus any trailing CR/LF
         // This prevents "?\r\n" from leaving "\r\n" which would be processed as blank line
         uint32_t skip_pos = 1;  // Skip the control character itself

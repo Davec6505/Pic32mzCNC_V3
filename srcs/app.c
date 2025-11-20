@@ -217,7 +217,7 @@ void APP_Tasks ( void )
             }
             
             // ✅ CRITICAL: Update stepper cached values after settings loaded
-            // STEPPER_Initialize() ran before settings were loaded, so steps_per_mm might be stale
+            // STEPPER_Initialize() ran before settings were loaded, so ALL cached values are stale
             CNC_Settings* settings = SETTINGS_GetCurrent();
             StepperPosition* stepper_pos = STEPPER_GetPosition();
             
@@ -225,6 +225,10 @@ void APP_Tasks ( void )
             for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                 stepper_pos->steps_per_mm[axis] = settings->steps_per_mm[axis];
             }
+            
+            // ✅ CRITICAL: Reload stepper invert masks ($0-$5) after settings loaded from flash
+            // This ensures direction_invert_mask, step_pulse_invert_mask, enable_invert are current
+            STEPPER_ReloadSettings();
             
             appData.state = APP_GCODE_INIT;
             break;
