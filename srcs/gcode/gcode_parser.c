@@ -18,8 +18,10 @@
 
 #include "gcode_parser.h"
 #include "common.h"
+#include "app.h"          // For APP_Initialize()
 #include "stepper.h"
 #include "motion.h"
+#include "motion_utils.h" // For MOTION_UTILS_EnableAllAxes()
 #include "kinematics.h"
 #include "motion/homing.h"
 #include "utils.h"
@@ -27,6 +29,7 @@
 #include "data_structures.h"
 #include "utils/uart_utils.h"
 #include "../config/default/peripheral/uart/plib_uart3.h"
+#include <xc.h>  // For RSWRST, SYSKEY, and processor registers
 #include "definitions.h"                  // For T4CON/_T4CON_ON_MASK (hardware state)
 #include "../config/default/peripheral/gpio/plib_gpio.h"  // For LED debug
 
@@ -90,89 +93,38 @@ static float parse_float_after(char* start){
 /* -------------------------------------------------------------------------- */
 void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
 {
-    if (appData == NULL || cmdQueue == NULL) {
-        return;
-    }
-
-    /* 1. Stop all motion immediately using centralized function */
-    STEPPER_StopMotion();  // Disables steppers, stops TMR4, disables OC1
+    (void)appData;     // Unused - hardware reset doesn't need state cleanup
+    (void)cmdQueue;    // Unused - hardware reset doesn't need state cleanup
     
-    // Abort homing if in progress
-    HOMING_Abort();
-
-    /* 2. Flush any pending RX bytes to avoid processing pre-reset junk */
-    uint8_t scratch[64]; //rx buffer is much larger than 64 so iterrate until 0 bytes in ring
-    uint32_t rc;
-    while ((rc = UART3_ReadCountGet()) > 0U) {
-        uint32_t toRead = (rc > sizeof(scratch)) ? (uint32_t)sizeof(scratch) : rc;
-        (void)UART3_Read(scratch, toRead);
-    }
-
-    /* 3. Clear motion planner queue (planner and executor state) */
-    // ✅ CRITICAL FIX: Clear entire motion queue buffer to prevent stale segment data
-    // Without this, garbage data in motionQueue[] can corrupt segment loading after soft reset
-    memset(appData->motionQueue, 0, sizeof(appData->motionQueue));
-    appData->motionQueueHead = 0;
-    appData->motionQueueTail = 0;
-    appData->motionQueueCount = 0;
-    appData->currentSegment = NULL;
-
-    /* 4. Modal state to GRBL defaults: G17, G21, G90, G94, M5, M9, T0, F0, S0 */
-    appData->modalPlane       = 0;        /* 0->G17 (XY) as used by $G print */
-    appData->absoluteMode     = true;     /* G90 */
-    appData->modalFeedrate    = 0.0f;     /* F */
-    appData->modalSpindleRPM  = 0;        /* S */
-    appData->modalToolNumber  = 0;        /* T0 */
-
-    /* 5. Clear alarm state (soft reset should clear alarms) */
-    // g_hard_limit_alarm and g_suppress_hard_limits declared in stepper.h (already included)
-    g_hard_limit_alarm = false;
-    g_suppress_hard_limits = true;  // Ignore hard limits until they physically clear
-    appData->alarmCode = 0;
-    grblAlarm = false;
+    DEBUG_PRINT_GCODE("[SOFT RESET] Executing HARDWARE RESET via RSWRST register\r\n");
     
-    /* 6. Application state back to IDLE */
-    appData->state = APP_IDLE;
-
-    /* 7. Reset G-code command queue */
-    cmdQueue->head  = 0;
-    cmdQueue->tail  = 0;
-    cmdQueue->count = 0;
-    /* ✅ No sync needed - flow control reads appData->motionQueueCount directly */
-
-    /* 8. Reset G-code parser state */
-    okPendingCount = 0;  // Clear all deferred ok responses
-    grblCheckMode = false;
-    feedHoldActive = false;
-    unitsInches = false;
-    gcodeData.state = GCODE_STATE_IDLE;
-
-
-    // Motion fully idle after reset
-    appData->motionActive = false;
-
-    nBytesRead = 0;
-    memset(rxBuffer, 0, sizeof(rxBuffer));
-
-    /* 9. Mark steppers to be re-enabled automatically on first motion command */
-    // stepperEnablePending = true;
-
-    /* 10. Clear G92 temporary offset (DO NOT save to flash on soft reset) */
-    // ✅ REMOVED: Flash save on soft reset causes power-up hangs
-    // Problem: User power-cycles immediately after Ctrl+X banner prints,
-    //          but flash hasn't fully stabilized from write operation
-    // Solution: Only save settings when user explicitly changes them ($n=value)
-    //          G92 offset cleared in RAM, not persisted to flash
-    CNC_Settings* settings = SETTINGS_GetCurrent();
-    if (settings != NULL) {
-        SETTINGS_SetG92Offset(0.0f, 0.0f, 0.0f);  // Reset G92 to zero (in RAM only)
-        DEBUG_PRINT_GCODE("[GCODE] G92 offset cleared during soft reset (not saved to flash)\r\n");
-    }
-
-    /* 11. Print GRBL startup banner (expected by senders after Ctrl+X) */
-#ifdef ENABLE_STARTUP_BANNER
-    UART_SEND_BANNER();  // Compile-time string and length from common.h
-#endif
+    /* PIC32MZ Software Reset Sequence (from datasheet Section 6.4.2)
+     * 1. Perform SYSKEY unlock sequence
+     * 2. Write '1' to RSWRST.SWRST bit
+     * 3. Read RSWRST register - triggers reset
+     * 
+     * This is a COMPLETE hardware reset - jumps to reset vector at 0xBFC00000
+     * All peripherals, RAM, registers reset to power-on state
+     * Bootloader takes over, jumps to application start
+     * APP_Initialize() runs automatically on startup
+     */
+    
+    // Disable interrupts during reset sequence
+    __builtin_disable_interrupts();
+    
+    // SYSKEY unlock sequence (required to write RSWRST)
+    SYSKEY = 0x00000000;  // Force lock
+    SYSKEY = 0xAA996655;  // Key 1
+    SYSKEY = 0x556699AA;  // Key 2 - system now unlocked
+    
+    // Set SWRST bit to trigger software reset
+    RSWRSTSET = _RSWRST_SWRST_MASK;
+    
+    // Read RSWRST to trigger the reset (per datasheet Note 2)
+    (void)RSWRST;
+    
+    // Execution never reaches here - reset occurs immediately after read
+    while(1);  // Safety loop (never executes)
 }
 
 /* -------------------------------------------------------------------------- */

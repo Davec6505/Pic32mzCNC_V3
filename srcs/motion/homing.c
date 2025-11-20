@@ -159,8 +159,9 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
 void HOMING_Abort(void) {
     g_homing.state = HOMING_STATE_IDLE;  // ✅ Reset to IDLE, not ALARM
     g_homing.alarm_code = 0;             // Clear alarm code
-    STEPPER_DisableAll();
-    DEBUG_PRINT_MOTION("[HOMING_Abort] Homing aborted, returned to IDLE\r\n");
+    UTILS_HomingLimitReset();            // ✅ Clear per-axis limit state tracker to prevent stale limit data
+    // NOTE: Don't call STEPPER_DisableAll() here - soft reset will handle stepper state via APP_Initialize()
+    DEBUG_PRINT_MOTION("[HOMING_Abort] Homing aborted, limit state cleared, returned to IDLE\r\n");
 }
 
 bool HOMING_IsActive(void) {
@@ -183,9 +184,6 @@ void HOMING_ClearAlarm(void) {
 // ===== INTERNAL HELPERS =====
 
 void HOMING_StartSeek(APP_DATA* appData) {
-    // Get settings
-    CNC_Settings* settings = SETTINGS_GetCurrent();
-    
     // Determine homing direction from $23 mask
     uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
     bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
@@ -193,23 +191,15 @@ void HOMING_StartSeek(APP_DATA* appData) {
     DEBUG_PRINT_MOTION("[HOMING_SEEK] RAW: dir_mask=0x%02X, settings->homing_dir_mask=0x%02X\r\n",
                       dir_mask, settings->homing_dir_mask);
     
-    // Check if direction is inverted by $3 setting
-    bool dir_inverted = (settings->step_direction_invert >> g_homing.current_axis) & 0x01;
-    
-    // Calculate search distance based on $23 setting
+    // Calculate search distance based on $23 setting ONLY
     // $23=0 → home to MIN switch (negative direction in machine coordinates)
     // $23=1 → home to MAX switch (positive direction in machine coordinates)
+    // NOTE: $3 (step_direction_invert) only inverts GPIO pin, G-code already handles this
     float search_distance = home_positive ? 300.0f : -300.0f;
     
-    // If $3 direction is inverted, flip the search distance to compensate
-    // Example: $23=0 wants -300mm, but $3=1 inverts motion, so use +300mm to actually go negative
-    if (dir_inverted) {
-        search_distance = -search_distance;
-    }
-    
-    DEBUG_PRINT_MOTION("[HOMING_SEEK] axis=%d, $23=%d, $3_bit=%d, distance=%.1f\r\n",
+    DEBUG_PRINT_MOTION("[HOMING_SEEK] axis=%d, $23=%d, distance=%.1f\r\n",
                       g_homing.current_axis, (dir_mask >> g_homing.current_axis) & 0x01, 
-                      dir_inverted, search_distance);
+                      search_distance);
     
     DEBUG_PRINT_MOTION("[HOMING_SEEK] search_distance=%.1f\r\n", search_distance);
     
@@ -236,31 +226,20 @@ void HOMING_StartSeek(APP_DATA* appData) {
 }
 
 void HOMING_StartLocate(APP_DATA* appData) {
-    // Get settings
-    CNC_Settings* settings = SETTINGS_GetCurrent();
-    
     // Determine homing direction from $23 mask
     uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
     bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
     
-    // Check if direction is inverted by $3 setting
-    bool dir_inverted = (settings->step_direction_invert >> g_homing.current_axis) & 0x01;
-    
     // Back off 5mm to clear switch, then approach slowly
     // $23=0 (MIN) → back off +5mm, then approach -10mm
     // $23=1 (MAX) → back off -5mm, then approach +10mm
+    // NOTE: $3 (step_direction_invert) only inverts GPIO pin, G-code already handles this
     float backoff_distance = home_positive ? -5.0f : 5.0f;
     float locate_distance = home_positive ? 10.0f : -10.0f;  // Re-approach slowly
     
-    // If $3 direction is inverted, flip distances to compensate
-    if (dir_inverted) {
-        backoff_distance = -backoff_distance;
-        locate_distance = -locate_distance;
-    }
-    
-    DEBUG_PRINT_MOTION("[HOMING_LOCATE] axis=%d, $23=%d, $3_bit=%d, backoff=%.1f, locate=%.1f\r\n",
+    DEBUG_PRINT_MOTION("[HOMING_LOCATE] axis=%d, $23=%d, backoff=%.1f, locate=%.1f\r\n",
                       g_homing.current_axis, (dir_mask >> g_homing.current_axis) & 0x01, 
-                      dir_inverted, backoff_distance, locate_distance);
+                      backoff_distance, locate_distance);
     
     // Build target position (back off first)
     CoordinatePoint current = KINEMATICS_GetCurrentPosition();
@@ -296,9 +275,6 @@ void HOMING_StartLocate(APP_DATA* appData) {
 }
 
 void HOMING_StartPulloff(APP_DATA* appData) {
-    // Get settings
-    CNC_Settings* settings = SETTINGS_GetCurrent();
-    
     // Determine homing direction from $23 mask
     uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
     bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
@@ -306,20 +282,12 @@ void HOMING_StartPulloff(APP_DATA* appData) {
     // Pull off away from switch
     // $23=0 (MIN) → pull off +distance (away from MIN switch)
     // $23=1 (MAX) → pull off -distance (away from MAX switch)
+    // NOTE: $3 (step_direction_invert) only inverts GPIO pin, G-code already handles this
     float pulloff_distance = home_positive ? -*g_homing_settings[g_homing.current_axis].homing_pull_off : *g_homing_settings[g_homing.current_axis].homing_pull_off;
     
-    // Check if direction is inverted by $3 setting
-    bool dir_inverted = (settings->step_direction_invert >> g_homing.current_axis) & 0x01;
-    
-    // If $3 direction is inverted, flip the pulloff distance to compensate
-    // Example: $23=0 wants +2mm pulloff, but $3=1 inverts motion, so use -2mm to actually go positive
-    if (dir_inverted) {
-        pulloff_distance = -pulloff_distance;
-    }
-    
-    DEBUG_PRINT_MOTION("[HOMING_PULLOFF] axis=%d, $23=%d, $3_bit=%d, pulloff=%.1f\r\n",
+    DEBUG_PRINT_MOTION("[HOMING_PULLOFF] axis=%d, $23=%d, pulloff=%.1f\r\n",
                       g_homing.current_axis, (dir_mask >> g_homing.current_axis) & 0x01, 
-                      dir_inverted, pulloff_distance);
+                      pulloff_distance);
     
     // Build target position
     CoordinatePoint current = KINEMATICS_GetCurrentPosition();
@@ -344,19 +312,13 @@ bool HOMING_LimitTriggered(void) {
     // Get settings
     CNC_Settings* settings = SETTINGS_GetCurrent();
     
-    // Determine which limit to check based on homing direction
+    // Determine which limit to check based on homing direction from $23 ONLY
+    // $23=0 → check MIN switch
+    // $23=1 → check MAX switch
+    // NOTE: $3 (step_direction_invert) only inverts GPIO pin, doesn't change which switch to check
     bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask >> g_homing.current_axis) & 0x01;
     
-    // Check if direction is inverted by $3 setting
-    bool dir_inverted = (settings->step_direction_invert >> g_homing.current_axis) & 0x01;
-    
-    // If $3 inverts this axis, flip the homing direction to compensate
-    // This ensures we check the SAME switch that motion is actually approaching
-    if (dir_inverted) {
-        home_positive = !home_positive;
-    }
-    
-    // Get raw limit pin state (now checks the CORRECT switch based on actual motion direction)
+    // Get raw limit pin state
     bool limit_min = LIMIT_GetMin(g_homing.current_axis);
     bool limit_max = LIMIT_GetMax(g_homing.current_axis);
     bool limit_state = home_positive ? limit_max : limit_min;
