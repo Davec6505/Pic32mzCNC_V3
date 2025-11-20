@@ -13,8 +13,17 @@ static CNC_Settings current_settings;
 // ✅ CRITICAL: Cache-aligned buffer for NVM operations (Harmony pattern)
 // PIC32MZ requires cache-aligned buffers for flash read/write operations
 // Buffer size MUST match NVM_FLASH_ROWSIZE for NVM_RowWrite() operations
+//#define READ_WRITE_SIZE         (NVM_FLASH_PAGESIZE)
+//#define BUFFER_SIZE             (READ_WRITE_SIZE / sizeof(uint32_t))
 #define READ_WRITE_SIZE         (NVM_FLASH_PAGESIZE)
 #define BUFFER_SIZE             (READ_WRITE_SIZE / sizeof(uint32_t))
+#define HALF_SIZE               (NVM_FLASH_SIZE / 2)
+#define QUARTER_SIZE            (NVM_FLASH_SIZE / 4)
+#define EIGHTH_SIZE             (NVM_FLASH_SIZE / 8)
+#define APP_FLASH_ADDRESS       (NVM_FLASH_START_ADDRESS + (HALF_SIZE) + (QUARTER_SIZE) + (EIGHTH_SIZE))
+//                              = 0x9D000000 + 0x100000 + 0x80000 + 0x40000
+//                              = 0x9D1C0000  (1.75MB mark, 87.5% of flash)
+
 
 static uint32_t writeData[BUFFER_SIZE] CACHE_ALIGN;
 
@@ -124,132 +133,80 @@ void SETTINGS_Initialize(void)
     SETTINGS_RestoreDefaults(&current_settings);
 }
 
-/* Load settings from NVM flash */
+/* Load settings from NVM flash - EXACT Microchip pattern */
 bool SETTINGS_LoadFromFlash(CNC_Settings* settings)
 {
     if (!settings) return false;
     
-    // ✅ CRITICAL: Disable interrupts during flash read to prevent instability
-    // Flash controller may not be in stable state after soft reset or power glitch
-    // Interrupts during flash access can cause read errors or boot hangs
-    __builtin_disable_interrupts();
+    // Microchip pattern: Direct read into cache-aligned buffer
+    NVM_Read(writeData, sizeof(writeData), APP_FLASH_ADDRESS);
     
-    // ✅ PURE HARMONY PATTERN: Read into cache-aligned buffer
-    NVM_Read(writeData, sizeof(writeData), SETTINGS_READ_ADDRESS);
-    
-    // Re-enable interrupts immediately after flash read
-    __builtin_enable_interrupts();
-    
-    // ✅ CRITICAL: Validate BEFORE copying to settings (don't corrupt defaults!)
+    // Validate before copying to settings
     CNC_Settings temp_settings;
     memcpy(&temp_settings, writeData, sizeof(CNC_Settings));
-    
-    // Validate signature first
+
+    // Validate signature
     if (temp_settings.signature != SETTINGS_SIGNATURE) {
-        return false;  // Flash empty or invalid - keep current settings (defaults)
+        return false;
     }
     
-    // Validate version - reject if structure changed
+    // Validate version
     if (temp_settings.version != SETTINGS_VERSION) {
-        return false;  // Version mismatch - structure changed, use defaults
+        return false;
     }
     
     // Validate checksum
     uint32_t calculated_crc = SETTINGS_CalculateCRC32(&temp_settings);
     if (calculated_crc != temp_settings.checksum) {
-        return false;  // Checksum mismatch - keep current settings (defaults)
+        return false;
     }
     
-    // ✅ Only copy if validation passed
+    // Copy if validation passed
     memcpy(settings, &temp_settings, sizeof(CNC_Settings));
-    
+
     return true;
 }
 
-/* Save settings to NVM flash */
+/* Save settings to NVM flash - EXACT Microchip pattern */
 bool SETTINGS_SaveToFlash(const CNC_Settings* settings)
 {
     if (!settings) return false;
-    
-    // ✅ CRITICAL: Calculate checksum first
+
+    // Calculate checksum first
     CNC_Settings temp_settings;
     memcpy(&temp_settings, settings, sizeof(CNC_Settings));
     temp_settings.checksum = SETTINGS_CalculateCRC32(&temp_settings);
     
-    // ✅ CRITICAL: Populate cache-aligned buffer (Harmony pattern)
+    // Populate cache-aligned buffer (Harmony pattern)
     memcpy(writeData, &temp_settings, sizeof(CNC_Settings));
     
-    // ✅ Harmony pattern variables
-    uint32_t address = SETTINGS_NVM_ADDRESS;
+    // Microchip pattern variables
+    uint32_t address =  APP_FLASH_ADDRESS;//SETTINGS_NVM_ADDRESS;
     uint8_t *writePtr = (uint8_t *)writeData;
     uint32_t i = 0;
     
-    // ✅ CRITICAL: Address MUST be row-aligned for RowWrite
-    if ((address & 0x7FF) != 0) {
-        return false;  // Address not row-aligned!
-    }
+    // Wait for NVM ready before starting
+    while(NVM_IsBusy() == true);
     
-    // ✅ Poll WR bit with timeout - prevents infinite hang on hardware fault
-    // Wait for any pending NVM operation to complete
-    uint32_t timeout = 1000000; // ~1 second timeout (100MHz core, 2 ticks per iteration)
-    while(NVM_IsBusy() && timeout > 0) {
-        timeout--;
-    }
-    if (timeout == 0) {
-        return false;  // Timeout waiting for NVM ready
-    }
-    
-    // ✅ Erase the Page
+    /* Erase the Page */
     NVM_PageErase(address);
     
-    // ✅ Poll WR bit until erase complete (typically ~20ms worst case)
-    timeout = 10000000; // ~100ms timeout for page erase (100MHz core)
-    while(NVM_IsBusy() && timeout > 0) {
-        timeout--;
-    }
-    if (timeout == 0) {
-        return false;  // Timeout during page erase
-    }
+    while(xferDone == false);
     
-    // ✅ Small delay after erase for flash recovery
-    CORETIMER_DelayUs(100);
-    
-    // ✅ Check for erase errors
-    if (NVM_ErrorGet() != NVM_ERROR_NONE) {
-        return false;
-    }
-    
-    // ✅ Write data row-by-row
+    xferDone = false;
+
     for (i = 0; i < sizeof(CNC_Settings); i+= NVM_FLASH_ROWSIZE)
     {
-        // Program a row of data
+        /* Program a row of data */
         NVM_RowWrite((uint32_t *)writePtr, address);
 
-        // ✅ Poll WR bit until write complete (typically ~2ms worst case per row)
-        timeout = 1000000; // ~10ms timeout per row write (100MHz core)
-        while(NVM_IsBusy() && timeout > 0) {
-            timeout--;
-        }
-        if (timeout == 0) {
-            return false;  // Timeout during row write
-        }
-        
-        // ✅ Small delay between rows for flash recovery
-        CORETIMER_DelayUs(50);
-        
-        // Check for write errors
-        if (NVM_ErrorGet() != NVM_ERROR_NONE) {
-            return false;
-        }
+        while(xferDone == false);
+
+        xferDone = false;
 
         writePtr += NVM_FLASH_ROWSIZE;
         address  += NVM_FLASH_ROWSIZE;
     }
-    
-    // ✅ CRITICAL: Extended delay after flash write to ensure flash fully stable
-    // Per datasheet: Flash requires time to complete internal operations
-    // Insufficient delay before power-off/reset can corrupt flash or set LVDERR
-    CORETIMER_DelayUs(1000);  // 1ms delay for flash stabilization
     
     return true;
 }

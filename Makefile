@@ -52,7 +52,7 @@ USE_SHARED_LIB ?= 0
 
 # Memory configuration for dynamic allocation
 # These control heap and stack sizes for the PIC32MZ application
-HEAP_SIZE  := 65536     # 64KB heap for dynamic memory allocation
+HEAP_SIZE  := 131072     # 128KB heap for dynamic memory allocation
 STACK_SIZE := 131072    # 128KB stack (increased for 64-segment motion queue)
 
 # Compiler location and DFP (Device Family Pack) location

@@ -308,7 +308,7 @@ void APP_Tasks ( void )
             
             
             // ===== HOMING STATE CHECK (USED FOR LED2 AND HARD LIMITS) =====
-            extern HomingControl g_homing;  // From homing.c
+            // g_homing declared in motion/homing.h (already included at top)
             bool homing_active = (g_homing.state != HOMING_STATE_IDLE && 
                                   g_homing.state != HOMING_STATE_COMPLETE &&
                                   g_homing.state != HOMING_STATE_ALARM);

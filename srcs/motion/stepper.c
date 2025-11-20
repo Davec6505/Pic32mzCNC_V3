@@ -121,7 +121,8 @@ void STEPPER_Initialize(APP_DATA* appData) {
     // ✅ TMR4 configuration - leave STOPPED until motion segment loaded
     // This prevents spurious ISR firing during idle
     TMR4_Stop();
-    
+
+    TMR5_Stop();
     // ✅ OC1 is already configured by MCC (continuous pulse mode, TMR4 source, 16-bit)
     OCMP1_Enable();
     
@@ -362,6 +363,9 @@ void STEPPER_StopMotion(void)
     
     // Stop TMR4 timer (halts ISR execution)
     TMR4_Stop();
+
+    // Stop TMR5 timer (in case pulse width timer was running)
+    TMR5_Stop();
     
     // Disable OC1 module (stops pulse generation)
     OCMP1_Disable();

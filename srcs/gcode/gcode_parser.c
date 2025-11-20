@@ -101,7 +101,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     HOMING_Abort();
 
     /* 2. Flush any pending RX bytes to avoid processing pre-reset junk */
-    uint8_t scratch[64];
+    uint8_t scratch[64]; //rx buffer is much larger than 64 so iterrate until 0 bytes in ring
     uint32_t rc;
     while ((rc = UART3_ReadCountGet()) > 0U) {
         uint32_t toRead = (rc > sizeof(scratch)) ? (uint32_t)sizeof(scratch) : rc;
@@ -109,10 +109,13 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     }
 
     /* 3. Clear motion planner queue (planner and executor state) */
+    // ✅ CRITICAL FIX: Clear entire motion queue buffer to prevent stale segment data
+    // Without this, garbage data in motionQueue[] can corrupt segment loading after soft reset
+    memset(appData->motionQueue, 0, sizeof(appData->motionQueue));
     appData->motionQueueHead = 0;
     appData->motionQueueTail = 0;
     appData->motionQueueCount = 0;
-    appData->currentSegment   = NULL;
+    appData->currentSegment = NULL;
 
     /* 4. Modal state to GRBL defaults: G17, G21, G90, G94, M5, M9, T0, F0, S0 */
     appData->modalPlane       = 0;        /* 0->G17 (XY) as used by $G print */
@@ -122,8 +125,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     appData->modalToolNumber  = 0;        /* T0 */
 
     /* 5. Clear alarm state (soft reset should clear alarms) */
-    extern volatile bool g_hard_limit_alarm;
-    extern volatile bool g_suppress_hard_limits;  // Suppress until limits physically clear
+    // g_hard_limit_alarm and g_suppress_hard_limits declared in stepper.h (already included)
     g_hard_limit_alarm = false;
     g_suppress_hard_limits = true;  // Ignore hard limits until they physically clear
     appData->alarmCode = 0;
@@ -145,7 +147,6 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     unitsInches = false;
     gcodeData.state = GCODE_STATE_IDLE;
 
-    // ✅ REMOVED: Startup deferral reset (no longer used)
 
     // Motion fully idle after reset
     appData->motionActive = false;
@@ -1026,7 +1027,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             grblAlarm = false;
             
             // ✅ Clear hard limit alarm flag (set by stepper ISR)
-            extern volatile bool g_hard_limit_alarm;
+            // g_hard_limit_alarm declared in stepper.h (already included at top)
             g_hard_limit_alarm = false;
             
             DEBUG_PRINT_GCODE("[GCODE] Alarm cleared via $X command\r\n");
