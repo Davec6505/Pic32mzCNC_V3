@@ -159,8 +159,9 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
 void HOMING_Abort(void) {
     g_homing.state = HOMING_STATE_IDLE;  // ✅ Reset to IDLE, not ALARM
     g_homing.alarm_code = 0;             // Clear alarm code
-    STEPPER_DisableAll();
-    DEBUG_PRINT_MOTION("[HOMING_Abort] Homing aborted, returned to IDLE\r\n");
+    UTILS_HomingLimitReset();            // ✅ Clear per-axis limit state tracker to prevent stale limit data
+    // NOTE: Don't call STEPPER_DisableAll() here - soft reset will handle stepper state via APP_Initialize()
+    DEBUG_PRINT_MOTION("[HOMING_Abort] Homing aborted, limit state cleared, returned to IDLE\r\n");
 }
 
 bool HOMING_IsActive(void) {

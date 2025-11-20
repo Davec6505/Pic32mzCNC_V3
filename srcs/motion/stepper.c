@@ -112,6 +112,20 @@ void STEPPER_Initialize(APP_DATA* appData) {
         stepper_pos.steps_per_mm[axis] = settings->steps_per_mm[axis];
     }
     
+    // ✅ Clear Bresenham state (prevents stale data after soft reset)
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        error[axis] = 0;
+        delta[axis] = 0;
+    }
+    dominant_delta = 0;
+    dominant_axis = AXIS_X;
+    direction_bits = 0x0F;  // Default all forward
+    
+    // ✅ Clear dwell state
+    dwell_active = false;
+    dwell_start_ticks = 0;
+    dwell_duration = 0;
+    
     // Register TMR5 callback for step pulse width (clears GPIO after 3µs)
     TMR5_CallbackRegister(TMR5_PulseWidthCallback, (uintptr_t)NULL);
     
@@ -173,16 +187,6 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
         DEBUG_PRINT_STEPPER("[STEPPER_Load] Steppers already enabled\r\n");
     }
 
-    // ✅ CRITICAL: Ensure OC1 is enabled for motion after soft reset or complete stop
-    // TMR4_Stop() might have disabled OC1 interrupt generation
-    // Check OC1CON ON bit before enabling to avoid unnecessary register writes
-    if(!(OC1CON & _OC1CON_ON_MASK)) {
-        OCMP1_Enable();
-        DEBUG_PRINT_STEPPER("[STEPPER_Load] OC1 enabled for motion\r\n");
-    } else {
-        DEBUG_PRINT_STEPPER("[STEPPER_Load] OC1 already enabled\r\n");
-    }
-
     // ✅ ARRAY-BASED: Load deltas for Bresenham (single loop!)
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         delta[axis] = segment->delta[axis];
@@ -238,6 +242,16 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     
     OCMP1_CompareValueSet(period - 5);                             // OCxR: Rising edge (pulse starts)
     OCMP1_CompareSecondaryValueSet(period - 3);                   // OCxRS: Falling edge (ISR trigger)
+    
+    // ✅ CRITICAL: Enable OC1 AFTER setting compare registers (per datasheet)
+    // OC module must be configured before enabling to properly trigger ISR
+    // This is essential for motion restart after soft reset or STEPPER_StopMotion()
+    if(!(OC1CON & _OC1CON_ON_MASK)) {
+        OCMP1_Enable();
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] OC1 enabled for motion\r\n");
+    } else {
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] OC1 already enabled\r\n");
+    }
     
     // ✅ START TMR4 to begin motion (only if not already running)
     // Check T4CON ON bit - if TMR4 already running from previous segment, don't restart!
@@ -324,7 +338,8 @@ void STEPPER_ReloadSettings(void)
 
 void STEPPER_EnableAll(void)
 {
-    if (steppers_enabled) return;
+    // Always re-enable drivers when called (don't skip if flag already set)
+    // This ensures GPIO state matches the software flag, especially after soft reset
 
     // Re-read enable invert setting in case it changed via $4 command
     CNC_Settings* settings = SETTINGS_GetCurrent();
@@ -339,7 +354,8 @@ void STEPPER_EnableAll(void)
 
 void STEPPER_DisableAll(void)
 {
-    if (!steppers_enabled) return;
+    // Always disable drivers when called (don't skip if flag already clear)
+    // This ensures GPIO state matches the software flag
 
     // Re-read enable invert setting in case it changed
     CNC_Settings* settings = SETTINGS_GetCurrent();
