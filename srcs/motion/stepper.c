@@ -331,7 +331,7 @@ void STEPPER_EnableAll(void)
     enable_invert = settings->step_enable_invert;
     
     // Use MOTION_UTILS to properly apply inversion logic
-    sesegments not MOTION_UTILS_EnableAllAxes(true, enable_invert);
+     MOTION_UTILS_EnableAllAxes(true, enable_invert);
     
     steppers_enabled = true;
     DEBUG_PRINT_STEPPER("[STEPPER] Enabled all drivers (invert=0x%02X)\r\n", enable_invert);
