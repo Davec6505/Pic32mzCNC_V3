@@ -230,6 +230,14 @@ make
 # Debug build with motion tracing
 make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"
 
+# Available DEBUG_FLAGS:
+# DEBUG_MOTION - Motion planning and segment execution
+# DEBUG_GCODE - G-code parsing and event processing
+# DEBUG_STEPPER - Low-level stepper ISR
+# DEBUG_SEGMENT - Segment loading and queue management
+# DEBUG_UART - UART communication
+# DEBUG_APP - Application state machine
+
 # Clean build
 make clean && make
 
@@ -243,12 +251,18 @@ make flash
 # Run test script (UART at 115200 baud)
 .\ps_commands\test_gcode.ps1 -FilePath .\gcode_tests\01_simple_square.gcode
 
+# Code search utilities
+.\ps_commands\search.ps1 -wordToFind "STEPPER_LoadSegment"              # Find function usage
+.\ps_commands\search_functions.ps1  -functionName "motion/stepper.c"    # List all functions in file
+``
+
+
 # Manual testing via PuTTY/terminal
 ?                    # Status query
 $$                   # View all settings
 $H                   # Home all axes
 G90 G1 X10 F500     # Move 10mm in X
-```
+`
 
 ### G-Code Sender Setup (UGS)
 1. Port: Select COM port (115200 baud)
