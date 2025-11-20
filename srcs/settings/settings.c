@@ -361,7 +361,9 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$13=%.3f\r\n", settings->arc_tolerance);
         
     len += sprintf(&settings_buffer[len], "$21=%u\r\n", settings->hard_limits_enable);
-    len += sprintf(&settings_buffer[len], "$22=%u\r\n", settings->homing_enable);
+    // ✅ UGS COMPATIBILITY: Report $22 as 1 (boolean) if ANY axis enabled, else 0
+    // Internal bitmask preserved: $22=7 → report as $22=1 for GRBL v1.1 compliance
+    len += sprintf(&settings_buffer[len], "$22=%u\r\n", settings->homing_enable ? 1 : 0);
     len += sprintf(&settings_buffer[len], "$23=%u\r\n", settings->homing_dir_mask);
     len += sprintf(&settings_buffer[len], "$24=%.3f\r\n", settings->homing_feed_rate);
     len += sprintf(&settings_buffer[len], "$25=%.3f\r\n", settings->homing_seek_rate);

@@ -104,8 +104,9 @@ void STEPPER_Initialize(APP_DATA* appData) {
     direction_invert_mask = settings->step_direction_invert;
     enable_invert = settings->step_enable_invert;
     
-    DEBUG_PRINT_STEPPER("[STEPPER_Init] dir_invert_mask=0x%02X ($3=%u)\r\n", 
-                        direction_invert_mask, direction_invert_mask);
+    DEBUG_PRINT_STEPPER("[STEPPER_Init] dir_invert_mask=0x%02X ($3=%u), enable_invert=0x%02X ($4=%u)\r\n", 
+                        direction_invert_mask, direction_invert_mask,
+                        enable_invert, enable_invert);
     
     // ✅ ARRAY-BASED: Update steps_per_mm from settings (loop for scalability)
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
@@ -332,8 +333,12 @@ void STEPPER_ReloadSettings(void)
     direction_invert_mask = settings->step_direction_invert;
     enable_invert = settings->step_enable_invert;
     
-    DEBUG_PRINT_STEPPER("[STEPPER_Reload] dir_invert_mask=0x%02X ($3=%u)\r\n", 
-                        direction_invert_mask, direction_invert_mask);
+    // ✅ CRITICAL: Re-apply enable pins with updated inversion mask
+    // Without this, cached enable_invert changes but GPIO state doesn't update
+    MOTION_UTILS_EnableAllAxes(true, enable_invert);
+    
+    DEBUG_PRINT_STEPPER("[STEPPER_Reload] dir_invert_mask=0x%02X ($3=%u), enable_invert=0x%02X ($4=%u)\r\n", 
+                        direction_invert_mask, direction_invert_mask, enable_invert, enable_invert);
 }
 
 void STEPPER_EnableAll(void)
