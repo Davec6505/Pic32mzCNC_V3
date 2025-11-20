@@ -121,6 +121,28 @@ static inline bool __attribute__((always_inline)) LIMIT_GetMax(E_AXIS axis) {
 }
 
 // Check if any limit triggered for an axis (respects invert mask)
+// NO switches ($5 bit=0): Trigger when pin HIGH (1)
+// NC switches ($5 bit=1): Trigger when pin HIGH (1) - wire breaks show as HIGH
+// The invert mask DOES NOT invert the trigger logic - both trigger on HIGH!
+// Instead, $5 indicates the NORMAL state: 0=normally LOW, 1=normally HIGH
+// So we want: (pin == 0 && inverted) || (pin == 1 && !inverted)
+// Which simplifies to: pin XOR inverted == 0 means ALARM!
+// Wait no... Let me think about GRBL's actual behavior...
+//
+// GRBL $5: "When inverted, the limit switch will read as triggered when LOW"
+// So: $5 bit=1 → Pin LOW (0) triggers alarm
+//     $5 bit=0 → Pin HIGH (1) triggers alarm
+// Logic: alarm_condition = (pin == 0 && inverted) || (pin == 1 && !inverted)
+//        = !pin && inverted || pin && !inverted
+//        = pin XOR inverted... wait that's backwards again!
+//
+// Let me use the truth table:
+// Pin=0, Inv=0: 0 XOR 0 = 0 (no alarm) ✅
+// Pin=1, Inv=0: 1 XOR 0 = 1 (alarm - NO switch closed) ✅
+// Pin=0, Inv=1: 0 XOR 1 = 1 (alarm - NC switch open/broken) ✅
+// Pin=1, Inv=1: 1 XOR 1 = 0 (no alarm - NC switch closed/normal) ✅
+//
+// Actually XOR IS correct! I was confusing myself.
 static inline bool __attribute__((always_inline)) LIMIT_CheckAxis(E_AXIS axis, uint8_t invert_mask) {
     bool inverted = (invert_mask >> axis) & 0x01;
     return (LIMIT_GetMin(axis) ^ inverted) || (LIMIT_GetMax(axis) ^ inverted);
@@ -150,6 +172,16 @@ bool UTILS_IsComment(const char* token);
 void UTILS_TrimWhitespace(char* str);
 bool UTILS_IsEmptyString(const char* str);
 uint32_t UTILS_SafeStrlen(const char* str, uint32_t max_len);
+
+// ===== EDGE DETECTION UTILITIES =====
+// Homing limit state change tracker (per-axis, persistent across iterations)
+// Tracks rising/falling edges with one-shot flag behavior
+void UTILS_HomingSetCurrentAxis(E_AXIS axis);   // Set which axis is currently homing
+void UTILS_HomingLimitUpdate(bool limit_active);
+bool UTILS_HomingLimitRisingEdge(void);         // Returns true once on limit trigger
+bool UTILS_HomingLimitFallingEdge(void);        // Returns true once on limit clear
+void UTILS_HomingLimitResetAxis(E_AXIS axis);   // Reset specific axis state
+void UTILS_HomingLimitReset(void);              // Reset all axes (call at start of $H)
 
 // ===== COORDINATE ARRAY UTILITIES (ELIMINATES AXIS SWITCH STATEMENTS) =====
 

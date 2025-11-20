@@ -22,6 +22,7 @@
 #include "motion/homing.h"  // For homing state machine
 #include "motion/spindle.h"  // For spindle PWM control
 #include "motion_utils.h"  // For hard limit checking
+#include "stepper.h"  // For g_hard_limit_alarm flag
 #include "config/default/peripheral/coretimer/plib_coretimer.h"  // For CORETIMER heartbeat counter
 #include "utils/uart_utils.h"  // Non-blocking UART utilities
 #include "utils/utils.h"       // For UTILS_InitAxisConfig
@@ -194,8 +195,25 @@ void APP_Tasks ( void )
             // Try to load from flash - if invalid signature/CRC, use defaults (already loaded)
             if (SETTINGS_LoadFromFlash(SETTINGS_GetCurrent())) {
                 // Flash settings loaded successfully
+                uint32_t led2_flash_loaded = 0;
+                while(led2_flash_loaded < 10){
+                    LED2_Toggle();
+                    led2_flash_loaded++;
+                    CORETIMER_DelayMs(250);
+                }
+          
             } else {
-                // Flash empty or invalid - defaults already loaded in SETTINGS_Initialize()
+                    // Flash empty or invalid - defaults already loaded in SETTINGS_Initialize()
+                        // Try to load from flash - if invalid signature/CRC, use defaults (already loaded)
+                if (SETTINGS_LoadFromFlash(SETTINGS_GetCurrent())) {
+                    // Flash settings loaded successfully
+                    uint32_t led2_flash_loaded = 0;
+                    while(led2_flash_loaded < 10){
+                        LED2_Toggle();
+                        led2_flash_loaded++;
+                        CORETIMER_DelayMs(50);
+                    }
+                }
             }
             
             // ✅ CRITICAL: Update stepper cached values after settings loaded
@@ -224,20 +242,6 @@ void APP_Tasks ( void )
         case APP_IDLE:
         {
 
-            // ===== LED2 STATUS INDICATOR (CORETIMER-TIMED, NOT LOOP-COUNT) =====
-            // Maintain stable heartbeat independent of loop workload
-            // Toggle about once per second when idle (no motion)
-            static uint32_t hb_last = 0;
-            const uint32_t HB_INTERVAL = 100000000U; // ~1s @ 100MHz Core Timer (200MHz CPU / 2)
-            if(appData.motionQueueCount == 0) {
-                uint32_t now_ticks = CORETIMER_CounterGet();
-                if ((uint32_t)(now_ticks - hb_last) >= HB_INTERVAL) {
-                  //  LED2_Toggle();
-                    hb_last = now_ticks;
-                }
-            }
-            // During motion, ISR toggles LED1 on each step (fast blink)
-            // LED1 will blink at step rate, visible motion indicator
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
             // Flow control uses appData.motionQueueCount directly (no sync needed)
 
@@ -267,6 +271,7 @@ void APP_Tasks ( void )
             // Process homing cycle if active
             HOMING_Tasks(&appData);
 
+
             // ===== EVENT PROCESSING - CONVERT GCODE TO MOTION =====
             // ⚠️ Only process events if NOT in alarm state
             if(appData.state != APP_ALARM) {
@@ -295,18 +300,127 @@ void APP_Tasks ( void )
                 }
             }
 
-            // ===== HARD LIMIT CHECK (TEMP DISABLED) =====
-            // Check limit switches with inversion mask from settings
-            // ⚠️ TEMPORARILY DISABLED FOR UART TESTING
-            /*
+            // ===== HARD LIMIT CHECK =====
+            // Check hard limits in main loop (non-blocking, state-aware)
+            // Note: homing_active already calculated above for LED2 indicator
             CNC_Settings* settings = SETTINGS_GetCurrent();
-            if(MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
-                // ⚠️ HARD LIMIT TRIGGERED - Emergency stop!
-                appData.alarmCode = 1;  // Alarm code 1 = hard limit
-                appData.state = APP_ALARM;
-                break;  // Immediate transition to alarm state
+   
+            
+            
+            // ===== HOMING STATE CHECK (USED FOR LED2 AND HARD LIMITS) =====
+            // g_homing declared in motion/homing.h (already included at top)
+            bool homing_active = (g_homing.state != HOMING_STATE_IDLE && 
+                                  g_homing.state != HOMING_STATE_COMPLETE &&
+                                  g_homing.state != HOMING_STATE_ALARM);
+            
+
+            // During homing: Use limit check to drive state transitions
+            if (homing_active) {
+                // ===== LED2 STATE INDICATOR: HOMING =====
+                static uint32_t led2_homing_last = 0;
+                const uint32_t LED2_HOMING_INTERVAL = 100000000U; // 1 second @ 100MHz Core Timer
+                uint32_t now = CORETIMER_CounterGet();
+                if ((uint32_t)(now - led2_homing_last) >= LED2_HOMING_INTERVAL) {
+                    LED2_Toggle();
+                    led2_homing_last = now;
+                }
+
+                // Check limit switch (using same logic as hard limits)
+                bool limit_current = MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert);
+                
+                // Update persistent state tracker
+                UTILS_HomingLimitUpdate(limit_current);
+                
+                DEBUG_EXEC_MOTION({
+                    static uint32_t limit_debug = 0;
+                    if (limit_debug++ % 50000 == 0) {
+                        DEBUG_PRINT_MOTION("[APP_HOMING] limit=%d, state=%d, queue=%lu\r\n",
+                                          limit_current, g_homing.state, 
+                                          (unsigned long)appData.motionQueueCount);
+                    }
+                });
+                
+                // ===== EDGE-BASED HOMING: Only edges matter, ignore limit state itself =====
+                
+                // RISING EDGE: Limit triggered (returns true once, then auto-clears)
+                if (UTILS_HomingLimitRisingEdge()) {
+                    DEBUG_PRINT_MOTION("[APP_HOMING] RISING EDGE detected\r\n");
+                    
+                    if (g_homing.state == HOMING_STATE_SEEK) {
+                        DEBUG_PRINT_MOTION("[APP_HOMING] SEEK→LOCATE: Stopping motion, starting backoff\r\n");
+                        
+                        // Stop current motion immediately
+                        TMR4_Stop();
+                        OCMP1_Disable();
+                        
+                        // Clear motion queue
+                        appData.motionQueueHead = 0;
+                        appData.motionQueueTail = 0;
+                        appData.motionQueueCount = 0;
+                        appData.currentSegment = NULL;
+                        
+                        g_homing.motion_active = false;
+                        g_homing.state = HOMING_STATE_LOCATE;
+                        HOMING_StartLocate(&appData);
+                    } else if (g_homing.state == HOMING_STATE_LOCATE) {
+                        DEBUG_PRINT_MOTION("[APP_HOMING] LOCATE→PULLOFF: Stopping motion, precision hit\r\n");
+                        
+                        // Stop current motion immediately
+                        TMR4_Stop();
+                        OCMP1_Disable();
+                        
+                        // Clear motion queue
+                        appData.motionQueueHead = 0;
+                        appData.motionQueueTail = 0;
+                        appData.motionQueueCount = 0;
+                        appData.currentSegment = NULL;
+                        
+                        g_homing.motion_active = false;
+                        g_homing.state = HOMING_STATE_PULLOFF;
+                        HOMING_StartPulloff(&appData);
+                    }
+                }
+                // FALLING EDGE: Limit cleared (returns true once, then auto-clears)
+                else if (UTILS_HomingLimitFallingEdge()) {
+                    DEBUG_PRINT_MOTION("[APP_HOMING] FALLING EDGE detected\r\n");
+                    
+                    if (g_homing.state == HOMING_STATE_PULLOFF) {
+                        DEBUG_PRINT_MOTION("[APP_HOMING] PULLOFF→COMPLETE: Limit cleared\r\n");
+                        g_homing.motion_active = false;
+                        g_homing.state = HOMING_STATE_COMPLETE;
+                    }
+                }
+                
+                // No timeout checks during homing - we only care about edges!
             }
-            */
+            // Normal motion: Check hard limits (ONLY when NOT homing)
+            else {
+                // Hard limit check disabled during homing - limits used for state transitions
+                // Also suppress hard limits after soft reset until operator physically clears limits
+                if (settings->hard_limits_enable && !g_suppress_hard_limits) {
+                    if (MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+                        // Hard limit triggered during normal motion - ALARM!
+                        DEBUG_PRINT_APP("[APP] Hard limit triggered during normal motion, entering ALARM\r\n");
+                        TMR4_Stop();
+                        MOTION_UTILS_EnableAllAxes(false, settings->step_enable_invert);
+                        
+                        appData.alarmCode = 1;
+                        appData.state = APP_ALARM;
+                        g_hard_limit_alarm = true;
+                        
+                        UART_Printf("[MSG:ALARM - Hard limit triggered! Send $X to clear]\r\n");
+                        
+                        break;
+                    }
+                }
+                
+                // ✅ Clear hard limit suppression when all limits physically released
+                if (g_suppress_hard_limits && !MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+                    g_suppress_hard_limits = false;
+                    DEBUG_PRINT_APP("[APP] Hard limit suppression cleared - all limits released\r\n");
+                }
+                    
+            }
 
             break;
         }
@@ -314,11 +428,32 @@ void APP_Tasks ( void )
         case APP_ALARM:
         {
             // Emergency stop state - all motion halted
-            // LED2 constant ON to indicate alarm
-            LED2_Set();
+            
+            // ===== LED2 STATE INDICATOR: ALARM =====
+            // Toggle LED2 at 10Hz (100ms) during alarm
+            static uint32_t led2_alarm_last = 0;
+            const uint32_t LED2_ALARM_INTERVAL = 10000000U; // 100ms @ 100MHz Core Timer
+            uint32_t now_ticks = CORETIMER_CounterGet();
+            if ((now_ticks - led2_alarm_last) >= LED2_ALARM_INTERVAL) {
+                LED2_Toggle();
+                led2_alarm_last = now_ticks;
+            }
             
             // User must acknowledge alarm and reset
             STEPPER_DisableAll();
+            
+            // ✅ Check if alarm cleared by $X command
+            if (!g_hard_limit_alarm && appData.alarmCode == 1) {
+                // Hard limit alarm cleared - return to IDLE
+                DEBUG_PRINT_APP("[APP] Hard limit alarm cleared, returning to IDLE\r\n");
+                appData.alarmCode = 0;
+                appData.state = APP_IDLE;
+                LED2_Clear();  // Turn off alarm LED
+            }
+            
+            // Continue processing G-code (allows $X, $$, $#, ?, etc.)
+            GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
+            
             break;
         }
         

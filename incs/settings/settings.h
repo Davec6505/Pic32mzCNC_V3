@@ -34,9 +34,10 @@ typedef struct {
     float spindle_min_rpm;         // $31 - Min spindle speed (RPM)
     
     // Homing configuration ($20-$27)
-    uint8_t homing_enable;         // $22 - Homing cycle enable (bool as uint8)
+    uint8_t hard_limits_enable;    // $21 - Hard limit enable (bool as uint8)
+    uint8_t homing_enable;         // $22 - Homing cycle enable mask (bit 0=X, 1=Y, 2=Z, 3=A)
     uint8_t homing_dir_mask;       // $23 - Homing dir invert mask
-    uint16_t padding2;             // Alignment padding
+    uint8_t padding2;              // Alignment padding
     float homing_feed_rate;        // $24 - Homing locate feed rate (mm/min)
     float homing_seek_rate;        // $25 - Homing search seek rate (mm/min)
     uint32_t homing_debounce;      // $26 - Homing switch debounce (ms)
@@ -74,12 +75,19 @@ typedef struct {
 //
 // Address Space (MIPS Architecture):
 // - Physical (0x1D...): Used by Flash controller for NVM operations
-// - Virtual KSEG1 (0xBD...): Uncached, used for NVM and CPU reads/execution
-// - Virtual KSEG0 (0x9D...): Cached, used by CPU for fast execution
+// - Virtual KSEG0 (0x9D...): Cached - USE THIS for NVM writes (Microchip pattern)
+// - Virtual KSEG1 (0xBD...): Uncached - NOT for NVM writes!
 
-#define SETTINGS_FLASH_PAGE_SIZE    0x4000      // 16KB page
-#define SETTINGS_NVM_ADDRESS        0xBD1F0000  // ✅ Virtual KSEG1 for NVM writes (64KB before bootloader)
-#define SETTINGS_READ_ADDRESS       0xBD1F0000  // ✅ Virtual KSEG1 for reads
+//#define SETTINGS_FLASH_PAGE_SIZE    0x4000      // 16KB page
+//#define SETTINGS_NVM_ADDRESS        0x9D180000  // ✅ KSEG0 cached for NVM writes (64KB before bootloader)
+//#define SETTINGS_READ_ADDRESS       0x9D180000  // ✅ KSEG0 cached for reads
+
+#define NVM_FLASH_START_ADDRESS    (0x9d000000U)
+#define NVM_FLASH_SIZE             (0x200000U)
+#define NVM_FLASH_ROWSIZE          (2048U)
+#define NVM_FLASH_PAGESIZE         (16384U)
+
+
 
 // Function prototypes
 void SETTINGS_Initialize(void);

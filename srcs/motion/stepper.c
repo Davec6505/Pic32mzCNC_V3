@@ -2,6 +2,7 @@
 #include "common.h"
 #include "settings.h"
 #include "motion_utils.h"
+#include "homing.h"  // For HomingControl and homing state checking
 #include "utils/utils.h"  // For AxisConfig and AXIS_xxx inline helpers
 #include "utils/uart_utils.h"  // For DEBUG_PRINT_STEPPER
 #include "definitions.h"
@@ -54,6 +55,13 @@ void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context);
 // Reference to application data for ISR access
 static APP_DATA* app_data_ref = NULL;
 
+// ✅ HARD LIMIT ALARM FLAG - Set by ISR, cleared by main loop ($X command)
+volatile bool g_hard_limit_alarm = false;
+
+// ✅ HARD LIMIT SUPPRESSION FLAG - Set by soft reset, cleared when all limits physically release
+// Allows motion commands after soft reset even if on limit (operator can jog away)
+volatile bool g_suppress_hard_limits = false;
+
 // Position tracking (incremented/decremented by ISR based on direction)
 static StepperPosition stepper_pos = {
     .steps = {0, 0, 0, 0},                    // All axes start at zero
@@ -96,6 +104,9 @@ void STEPPER_Initialize(APP_DATA* appData) {
     direction_invert_mask = settings->step_direction_invert;
     enable_invert = settings->step_enable_invert;
     
+    DEBUG_PRINT_STEPPER("[STEPPER_Init] dir_invert_mask=0x%02X ($3=%u)\r\n", 
+                        direction_invert_mask, direction_invert_mask);
+    
     // ✅ ARRAY-BASED: Update steps_per_mm from settings (loop for scalability)
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         stepper_pos.steps_per_mm[axis] = settings->steps_per_mm[axis];
@@ -110,7 +121,8 @@ void STEPPER_Initialize(APP_DATA* appData) {
     // ✅ TMR4 configuration - leave STOPPED until motion segment loaded
     // This prevents spurious ISR firing during idle
     TMR4_Stop();
-    
+
+    TMR5_Stop();
     // ✅ OC1 is already configured by MCC (continuous pulse mode, TMR4 source, 16-bit)
     OCMP1_Enable();
     
@@ -155,7 +167,10 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     // ✅ MOTION SEGMENT HANDLING (LINEAR/ARC)
     // Handles soft reset (ox18), emergency stop, or other disabling instructions.
     if(!steppers_enabled){
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] Steppers were disabled, enabling now\r\n");
         STEPPER_EnableAll();
+    } else {
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] Steppers already enabled\r\n");
     }
 
     // ✅ CRITICAL: Ensure OC1 is enabled for motion after soft reset or complete stop
@@ -185,12 +200,16 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     
     // ✅ ARRAY-BASED: Set directions (single loop!)
     direction_bits = 0;
+    DEBUG_PRINT_STEPPER("[STEPPER_Load] Direction invert mask = 0x%02X\r\n", direction_invert_mask);
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         if (delta[axis] >= 0) {
             direction_bits |= (1 << axis);
         }
+        bool forward = (delta[axis] >= 0);
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] Axis %d: delta=%ld, forward=%d, invert_bit=%d\r\n",
+            axis, delta[axis], forward, (direction_invert_mask >> axis) & 0x01);
         // Update GPIO direction pin
-        MOTION_UTILS_SetDirection(axis, (delta[axis] >= 0), direction_invert_mask);
+        MOTION_UTILS_SetDirection(axis, forward, direction_invert_mask);
     }
     
     // Set initial step rate (PR4 controls OC1 period in 16-bit mode)
@@ -290,6 +309,19 @@ bool STEPPER_IsDwellComplete(void)
     return false;  // Still waiting
 }
 
+void STEPPER_ReloadSettings(void)
+{
+    // Reload cached settings from flash (called when $0-$5 change at runtime)
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+    
+    step_pulse_invert_mask = settings->step_pulse_invert;
+    direction_invert_mask = settings->step_direction_invert;
+    enable_invert = settings->step_enable_invert;
+    
+    DEBUG_PRINT_STEPPER("[STEPPER_Reload] dir_invert_mask=0x%02X ($3=%u)\r\n", 
+                        direction_invert_mask, direction_invert_mask);
+}
+
 void STEPPER_EnableAll(void)
 {
     if (steppers_enabled) return;
@@ -299,7 +331,7 @@ void STEPPER_EnableAll(void)
     enable_invert = settings->step_enable_invert;
     
     // Use MOTION_UTILS to properly apply inversion logic
-    MOTION_UTILS_EnableAllAxes(true, enable_invert);
+    sesegments not MOTION_UTILS_EnableAllAxes(true, enable_invert);
     
     steppers_enabled = true;
     DEBUG_PRINT_STEPPER("[STEPPER] Enabled all drivers (invert=0x%02X)\r\n", enable_invert);
@@ -318,6 +350,27 @@ void STEPPER_DisableAll(void)
     
     steppers_enabled = false;
     DEBUG_PRINT_STEPPER("[STEPPER] Disabled all drivers (invert=0x%02X)\r\n", enable_invert);
+}
+
+// ============================================================================
+// Centralized Motion Stop (Emergency Stop, Soft Reset, Alarms)
+// ============================================================================
+
+void STEPPER_StopMotion(void)
+{
+    // Disable stepper drivers immediately (no movement)
+    STEPPER_DisableAll();
+    
+    // Stop TMR4 timer (halts ISR execution)
+    TMR4_Stop();
+
+    // Stop TMR5 timer (in case pulse width timer was running)
+    TMR5_Stop();
+    
+    // Disable OC1 module (stops pulse generation)
+    OCMP1_Disable();
+    
+    DEBUG_PRINT_STEPPER("[STEPPER] Motion stopped (TMR4/OC1 disabled)\r\n");
 }
 
 // ============================================================================
@@ -345,9 +398,6 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 // ============================================================================
 
 void OCP1_ISR(uintptr_t context) {
-    // ✅ CRITICAL DEBUG: Toggle LED to confirm ISR fires
-    LED1_Toggle();
-    
     // ✅ GUARD: No active segment - skip step generation but keep timer running
     if (app_data_ref == NULL || app_data_ref->currentSegment == NULL) {
         return;  // Main loop will load next segment or stop timer
@@ -366,7 +416,6 @@ void OCP1_ISR(uintptr_t context) {
         static uint32_t debug_counter = 0;
         if (++debug_counter >= 100) {  // Print every 100th step to avoid UART flood
             debug_counter = 0;
-            LED2_Toggle();  // Visual confirmation of debug execution
         }
     });
     
@@ -436,8 +485,7 @@ void OCP1_ISR(uintptr_t context) {
 // ============================================================================
 
 void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context) {
-    // ✅ DEBUG: Toggle LED2 to confirm TMR5 callback fires
-    LED2_Toggle();
+    // LED2 removed - reserved for state indicator (homing/alarm only)
     
     // Stop TMR5 (one-shot mode)
     TMR5_Stop();

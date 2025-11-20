@@ -49,7 +49,7 @@
 /* -------------------------------------------------------------------------- */
 /* Static Buffers / State                                                     */
 /* -------------------------------------------------------------------------- */
-static uint8_t txBuffer[250];
+static uint8_t txBuffer[1024];
 static uint8_t rxBuffer[512];  // Increased to match UART3 RX buffer size
 static volatile uint32_t nBytesRead = 0;
 
@@ -94,14 +94,14 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
         return;
     }
 
-    /* 1. Stop all motion immediately */
-    STEPPER_DisableAll();
+    /* 1. Stop all motion immediately using centralized function */
+    STEPPER_StopMotion();  // Disables steppers, stops TMR4, disables OC1
     
-    // Stop TMR4 to prevent ISR from running
-    TMR4_Stop();
+    // Abort homing if in progress
+    HOMING_Abort();
 
     /* 2. Flush any pending RX bytes to avoid processing pre-reset junk */
-    uint8_t scratch[64];
+    uint8_t scratch[64]; //rx buffer is much larger than 64 so iterrate until 0 bytes in ring
     uint32_t rc;
     while ((rc = UART3_ReadCountGet()) > 0U) {
         uint32_t toRead = (rc > sizeof(scratch)) ? (uint32_t)sizeof(scratch) : rc;
@@ -109,10 +109,13 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     }
 
     /* 3. Clear motion planner queue (planner and executor state) */
+    // ✅ CRITICAL FIX: Clear entire motion queue buffer to prevent stale segment data
+    // Without this, garbage data in motionQueue[] can corrupt segment loading after soft reset
+    memset(appData->motionQueue, 0, sizeof(appData->motionQueue));
     appData->motionQueueHead = 0;
     appData->motionQueueTail = 0;
     appData->motionQueueCount = 0;
-    appData->currentSegment   = NULL;
+    appData->currentSegment = NULL;
 
     /* 4. Modal state to GRBL defaults: G17, G21, G90, G94, M5, M9, T0, F0, S0 */
     appData->modalPlane       = 0;        /* 0->G17 (XY) as used by $G print */
@@ -121,24 +124,29 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     appData->modalSpindleRPM  = 0;        /* S */
     appData->modalToolNumber  = 0;        /* T0 */
 
-    /* 5. Application state back to IDLE */
-    appData->state            = APP_IDLE;
+    /* 5. Clear alarm state (soft reset should clear alarms) */
+    // g_hard_limit_alarm and g_suppress_hard_limits declared in stepper.h (already included)
+    g_hard_limit_alarm = false;
+    g_suppress_hard_limits = true;  // Ignore hard limits until they physically clear
+    appData->alarmCode = 0;
+    grblAlarm = false;
+    
+    /* 6. Application state back to IDLE */
+    appData->state = APP_IDLE;
 
-    /* 6. Reset G-code command queue */
+    /* 7. Reset G-code command queue */
     cmdQueue->head  = 0;
     cmdQueue->tail  = 0;
     cmdQueue->count = 0;
     /* ✅ No sync needed - flow control reads appData->motionQueueCount directly */
 
-    /* 7. Reset G-code parser state */
+    /* 8. Reset G-code parser state */
     okPendingCount = 0;  // Clear all deferred ok responses
-    grblAlarm = false;
     grblCheckMode = false;
     feedHoldActive = false;
     unitsInches = false;
     gcodeData.state = GCODE_STATE_IDLE;
 
-    // ✅ REMOVED: Startup deferral reset (no longer used)
 
     // Motion fully idle after reset
     appData->motionActive = false;
@@ -146,20 +154,22 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
 
-    /* 8. Mark steppers to be re-enabled automatically on first motion command */
+    /* 9. Mark steppers to be re-enabled automatically on first motion command */
     // stepperEnablePending = true;
 
-    /* 9. Save current settings to flash (persist any changes made before reset) */
-    // Flash write now uses CORETIMER delays to prevent hangs
-    // CRITICAL: Clear G92 offset before saving - G92 is a temporary offset, not persistent!
+    /* 10. Clear G92 temporary offset (DO NOT save to flash on soft reset) */
+    // ✅ REMOVED: Flash save on soft reset causes power-up hangs
+    // Problem: User power-cycles immediately after Ctrl+X banner prints,
+    //          but flash hasn't fully stabilized from write operation
+    // Solution: Only save settings when user explicitly changes them ($n=value)
+    //          G92 offset cleared in RAM, not persisted to flash
     CNC_Settings* settings = SETTINGS_GetCurrent();
     if (settings != NULL) {
-        SETTINGS_SetG92Offset(0.0f, 0.0f, 0.0f);  // Reset G92 to zero before saving
-        SETTINGS_SaveToFlash(settings);
-        DEBUG_PRINT_GCODE("[GCODE] Settings saved to flash during soft reset (G92 cleared)\r\n");
+        SETTINGS_SetG92Offset(0.0f, 0.0f, 0.0f);  // Reset G92 to zero (in RAM only)
+        DEBUG_PRINT_GCODE("[GCODE] G92 offset cleared during soft reset (not saved to flash)\r\n");
     }
 
-    /* 10. Print GRBL startup banner (expected by senders after Ctrl+X) */
+    /* 11. Print GRBL startup banner (expected by senders after Ctrl+X) */
 #ifdef ENABLE_STARTUP_BANNER
     UART_SEND_BANNER();  // Compile-time string and length from common.h
 #endif
@@ -963,6 +973,39 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             }
             handled = true;
         }
+        else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'L') {
+            // $L - Debug command: Show limit switch states
+            CNC_Settings* settings = SETTINGS_GetCurrent();
+            
+            DEBUG_PRINT_GCODE("[LIMIT] Pins: X_Min=%d X_Max=%d Y_Min=%d Y_Max=%d Z_Min=%d Z_Max=%d A_Min=%d A_Max=%d\r\n",
+                             LIMIT_GetMin(AXIS_X), LIMIT_GetMax(AXIS_X),
+                             LIMIT_GetMin(AXIS_Y), LIMIT_GetMax(AXIS_Y),
+                             LIMIT_GetMin(AXIS_Z), LIMIT_GetMax(AXIS_Z),
+                             LIMIT_GetMin(AXIS_A), LIMIT_GetMax(AXIS_A));
+            
+            DEBUG_PRINT_GCODE("[LIMIT] Settings: $5=%u $21=%u (%s)\r\n", 
+                             settings->limit_pins_invert,
+                             settings->hard_limits_enable,
+                             settings->hard_limits_enable ? "ENABLED" : "DISABLED");
+            
+            // Show which axes would trigger alarm
+            bool any_triggered = false;
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                bool triggered = LIMIT_CheckAxis(axis, settings->limit_pins_invert);
+                if (triggered) {
+                    DEBUG_EXEC_GCODE({
+                        char axis_name = 'X' + axis;
+                        DEBUG_PRINT_GCODE("[LIMIT] *** AXIS %c TRIGGERED ***\r\n", axis_name);
+                    });
+                    any_triggered = true;
+                }
+            }
+            if (!any_triggered) {
+                DEBUG_PRINT_GCODE("[LIMIT] All clear - no limits triggered\r\n");
+            }
+            
+            handled = true;
+        }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'I') {
             SETTINGS_PrintBuildInfo();
             handled = true;
@@ -982,6 +1025,12 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'X') {
             grblAlarm = false;
+            
+            // ✅ Clear hard limit alarm flag (set by stepper ISR)
+            // g_hard_limit_alarm declared in stepper.h (already included at top)
+            g_hard_limit_alarm = false;
+            
+            DEBUG_PRINT_GCODE("[GCODE] Alarm cleared via $X command\r\n");
             handled = true;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'F') {
@@ -1023,6 +1072,15 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 CNC_Settings* s = SETTINGS_GetCurrent();
                 if (SETTINGS_SetValue(s, (uint32_t)param, val)) {
                     s->checksum = SETTINGS_CalculateCRC32(s);
+                    
+                    // ✅ Save to flash immediately so setting persists across resets
+                    SETTINGS_SaveToFlash(s);
+                    
+                    // Reload stepper cached settings if step/dir/enable invert changed ($0-$5)
+                    if (param <= 5) {
+                        STEPPER_ReloadSettings();
+                    }
+                    
                     handled = true;
                 } else {
                     UART3_Write((uint8_t*)"error:3\r\n", 10);
@@ -1052,7 +1110,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             handled = true;
         }
         else if (len == 1 && cmd[0] == '$') {
-            UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $C $X $F $RST= $SAVE $SLP]\r\n", 50);
+            UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $C $X $F $RST= $SAVE $SLP $L]\r\n", 53);
+            UART3_Write((uint8_t*)"[MSG:$21 Hard Limits Enable - $21=0 (disabled), $21=1 (enabled)]\r\n", 68);
+            UART3_Write((uint8_t*)"[MSG:$5 Limit Pin Invert - NO switch:$5=0 (pin HIGH triggers), NC switch:$5=255 (pin LOW triggers)]\r\n", 103);
+            UART3_Write((uint8_t*)"[MSG:$L - Show limit switch states (debug)]\r\n", 46);
             handled = true;
         }
 

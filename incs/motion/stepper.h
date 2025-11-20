@@ -16,6 +16,14 @@ typedef struct {
 // Public API
 // ============================================================================
 
+// ✅ HARD LIMIT ALARM FLAG - Shared between ISR and main loop
+// Set by stepper ISR when hard limit triggered, cleared by $X command
+extern volatile bool g_hard_limit_alarm;
+
+// ✅ HARD LIMIT SUPPRESSION FLAG - Set by soft reset, cleared when all limits physically release
+// Allows motion commands after soft reset even if on limit (operator can jog away from limit)
+extern volatile bool g_suppress_hard_limits;
+
 void STEPPER_Initialize(APP_DATA* appData);
 void STEPPER_LoadSegment(MotionSegment* segment);         // Load new segment for execution
 void STEPPER_SetStepRate(uint32_t rate_ticks);            // Update PR2 for velocity profiling
@@ -32,5 +40,11 @@ void STEPPER_EnableAll(void);
 
 /* Check if dwell timer has completed (for DWELL segments). */
 bool STEPPER_IsDwellComplete(void);
+
+/* Reload cached settings from flash (call after changing $0-$5 settings). */
+void STEPPER_ReloadSettings(void);
+
+/* Stop all motion and timers (for emergency stop, soft reset, etc.). */
+void STEPPER_StopMotion(void);
 
 #endif /* STEPPER_H */
