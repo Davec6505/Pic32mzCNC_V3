@@ -4,7 +4,7 @@
 
 ### Version Information
 - **Firmware**: `bins/Release/CS23.hex` (264KB)
-- **Status**: Production Ready
+- **Status**: Under Active Testing
 - **GRBL**: v1.1 Compatible
 - **Architecture**: Array-Based Refactored
 
