@@ -156,13 +156,43 @@ Motion Completes → motionSegmentCompleted flag set
 
 ---
 
-## 📁 Project Structure
+## 📞 Call Structure (Runtime Hierarchy)
+
+```
+main.c (Entry point)
+  └── app.c (Main state machine - APP_Tasks)
+      │
+      ├── APP_INIT → settings/settings.c (Register NVM callback)
+      ├── APP_LOAD_SETTINGS → settings/settings.c (Load from flash)
+      │
+      ├── APP_IDLE → (Main processing loop)
+      │   ├── motion/motion.c (Motion queue management)
+      │   ├── gcode/gcode_parser.c (Parse G-code events)
+      │   ├── motion/kinematics.c (Generate motion segments)
+      │   └── motion/stepper.c (Load segments to hardware)
+      │
+      ├── APP_HOMING → motion/homing.c ($H command - 4 phase cycle)
+      │
+      └── APP_ALARM → motion/stepper.c (Emergency stop)
+
+ISR (Hardware interrupts - runs asynchronously)
+  ├── stepper.c::OCP1_ISR (Bresenham + step pulses)
+  ├── stepper.c::TMR5_Callback (Pulse width timing)
+  ├── motion/spindle.c (M3/M5 PWM control)
+  └── UART3_ISR (Ring buffer updates - RX/TX)
+
+utils/ (Called from all states - helper functions)
+  ├── utils.c (GPIO abstraction - inline functions)
+  └── uart_utils.c (Non-blocking UART)
+```
+
+## 📁 File Structure (Directory Layout)
 
 ```
 Pic32mzCNC_V3/
 ├── srcs/                      # Source code
-│   ├── app.c                  # Main application state machine
 │   ├── main.c                 # Entry point
+│   ├── app.c                  # Main application state machine
 │   ├── gcode/
 │   │   └── gcode_parser.c     # GRBL protocol parser
 │   ├── motion/
