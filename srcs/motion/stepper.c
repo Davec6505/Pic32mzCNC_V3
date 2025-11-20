@@ -62,35 +62,7 @@ volatile bool g_hard_limit_alarm = false;
 // Allows motion commands after soft reset even if on limit (operator can jog away)
 volatile bool g_suppress_hard_limits = false;
 
-// Position tracking (incremented/decremented by ISR based on direction)
-static StepperPosition stepper_pos = {
-    .steps = {0, 0, 0, 0},                    // All axes start at zero
-    .steps_per_mm = {200.0f, 200.0f, 200.0f, 200.0f}  // Default 200 steps/mm all axes
-};
 
-// Direction bits (set by motion loader before segment starts)
-// Bit 0=X, 1=Y, 2=Z, 3=A (1=forward/positive, 0=reverse/negative)
-static volatile uint8_t direction_bits = 0x0F;  // Default all forward
-
-// ✅ ARRAY-BASED: Bresenham error accumulators (persist across ISR calls)
-static volatile int32_t error[NUM_AXIS] = {0, 0, 0, 0};
-static volatile int32_t dominant_delta = 0;
-static volatile E_AXIS dominant_axis = AXIS_X;  // Pre-calculated dominant axis
-
-// ✅ ARRAY-BASED: Segment deltas (loaded when new segment starts)
-static volatile int32_t delta[NUM_AXIS] = {0, 0, 0, 0};
-
-// Settings cache for ISR performance
-static uint8_t step_pulse_invert_mask = 0;
-static uint8_t direction_invert_mask = 0;
-static uint8_t enable_invert = 0;
-
-static bool steppers_enabled = false;
-
-// ✅ Dwell timer state (for SEGMENT_TYPE_DWELL)
-static volatile bool dwell_active = false;       // true when dwell timer is running
-static volatile uint32_t dwell_start_ticks = 0;  // Core timer value when dwell started
-static volatile uint32_t dwell_duration = 0;     // How long to wait (core timer ticks)
 
 void STEPPER_Initialize(APP_DATA* appData) {
     // Store reference for ISR access
@@ -100,31 +72,29 @@ void STEPPER_Initialize(APP_DATA* appData) {
     CNC_Settings* settings = SETTINGS_GetCurrent();
     
     // Cache frequently used settings for ISR performance
-    step_pulse_invert_mask = settings->step_pulse_invert;
-    direction_invert_mask = settings->step_direction_invert;
-    enable_invert = settings->step_enable_invert;
+    appData->step_pulse_invert_mask = settings->step_pulse_invert;
+    appData->direction_invert_mask = settings->step_direction_invert;
+    appData->enable_invert = settings->step_enable_invert;
     
     DEBUG_PRINT_STEPPER("[STEPPER_Init] dir_invert_mask=0x%02X ($3=%u)\r\n", 
                         direction_invert_mask, direction_invert_mask);
     
     // ✅ ARRAY-BASED: Update steps_per_mm from settings (loop for scalability)
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        stepper_pos.steps_per_mm[axis] = settings->steps_per_mm[axis];
+        appData->stepper_pos.steps_per_mm[axis] = settings->steps_per_mm[axis];
     }
-    
     // ✅ Clear Bresenham state (prevents stale data after soft reset)
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        error[axis] = 0;
-        delta[axis] = 0;
+        appData->bresenham_error_isr[axis] = 0;
+        appData->bresenham_delta_isr[axis] = 0;
     }
-    dominant_delta = 0;
-    dominant_axis = AXIS_X;
-    direction_bits = 0x0F;  // Default all forward
-    
+    appData->bresenham_dominant_delta = 0;
+    appData->bresenham_dominant_axis = AXIS_X;
+    appData->direction_bits = 0x0F;  // Default all forward
     // ✅ Clear dwell state
-    dwell_active = false;
-    dwell_start_ticks = 0;
-    dwell_duration = 0;
+    appData->dwell_active = false;
+    appData->dwell_start_ticks = 0;
+    appData->dwell_duration = 0;
     
     // Register TMR5 callback for step pulse width (clears GPIO after 3µs)
     TMR5_CallbackRegister(TMR5_PulseWidthCallback, (uintptr_t)NULL);
@@ -141,9 +111,8 @@ void STEPPER_Initialize(APP_DATA* appData) {
     OCMP1_Enable();
     
     // Enable all stepper drivers
-    MOTION_UTILS_EnableAllAxes(true, enable_invert);
-    
-    steppers_enabled = true;
+    MOTION_UTILS_EnableAllAxes(true, appData->enable_invert);
+    appData->steppers_enabled = true;
     
 }
 
@@ -159,28 +128,26 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
         DEBUG_PRINT_STEPPER("[STEPPER_Load] DWELL segment: %lu ticks (%.3f sec)\r\n",
             (unsigned long)segment->dwell_duration,
             (float)segment->dwell_duration / 100000000.0f);
-        
         // Start dwell timer (core timer at 100MHz)
-        dwell_active = true;
-        dwell_start_ticks = CORETIMER_CounterGet();
-        dwell_duration = segment->dwell_duration;
-        
+        if (app_data_ref) {
+            app_data_ref->dwell_active = true;
+            app_data_ref->dwell_start_ticks = CORETIMER_CounterGet();
+            app_data_ref->dwell_duration = segment->dwell_duration;
+        }
         // Mark segment as complete immediately (steps_remaining = 0, steps_completed = 0)
         // Motion state machine will check dwell_active in STEPPER_IsDwellComplete()
         segment->steps_remaining = 0;
         segment->steps_completed = 0;
-        
         // Mark motion inactive during dwell (no motor motion)
         if (app_data_ref != NULL) {
             app_data_ref->motionActive = false;
         }
-        
         return;  // ✅ DWELL doesn't start TMR4 or OC1 - just timer!
     }
  
     // ✅ MOTION SEGMENT HANDLING (LINEAR/ARC)
     // Handles soft reset (ox18), emergency stop, or other disabling instructions.
-    if(!steppers_enabled){
+    if(app_data_ref && !app_data_ref->steppers_enabled){
         DEBUG_PRINT_STEPPER("[STEPPER_Load] Steppers were disabled, enabling now\r\n");
         STEPPER_EnableAll();
     } else {
@@ -188,32 +155,30 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     }
 
     // ✅ ARRAY-BASED: Load deltas for Bresenham (single loop!)
-    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        delta[axis] = segment->delta[axis];
-    }
-    
-    // Use pre-calculated dominant axis and delta from motion planning
-    // (Calculated once in KINEMATICS_LinearMove, not recalculated here)
-    dominant_axis = segment->dominant_axis;
-    dominant_delta = segment->dominant_delta;
-    
-    // ✅ ARRAY-BASED: Initialize Bresenham errors (single loop!)
-    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        error[axis] = dominant_delta / 2;
-    }
-    
-    // ✅ ARRAY-BASED: Set directions (single loop!)
-    direction_bits = 0;
-    DEBUG_PRINT_STEPPER("[STEPPER_Load] Direction invert mask = 0x%02X\r\n", direction_invert_mask);
-    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        if (delta[axis] >= 0) {
-            direction_bits |= (1 << axis);
+    if (app_data_ref) {
+        for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+            app_data_ref->bresenham_delta_isr[axis] = segment->delta[axis];
         }
-        bool forward = (delta[axis] >= 0);
-        DEBUG_PRINT_STEPPER("[STEPPER_Load] Axis %d: delta=%ld, forward=%d, invert_bit=%d\r\n",
-            axis, delta[axis], forward, (direction_invert_mask >> axis) & 0x01);
-        // Update GPIO direction pin
-        MOTION_UTILS_SetDirection(axis, forward, direction_invert_mask);
+        // Use pre-calculated dominant axis and delta from motion planning
+        app_data_ref->bresenham_dominant_axis = segment->dominant_axis;
+        app_data_ref->bresenham_dominant_delta = segment->dominant_delta;
+        // Initialize Bresenham errors
+        for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+            app_data_ref->bresenham_error_isr[axis] = app_data_ref->bresenham_dominant_delta / 2;
+        }
+        // Set directions
+        app_data_ref->direction_bits = 0;
+        DEBUG_PRINT_STEPPER("[STEPPER_Load] Direction invert mask = 0x%02X\r\n", app_data_ref->direction_invert_mask);
+        for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+            if (app_data_ref->bresenham_delta_isr[axis] >= 0) {
+                app_data_ref->direction_bits |= (1 << axis);
+            }
+            bool forward = (app_data_ref->bresenham_delta_isr[axis] >= 0);
+            DEBUG_PRINT_STEPPER("[STEPPER_Load] Axis %d: delta=%ld, forward=%d, invert_bit=%d\r\n",
+                axis, app_data_ref->bresenham_delta_isr[axis], forward, (app_data_ref->direction_invert_mask >> axis) & 0x01);
+            // Update GPIO direction pin
+            MOTION_UTILS_SetDirection(axis, forward, app_data_ref->direction_invert_mask);
+        }
     }
     
     // Set initial step rate (PR4 controls OC1 period in 16-bit mode)
@@ -302,24 +267,21 @@ void STEPPER_SetStepRate(uint32_t rate_ticks) {
 
 bool STEPPER_IsEnabled(void)
 {
-    return steppers_enabled;
+    return (app_data_ref != NULL) ? app_data_ref->steppers_enabled : false;
 }
 
 bool STEPPER_IsDwellComplete(void)
 {
-    if (!dwell_active) return true;  // Not in dwell, so it's "complete"
-    
+    if (app_data_ref == NULL || !app_data_ref->dwell_active) return true;  // Not in dwell, so it's "complete"
     // Check if dwell timer has elapsed
     uint32_t now = CORETIMER_CounterGet();
-    uint32_t elapsed = now - dwell_start_ticks;
-    
-    if (elapsed >= dwell_duration) {
-        dwell_active = false;
+    uint32_t elapsed = now - app_data_ref->dwell_start_ticks;
+    if (elapsed >= app_data_ref->dwell_duration) {
+        app_data_ref->dwell_active = false;
         DEBUG_PRINT_STEPPER("[STEPPER_Dwell] Complete - elapsed %lu >= %lu ticks\r\n",
-            (unsigned long)elapsed, (unsigned long)dwell_duration);
+            (unsigned long)elapsed, (unsigned long)app_data_ref->dwell_duration);
         return true;
     }
-    
     return false;  // Still waiting
 }
 
@@ -328,12 +290,13 @@ void STEPPER_ReloadSettings(void)
     // Reload cached settings from flash (called when $0-$5 change at runtime)
     CNC_Settings* settings = SETTINGS_GetCurrent();
     
-    step_pulse_invert_mask = settings->step_pulse_invert;
-    direction_invert_mask = settings->step_direction_invert;
-    enable_invert = settings->step_enable_invert;
-    
-    DEBUG_PRINT_STEPPER("[STEPPER_Reload] dir_invert_mask=0x%02X ($3=%u)\r\n", 
-                        direction_invert_mask, direction_invert_mask);
+    if (app_data_ref) {
+        app_data_ref->step_pulse_invert_mask = settings->step_pulse_invert;
+        app_data_ref->direction_invert_mask = settings->step_direction_invert;
+        app_data_ref->enable_invert = settings->step_enable_invert;
+        DEBUG_PRINT_STEPPER("[STEPPER_Reload] dir_invert_mask=0x%02X ($3=%u)\r\n", 
+                            app_data_ref->direction_invert_mask, app_data_ref->direction_invert_mask);
+    }
 }
 
 void STEPPER_EnableAll(void)
@@ -343,13 +306,13 @@ void STEPPER_EnableAll(void)
 
     // Re-read enable invert setting in case it changed via $4 command
     CNC_Settings* settings = SETTINGS_GetCurrent();
-    enable_invert = settings->step_enable_invert;
-    
-    // Use MOTION_UTILS to properly apply inversion logic
-     MOTION_UTILS_EnableAllAxes(true, enable_invert);
-    
-    steppers_enabled = true;
-    DEBUG_PRINT_STEPPER("[STEPPER] Enabled all drivers (invert=0x%02X)\r\n", enable_invert);
+    if (app_data_ref) {
+        app_data_ref->enable_invert = settings->step_enable_invert;
+        // Use MOTION_UTILS to properly apply inversion logic
+        MOTION_UTILS_EnableAllAxes(true, app_data_ref->enable_invert);
+        app_data_ref->steppers_enabled = true;
+        DEBUG_PRINT_STEPPER("[STEPPER] Enabled all drivers (invert=0x%02X)\r\n", app_data_ref->enable_invert);
+    }
 }
 
 void STEPPER_DisableAll(void)
@@ -359,13 +322,13 @@ void STEPPER_DisableAll(void)
 
     // Re-read enable invert setting in case it changed
     CNC_Settings* settings = SETTINGS_GetCurrent();
-    enable_invert = settings->step_enable_invert;
-    
-    // Use MOTION_UTILS to properly apply inversion logic
-    MOTION_UTILS_DisableAllAxes(enable_invert);
-    
-    steppers_enabled = false;
-    DEBUG_PRINT_STEPPER("[STEPPER] Disabled all drivers (invert=0x%02X)\r\n", enable_invert);
+    if (app_data_ref) {
+        app_data_ref->enable_invert = settings->step_enable_invert;
+        // Use MOTION_UTILS to properly apply inversion logic
+        MOTION_UTILS_DisableAllAxes(app_data_ref->enable_invert);
+        app_data_ref->steppers_enabled = false;
+        DEBUG_PRINT_STEPPER("[STEPPER] Disabled all drivers (invert=0x%02X)\r\n", app_data_ref->enable_invert);
+    }
 }
 
 // ============================================================================
@@ -376,16 +339,12 @@ void STEPPER_StopMotion(void)
 {
     // Disable stepper drivers immediately (no movement)
     STEPPER_DisableAll();
-    
     // Stop TMR4 timer (halts ISR execution)
     TMR4_Stop();
-
     // Stop TMR5 timer (in case pulse width timer was running)
     TMR5_Stop();
-    
     // Disable OC1 module (stops pulse generation)
     OCMP1_Disable();
-    
     DEBUG_PRINT_STEPPER("[STEPPER] Motion stopped (TMR4/OC1 disabled)\r\n");
 }
 
@@ -399,14 +358,15 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
     }
     
     // Update direction bits for ISR
-    if (forward) {
-        direction_bits |= (1 << axis);   // Set bit (forward/positive)
-    } else {
-        direction_bits &= ~(1 << axis);  // Clear bit (reverse/negative)
+    if (app_data_ref) {
+        if (forward) {
+            app_data_ref->direction_bits |= (1 << axis);   // Set bit (forward/positive)
+        } else {
+            app_data_ref->direction_bits &= ~(1 << axis);  // Clear bit (reverse/negative)
+        }
+        // Set GPIO direction pin using motion_utils (handles inversion from settings)
+        MOTION_UTILS_SetDirection(axis, forward, app_data_ref->direction_invert_mask);
     }
-    
-    // Set GPIO direction pin using motion_utils (handles inversion from settings)
-    MOTION_UTILS_SetDirection(axis, forward, direction_invert_mask);
 }
 
 // ============================================================================
@@ -421,48 +381,33 @@ void OCP1_ISR(uintptr_t context) {
     
     // ===== DOMINANT AXIS STEP (ALWAYS) =====
     // Use pre-calculated dominant_axis (set during STEPPER_LoadSegment)
-    // Eliminates 4 abs() calls + 3 comparisons per ISR (significant overhead reduction!)
-    
+    if (!app_data_ref) return;
+    E_AXIS dom_axis = app_data_ref->bresenham_dominant_axis;
+    int32_t dom_delta = app_data_ref->bresenham_dominant_delta;
     // Atomic GPIO step pulse - single instruction, zero overhead!
-    AXIS_StepSet(dominant_axis);
-    
-    // ✅ CRITICAL DEBUG: Read back GPIO state immediately after Set
-    // This confirms if AXIS_StepSet actually toggles the pin
-    DEBUG_EXEC_STEPPER({
-        static uint32_t debug_counter = 0;
-        if (++debug_counter >= 100) {  // Print every 100th step to avoid UART flood
-            debug_counter = 0;
-        }
-    });
-    
+    AXIS_StepSet(dom_axis);
     // Update step counter based on direction (inline, zero overhead)
-    if (direction_bits & (1 << dominant_axis)) {
-        AXIS_IncrementSteps(dominant_axis);
+    if (app_data_ref->direction_bits & (1 << dom_axis)) {
+        AXIS_IncrementSteps(dom_axis);
     } else {
-        AXIS_DecrementSteps(dominant_axis);
+        AXIS_DecrementSteps(dom_axis);
     }
-    
     // ===== BRESENHAM FOR SUBORDINATE AXES =====
-    // ✅ ARRAY-BASED: Direct array access - ZERO pointer overhead!
-    
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         // Skip dominant axis and axes with zero delta
-        if (axis == dominant_axis || delta[axis] == 0) continue;
-        
+        if (axis == dom_axis || app_data_ref->bresenham_delta_isr[axis] == 0) continue;
         // Bresenham error accumulation using direct array access
-        error[axis] += abs(delta[axis]);
-        if (error[axis] >= dominant_delta) {
+        app_data_ref->bresenham_error_isr[axis] += abs(app_data_ref->bresenham_delta_isr[axis]);
+        if (app_data_ref->bresenham_error_isr[axis] >= dom_delta) {
             // Atomic GPIO step pulse - single instruction!
             AXIS_StepSet(axis);
-            
             // Update step counter (inline, zero overhead)
-            if (direction_bits & (1 << axis)) {
+            if (app_data_ref->direction_bits & (1 << axis)) {
                 AXIS_IncrementSteps(axis);
             } else {
                 AXIS_DecrementSteps(axis);
             }
-            
-            error[axis] -= dominant_delta;
+            app_data_ref->bresenham_error_isr[axis] -= dom_delta;
         }
     }
     
@@ -476,12 +421,10 @@ void OCP1_ISR(uintptr_t context) {
     // This is what makes the motion continue - without this, only ONE step occurs!
     if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
         uint32_t step_interval = app_data_ref->currentSegment->step_interval;  // Ticks between steps
-        
         // ✅ CRITICAL: Ensure period is large enough for pulse width requirements
         const uint16_t MIN_PERIOD_FOR_PULSE = 7;  // 5 for rising edge offset + 2 for pulse width
         uint16_t period = (uint16_t)step_interval;
         if (period < MIN_PERIOD_FOR_PULSE) period = MIN_PERIOD_FOR_PULSE;
-        
         // ✅ CRITICAL: Set TMR4 period AND OC1 compare values for continuous pulses
         // Per datasheet 16.3.2.5: PR4 must be ≥ OC1RS > OC1R
         // OC1R fires first (rising edge), OC1RS fires second (falling edge + ISR)
@@ -489,7 +432,6 @@ void OCP1_ISR(uintptr_t context) {
         TMR4_PeriodSet(period);                                             // Timer period (controls step rate)
         OCMP1_CompareValueSet(period - 5);                                  // Rising edge (pulse starts)
         OCMP1_CompareSecondaryValueSet(period - 3);                         // Falling edge (ISR trigger)
-
         // Update step counter and signal main loop for velocity updates
         app_data_ref->currentSegment->steps_completed++;
         app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;
@@ -539,7 +481,7 @@ StepperPosition* STEPPER_GetPosition(void)
 // Get pointer to LIVE position counters (for g_axis_settings initialization)
 StepperPosition* STEPPER_GetPositionPointer(void)
 {
-    return &stepper_pos;
+    return (app_data_ref ? (StepperPosition*)&app_data_ref->stepper_pos : NULL);
 }
 
 // End of stepper.c

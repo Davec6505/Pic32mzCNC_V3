@@ -1,5 +1,75 @@
+
+
+
 #ifndef DATA_STRUCTURES_H
 #define DATA_STRUCTURES_H
+
+// ================= Axis Enum (must be first for struct usage) =====================
+typedef enum {
+    AXIS_X = 0,
+    AXIS_Y,
+    AXIS_Z,
+    AXIS_A,
+    NUM_AXIS
+} E_AXIS;
+
+// Standard includes
+#include <stdint.h>
+#include <stdbool.h>
+#include "common.h"
+
+
+
+
+// ================= Homing State Machine Types (moved from homing.h) =====================
+typedef enum {
+    HOMING_STATE_IDLE = 0,      // No homing in progress
+    HOMING_STATE_SEEK,          // Fast approach to limit
+    HOMING_STATE_LOCATE,        // Slow precision homing
+    HOMING_STATE_PULLOFF,       // Retract from limit
+    HOMING_STATE_COMPLETE,      // Homing successful
+    HOMING_STATE_ALARM          // Homing failed
+} HomingState;
+
+typedef struct {
+    HomingState state;
+    E_AXIS current_axis;        // Axis currently being homed
+    uint32_t axes_to_home;      // Bitmask of axes to home (bit 0=X, 1=Y, 2=Z, 3=A)
+    uint32_t axes_homed;        // Bitmask of completed axes
+    // Timing
+    uint32_t debounce_start;    // CoreTimer value when limit triggered
+    bool debouncing;            // True during debounce delay
+    // Motion tracking
+    bool motion_active;         // True when homing move in progress
+    uint32_t alarm_code;        // Non-zero if homing failed
+} HomingControl;
+typedef struct {
+    uint32_t current_rpm;
+    bool is_running;
+    uint16_t current_pwm_duty;
+} SpindleState;
+
+// ================= G-code Parser State (Centralized) ======================
+
+#define GCODE_RX_BUFFER_SIZE 512
+#define GCODE_TX_BUFFER_SIZE 1024
+
+typedef struct {
+    uint32_t okPendingCount;         // Flow control: count of deferred "ok" responses
+    bool grblCheckMode;              // $C toggle
+    bool grblAlarm;                  // $X clears alarm
+    bool feedHoldActive;             // '!' feed hold, '~' resume
+    char startupLines[2][GCODE_RX_BUFFER_SIZE]; // $N0 / $N1
+    bool unitsInches;                // false=mm (G21), true=inches (G20)
+    // Only protocol/flow-control state here. Buffers are file-local in gcode_parser.c
+} GcodeParserState;
+// Forward declaration for motion state
+typedef enum {
+    MOTION_STATE_IDLE,
+    MOTION_STATE_LOAD_SEGMENT,
+    MOTION_STATE_EXECUTING,
+    MOTION_STATE_SEGMENT_COMPLETE
+} MotionState;
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -14,14 +84,7 @@
 // ✅ Number of axes (must match E_AXIS enum in data_structures.h)
 #define AXIS_COUNT 4
 
-// Forward declaration for E_AXIS (defined in common.h)
-typedef enum {
-    AXIS_X = 0,
-    AXIS_Y,
-    AXIS_Z,
-    AXIS_A,
-    NUM_AXIS
-} E_AXIS;
+
 
 // ============================================================================
 // Motion Phase System (Priority-Based Task Scheduling)
@@ -154,6 +217,8 @@ typedef enum {
 
 typedef struct {
     APP_STATES state;
+    // G-code parser runtime state (centralized)
+    GcodeParserState gcodeParser;
     
     // G-code command queue (with nested motion info for flow control)
     GCODE_CommandQueue gcodeCommandQueue;
@@ -174,6 +239,9 @@ typedef struct {
     bool absoluteMode;        // G90/G91 state
     uint8_t activeWCS;        // Active work coordinate system (0=G54, 1=G55, ..., 5=G59)
     uint8_t modalPlane;       // G17=0 (XY), G18=1 (XZ), G19=2 (YZ)
+
+    // Centralized spindle runtime state
+    SpindleState spindleState;
     
     // Alarm state (GRBL safety)
     uint8_t alarmCode;        // 0=no alarm, 1=hard limit, 2=soft limit, 3=abort, etc.
@@ -183,6 +251,10 @@ typedef struct {
     E_AXIS dominantAxis;               // Which axis is master for current segment
     uint32_t currentStepInterval;      // Current interval (changes with velocity profile)
     MotionSegment* currentSegment;     // Pointer to active segment being executed
+
+    // ===== MOTION STATE MACHINE (CENTRALIZED) =====
+    MotionState motionState;           // State for MOTION_Tasks state machine
+    uint32_t stepsCompleted;           // Steps executed in current segment (if needed)
     
     // ✅ ARRAY-BASED: Bresenham state (for phase processing) [X, Y, Z, A]
     // Note: All axes can have errors since ANY axis can be dominant based on plane selection
@@ -213,6 +285,37 @@ typedef struct {
     bool motionActive;
     // true when a segment completes (signals to check deferred ok)
     bool motionSegmentCompleted;
+    
+    // ===== STEPPER/BRESENHAM STATE (CENTRALIZED) =====
+    // Stepper position tracking (for all axes)
+    struct {
+        int32_t steps[NUM_AXIS];
+        float steps_per_mm[NUM_AXIS];
+    } stepper_pos;
+
+    // Direction bits (bitmask: 1=forward, 0=reverse)
+    volatile uint8_t direction_bits;
+
+    // Bresenham error and delta arrays
+    volatile int32_t bresenham_error_isr[NUM_AXIS];
+    volatile int32_t bresenham_delta_isr[NUM_AXIS];
+    volatile int32_t bresenham_dominant_delta;
+    volatile E_AXIS bresenham_dominant_axis;
+
+    // Stepper enable state
+    bool steppers_enabled;
+
+    // Dwell timer state
+    volatile bool dwell_active;
+    volatile uint32_t dwell_start_ticks;
+    volatile uint32_t dwell_duration;
+
+    // Cached settings for ISR performance
+    uint8_t step_pulse_invert_mask;
+    uint8_t direction_invert_mask;
+    uint8_t enable_invert;
+    // ===== HOMING STATE (CENTRALIZED) =====
+    HomingControl homing;
 } APP_DATA;
 
 #endif // DATA_STRUCTURES_H

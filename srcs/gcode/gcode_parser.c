@@ -60,12 +60,6 @@ GCODE_Data gcodeData = {
     .state = GCODE_STATE_IDLE,
 };
 
-static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
-static bool grblCheckMode = false;          /* $C toggle */
-static bool grblAlarm = false;              /* $X clears alarm */
-static bool feedHoldActive = false;         /* '!' feed hold, '~' resume */
-static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
-static bool unitsInches = false;            /* false=mm (G21), true=inches (G20) */
 
 /* ✅ REMOVED: Startup deferral variables (caused UGS stalling) */
 
@@ -130,7 +124,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
 /* -------------------------------------------------------------------------- */
 /* USART Initialization                                                       */
 /* -------------------------------------------------------------------------- */
-void GCODE_USART_Initialize(uint32_t RD_thresholds)
+void GCODE_USART_Initialize(APP_DATA* appData, uint32_t RD_thresholds)
 {
     (void)RD_thresholds;
     UART_Initialize();
@@ -142,12 +136,15 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
 
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
-    okPendingCount = 0;  // Clear all deferred ok responses
+    if (appData) {
+        appData->gcodeParser.okPendingCount = 0;
+        appData->gcodeParser.grblCheckMode = false;
+        appData->gcodeParser.grblAlarm = false;
+        appData->gcodeParser.feedHoldActive = false;
+        appData->gcodeParser.unitsInches = false;
+        memset(appData->gcodeParser.startupLines, 0, sizeof(appData->gcodeParser.startupLines));
+    }
     gcodeData.state = GCODE_STATE_IDLE;
-    unitsInches = false;
-    grblCheckMode = false;
-    grblAlarm = false;
-    feedHoldActive = false;
 
     // ✅ REMOVED: Startup deferral initialization (no longer used)
 }
@@ -265,7 +262,7 @@ GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t len
 /* -------------------------------------------------------------------------- */
 /* Command -> Event Parser                                                    */
 /* -------------------------------------------------------------------------- */
-static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
+static bool parse_command_to_event(APP_DATA* appData, const char* cmd, GCODE_Event* ev)
 {
     if (!cmd || !ev) return false;
     ev->type = GCODE_EVENT_NONE;
@@ -282,8 +279,8 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         DEBUG_PRINT_GCODE("[PARSE] G-code detected: gnum=%d\r\n", gnum);
 
         // G20/G21 - Units (handled internally, no event needed)
-        if (gnum == 20) { unitsInches = true; ev->type = GCODE_EVENT_NONE; return true; }
-        if (gnum == 21) { unitsInches = false; ev->type = GCODE_EVENT_NONE; return true; }
+    if (gnum == 20) { appData->gcodeParser.unitsInches = true; ev->type = GCODE_EVENT_NONE; return true; }
+    if (gnum == 21) { appData->gcodeParser.unitsInches = false; ev->type = GCODE_EVENT_NONE; return true; }
         
         // G90/G91 - Positioning mode
         if (gnum == 90) { ev->type = GCODE_EVENT_SET_ABSOLUTE; return true; }
@@ -300,7 +297,7 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         if (gnum == 92) {
             StepperPosition* pos = STEPPER_GetPosition();
             WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-            const float unit_scale = unitsInches ? 25.4f : 1.0f;
+            const float unit_scale = appData->gcodeParser.unitsInches ? 25.4f : 1.0f;
             
             // Array-based axis parameter parsing with loop
             float desired[NUM_AXIS];
@@ -332,7 +329,7 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
                 if (p_val == 0 || p_val == 1) {
                     StepperPosition* pos = STEPPER_GetPosition();
                     WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-                    const float unit_scale = unitsInches ? 25.4f : 1.0f;
+                    const float unit_scale = appData->gcodeParser.unitsInches ? 25.4f : 1.0f;
                     
                     // Array-based axis parameter parsing with loop
                     float desired[NUM_AXIS];
@@ -390,7 +387,7 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         }
         
         char* pF = find_char((char*)cmd, 'F');
-        const float unit_scale = unitsInches ? 25.4f : 1.0f;
+    const float unit_scale = appData->gcodeParser.unitsInches ? 25.4f : 1.0f;
 
         if (ev->type == GCODE_EVENT_LINEAR_MOVE) {
             float f = pF ? parse_float_after(pF) : 0.0f;
@@ -426,7 +423,7 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
     if (cmd[0] == 'F') {
         ev->type = GCODE_EVENT_SET_FEEDRATE;
         float f = (float)strtof(&cmd[1], NULL);
-        ev->data.setFeedrate.feedrate = unitsInches ? (f * 25.4f) : f;
+    ev->data.setFeedrate.feedrate = appData->gcodeParser.unitsInches ? (f * 25.4f) : f;
         return true;
     }
     if (cmd[0] == 'S') {
@@ -470,7 +467,7 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
 /* -------------------------------------------------------------------------- */
 /* Public Event Retrieval                                                     */
 /* -------------------------------------------------------------------------- */
-bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
+bool GCODE_GetNextEvent(APP_DATA* appData, GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
 {
     if (!cmdQueue || !event) return false;
     if (cmdQueue->count == 0) return false;
@@ -483,7 +480,7 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
         return false;
     }
 
-    if (!parse_command_to_event(gc->command, event)) {
+    if (!parse_command_to_event(appData, gc->command, event)) {
         // Parse failed - consume command and return false
         DEBUG_PRINT_GCODE("[GetEvent] Parse failed for: '%s'\r\n", gc->command);
         cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
@@ -562,12 +559,12 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
     // This prevents deadlock on long motion files while still providing backpressure
     uint32_t lowWater = appData->gcodeCommandQueue.maxMotionSegments - MOTION_BUFFER_LOW_WATER;
     
-    while (okPendingCount > 0 && appData->motionQueueCount < lowWater) {
+    while (appData->gcodeParser.okPendingCount > 0 && appData->motionQueueCount < lowWater) {
         DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue=%lu < lowWater=%lu, pending=%lu)\r\n",
                           (unsigned long)appData->motionQueueCount, (unsigned long)lowWater,
-                          (unsigned long)okPendingCount);
+                          (unsigned long)appData->gcodeParser.okPendingCount);
         if (UART_SendOK()) {
-            okPendingCount--;
+            appData->gcodeParser.okPendingCount--;
         } else {
             break;  // TX buffer full, try again next iteration
         }
@@ -595,8 +592,8 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
     } else {
         DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu > 0, total pending=%lu)\r\n", 
                           (unsigned long)appData->motionQueueCount,
-                          (unsigned long)(okPendingCount + 1));
-        okPendingCount++;
+                          (unsigned long)(appData->gcodeParser.okPendingCount + 1));
+    appData->gcodeParser.okPendingCount++;
     }
 }
 
@@ -749,9 +746,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 }
 
                 const char* state = "Idle";
-                if (grblAlarm) {
+                if (appData->gcodeParser.grblAlarm) {
                     state = "Alarm";
-                } else if (feedHoldActive) {
+                } else if (appData->gcodeParser.feedHoldActive) {
                     state = "Hold";
                 } else if (appData->arcGenState == ARC_GEN_ACTIVE) {
                     // Arc generator active → still processing arc segments
@@ -779,8 +776,8 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     mpos[AXIS_X], mpos[AXIS_Y], mpos[AXIS_Z], 
                     wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
                     feedrate_mm_min, (unsigned)spindle_rpm,
-                    grblCheckMode ? "|Cm:1" : "",
-                    feedHoldActive ? "|FH:1" : "");
+                    appData->gcodeParser.grblCheckMode ? "|Cm:1" : "",
+                    appData->gcodeParser.feedHoldActive ? "|FH:1" : "");
                 UART3_Write(txBuffer, response_len);
                 
                 // ⚠️ Real-time commands NEVER trigger deferred ok checks
@@ -788,13 +785,13 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 break;
             }
             case '~': /* Cycle start / resume */
-                if (feedHoldActive) {
-                    feedHoldActive = false;
+                if (appData->gcodeParser.feedHoldActive) {
+                    appData->gcodeParser.feedHoldActive = false;
                     /* Future: Re-enable motion pipeline if paused */
                 }
                 break;
             case '!': /* Feed hold */
-                feedHoldActive = true;
+                appData->gcodeParser.feedHoldActive = true;
                 STEPPER_DisableAll();
                 break;
             case 0x18: /* Soft reset */
@@ -852,9 +849,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 for (size_t i = 0; i < l && w < (GCODE_BUFFER_SIZE - 1); i++) {
                     unsigned char ch = (unsigned char)line[i];
                     if (ch == '\r' || ch == '\n') break;
-                    if (ch >= 32 && ch <= 126) startupLines[idx][w++] = (char)ch;
+                    if (ch >= 32 && ch <= 126) appData->gcodeParser.startupLines[idx][w++] = (char)ch;
                 }
-                startupLines[idx][w] = '\0';
+                appData->gcodeParser.startupLines[idx][w] = '\0';
                 handled = true;
             } else {
                 UART3_Write((uint8_t*)"error:4\r\n", 10);
@@ -862,10 +859,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 handled = true;
             }
         }
-        else if (len >= 2 && cmd[0] == '$' && cmd[1] == '$') {
-            SETTINGS_PrintAll(SETTINGS_GetCurrent());
+        else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'J') {
+            // Jog cancel (feed hold)
+            appData->gcodeParser.feedHoldActive = true;
             handled = true;
-            send_ok = false;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == '#') {
             // GRBL $# command: Report work coordinate systems and offsets
@@ -903,7 +900,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             l += sprintf(&state_buffer[l], "G0 ");
             l += sprintf(&state_buffer[l], "G%d ", 54 + appData->activeWCS);  // Dynamic WCS (G54-G59)
             l += sprintf(&state_buffer[l], "G%d ", appData->modalPlane == 0 ? 17 : (appData->modalPlane == 1 ? 18 : 19));
-            l += sprintf(&state_buffer[l], "%s ", unitsInches ? "G20" : "G21");
+            l += sprintf(&state_buffer[l], "%s ", appData->gcodeParser.unitsInches ? "G20" : "G21");
             l += sprintf(&state_buffer[l], "G%d ", appData->absoluteMode ? 90 : 91);
             l += sprintf(&state_buffer[l], "G94 ");
             l += sprintf(&state_buffer[l], "M5 ");
@@ -966,22 +963,20 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'N') {
             char buf[160];
             int p = 0;
-            p += snprintf(&buf[p], sizeof(buf)-p, "[N0:%s]\r\n", startupLines[0]);
-            p += snprintf(&buf[p], sizeof(buf)-p, "[N1:%s]\r\n", startupLines[1]);
+            p += snprintf(&buf[p], sizeof(buf)-p, "[N0:%s]\r\n", appData->gcodeParser.startupLines[0]);
+            p += snprintf(&buf[p], sizeof(buf)-p, "[N1:%s]\r\n", appData->gcodeParser.startupLines[1]);
             UART3_Write((uint8_t*)buf, (uint32_t)p);
             handled = true;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'C') {
-            grblCheckMode = !grblCheckMode;
+            appData->gcodeParser.grblCheckMode = !appData->gcodeParser.grblCheckMode;
             handled = true;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'X') {
-            grblAlarm = false;
-            
+            appData->gcodeParser.grblAlarm = false;
             // ✅ Clear hard limit alarm flag (set by stepper ISR)
             // g_hard_limit_alarm declared in stepper.h (already included at top)
             g_hard_limit_alarm = false;
-            
             DEBUG_PRINT_GCODE("[GCODE] Alarm cleared via $X command\r\n");
             handled = true;
         }
@@ -993,7 +988,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             char target = cmd[5];
             if (target == '*') {
                 SETTINGS_RestoreDefaults(SETTINGS_GetCurrent());
-                grblAlarm = false;
+                appData->gcodeParser.grblAlarm = false;
             } else if (target == '$') {
                 SETTINGS_RestoreDefaults(SETTINGS_GetCurrent());
             } else if (target == '#') {
@@ -1060,6 +1055,12 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 send_ok = false;
             }
             handled = true;
+        }
+        else if (len >= 2 && cmd[0] == '$' && cmd[1] == '$') {
+            // $$ - Print all settings
+            SETTINGS_PrintAll(SETTINGS_GetCurrent());
+            handled = true;
+            send_ok = false;  // SETTINGS_PrintAll sends its own ok
         }
         else if (len == 1 && cmd[0] == '$') {
             UART3_Write((uint8_t*)"[HLP:$$ $# $G $I $N $C $X $F $RST= $SAVE $SLP $L]\r\n", 53);

@@ -7,7 +7,7 @@
 #include "gcode_parser.h"  // ✅ For GCODE_Event type
 
 // Existing declarations...
-void MOTION_Initialize(void);
+void MOTION_Initialize(APP_DATA* appData);
 void MOTION_Tasks(APP_DATA* appData);
 
 // ✅ Arc interpolation function

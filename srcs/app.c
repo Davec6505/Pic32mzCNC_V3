@@ -152,11 +152,12 @@ void APP_Initialize ( void )
     // ✅ Initialize limit switch configuration (must be after SETTINGS init)
     UTILS_InitLimitConfig();
     
+
     // ✅ Initialize homing system
     HOMING_Initialize();
     
     // ✅ Initialize spindle PWM control (OC8/TMR6)
-    SPINDLE_Initialize();
+    SPINDLE_Initialize(&appData);
 
 }
 
@@ -182,31 +183,30 @@ void APP_Tasks ( void )
         {
             // Initialize subsystems ONCE during configuration
             STEPPER_Initialize(&appData);                   // ✅ Pass APP_DATA reference for ISR phase signaling
-            MOTION_Initialize();                            // Motion planning initialization  
+            MOTION_Initialize(&appData);                            // Motion planning initialization
             KINEMATICS_Initialize();                        // Initialize work coordinates
-            
+            DEBUG_PRINT_APP("[APP] State: APP_CONFIG complete\r\n");
             appData.state = APP_LOAD_SETTINGS;
             break;
         }
         
         case APP_LOAD_SETTINGS:
         {
+            DEBUG_PRINT_APP("[APP] State: APP_LOAD_SETTINGS entry\r\n");
             // ✅ Delay flash read until after all peripherals initialized
             // Try to load from flash - if invalid signature/CRC, use defaults (already loaded)
             if (SETTINGS_LoadFromFlash(SETTINGS_GetCurrent())) {
-                // Flash settings loaded successfully
+                DEBUG_PRINT_APP("[APP] SETTINGS_LoadFromFlash: success\r\n");
                 uint32_t led2_flash_loaded = 0;
                 while(led2_flash_loaded < 10){
                     LED2_Toggle();
                     led2_flash_loaded++;
                     CORETIMER_DelayMs(250);
                 }
-          
             } else {
-                    // Flash empty or invalid - defaults already loaded in SETTINGS_Initialize()
-                        // Try to load from flash - if invalid signature/CRC, use defaults (already loaded)
+                DEBUG_PRINT_APP("[APP] SETTINGS_LoadFromFlash: fail, using defaults\r\n");
                 if (SETTINGS_LoadFromFlash(SETTINGS_GetCurrent())) {
-                    // Flash settings loaded successfully
+                    DEBUG_PRINT_APP("[APP] SETTINGS_LoadFromFlash: retry success\r\n");
                     uint32_t led2_flash_loaded = 0;
                     while(led2_flash_loaded < 10){
                         LED2_Toggle();
@@ -215,26 +215,18 @@ void APP_Tasks ( void )
                     }
                 }
             }
-            
-            // ✅ CRITICAL: Update stepper cached values after settings loaded
-            // STEPPER_Initialize() ran before settings were loaded, so steps_per_mm might be stale
-            CNC_Settings* settings = SETTINGS_GetCurrent();
-            StepperPosition* stepper_pos = STEPPER_GetPosition();
-            
-            // ✅ ARRAY-BASED: Update steps_per_mm from settings (loop for scalability)
-            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-                stepper_pos->steps_per_mm[axis] = settings->steps_per_mm[axis];
-            }
-            
+            DEBUG_PRINT_APP("[APP] State: APP_LOAD_SETTINGS after flash\r\n");
+            DEBUG_PRINT_APP("[APP] State: APP_LOAD_SETTINGS before APP_GCODE_INIT\r\n");
             appData.state = APP_GCODE_INIT;
             break;
         }
         
         case APP_GCODE_INIT:
         {
+            DEBUG_PRINT_APP("[APP] State: APP_GCODE_INIT entry\r\n");
             // ✅ Initialize UART and G-code parser after subsystems ready
-            GCODE_USART_Initialize(5);
-            
+            GCODE_USART_Initialize(&appData, 5);
+            DEBUG_PRINT_APP("[APP] State: APP_GCODE_INIT before APP_IDLE\r\n");
             appData.state = APP_IDLE;
             break;
         }
@@ -269,7 +261,7 @@ void APP_Tasks ( void )
             
             // ===== HOMING STATE MACHINE (NON-BLOCKING) =====
             // Process homing cycle if active
-            HOMING_Tasks(&appData);
+            HOMING_Tasks();
 
 
             // ===== EVENT PROCESSING - CONVERT GCODE TO MOTION =====
@@ -279,7 +271,7 @@ void APP_Tasks ( void )
                 // Process next event - convert one queued command into motion event
                 // Dwell is now handled as a motion segment (no special checking needed)
                 GCODE_Event event;
-                if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
+                if (GCODE_GetNextEvent(&appData, &appData.gcodeCommandQueue, &event)) {
                     DEBUG_PRINT_GCODE("[APP] Event retrieved: type=%d (1=LINEAR,2=ARC)\r\n", event.type);
                     
                     // ⚠️ CRITICAL: Don't process ARC events while another arc is generating
@@ -308,10 +300,8 @@ void APP_Tasks ( void )
             
             
             // ===== HOMING STATE CHECK (USED FOR LED2 AND HARD LIMITS) =====
-            // g_homing declared in motion/homing.h (already included at top)
-            bool homing_active = (g_homing.state != HOMING_STATE_IDLE && 
-                                  g_homing.state != HOMING_STATE_COMPLETE &&
-                                  g_homing.state != HOMING_STATE_ALARM);
+            // appData.homing declared in APP_DATA (data_structures.h)
+            bool homing_active = HOMING_IsActive();
             
 
             // During homing: Use limit check to drive state transitions
@@ -327,70 +317,47 @@ void APP_Tasks ( void )
 
                 // Check limit switch (using same logic as hard limits)
                 bool limit_current = MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert);
-                
-                // Update persistent state tracker
                 UTILS_HomingLimitUpdate(limit_current);
-                
                 DEBUG_EXEC_MOTION({
                     static uint32_t limit_debug = 0;
                     if (limit_debug++ % 50000 == 0) {
                         DEBUG_PRINT_MOTION("[APP_HOMING] limit=%d, state=%d, queue=%lu\r\n",
-                                          limit_current, g_homing.state, 
+                                          limit_current, HOMING_GetState(), 
                                           (unsigned long)appData.motionQueueCount);
                     }
                 });
-                
                 // ===== EDGE-BASED HOMING: Only edges matter, ignore limit state itself =====
-                
                 // RISING EDGE: Limit triggered (returns true once, then auto-clears)
                 if (UTILS_HomingLimitRisingEdge()) {
                     DEBUG_PRINT_MOTION("[APP_HOMING] RISING EDGE detected\r\n");
-                    
-                    if (g_homing.state == HOMING_STATE_SEEK) {
+                    if (HOMING_GetState() == HOMING_STATE_SEEK) {
                         DEBUG_PRINT_MOTION("[APP_HOMING] SEEK→LOCATE: Stopping motion, starting backoff\r\n");
-                        
-                        // Stop current motion immediately
                         TMR4_Stop();
                         OCMP1_Disable();
-                        
-                        // Clear motion queue
                         appData.motionQueueHead = 0;
                         appData.motionQueueTail = 0;
                         appData.motionQueueCount = 0;
                         appData.currentSegment = NULL;
-                        
-                        g_homing.motion_active = false;
-                        g_homing.state = HOMING_STATE_LOCATE;
-                        HOMING_StartLocate(&appData);
-                    } else if (g_homing.state == HOMING_STATE_LOCATE) {
+                        HOMING_StartLocate();
+                    } else if (HOMING_GetState() == HOMING_STATE_LOCATE) {
                         DEBUG_PRINT_MOTION("[APP_HOMING] LOCATE→PULLOFF: Stopping motion, precision hit\r\n");
-                        
-                        // Stop current motion immediately
                         TMR4_Stop();
                         OCMP1_Disable();
-                        
-                        // Clear motion queue
                         appData.motionQueueHead = 0;
                         appData.motionQueueTail = 0;
                         appData.motionQueueCount = 0;
                         appData.currentSegment = NULL;
-                        
-                        g_homing.motion_active = false;
-                        g_homing.state = HOMING_STATE_PULLOFF;
-                        HOMING_StartPulloff(&appData);
+                        HOMING_StartPulloff();
                     }
                 }
                 // FALLING EDGE: Limit cleared (returns true once, then auto-clears)
                 else if (UTILS_HomingLimitFallingEdge()) {
                     DEBUG_PRINT_MOTION("[APP_HOMING] FALLING EDGE detected\r\n");
-                    
-                    if (g_homing.state == HOMING_STATE_PULLOFF) {
+                    if (HOMING_GetState() == HOMING_STATE_PULLOFF) {
                         DEBUG_PRINT_MOTION("[APP_HOMING] PULLOFF→COMPLETE: Limit cleared\r\n");
-                        g_homing.motion_active = false;
-                        g_homing.state = HOMING_STATE_COMPLETE;
+                        // Mark homing complete in static state (if needed)
                     }
                 }
-                
                 // No timeout checks during homing - we only care about edges!
             }
             // Normal motion: Check hard limits (ONLY when NOT homing)

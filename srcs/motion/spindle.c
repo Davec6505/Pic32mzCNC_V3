@@ -13,20 +13,15 @@
  * - S2000     → SPINDLE_SetSpeed(2000) (modal)
  */
 
+#include "../../incs/data_structures.h"
 #include "spindle.h"
 #include "../config/default/peripheral/ocmp/plib_ocmp8.h"
 #include "../config/default/peripheral/tmr/plib_tmr6.h"
 #include "settings/settings.h"
 
 // =============================================================================
-// PRIVATE STATE VARIABLES
+// STATE IS NOW CENTRALIZED IN APP_DATA (spindleState)
 // =============================================================================
-
-static struct {
-    uint32_t current_rpm;        // Current commanded RPM
-    bool is_running;             // Spindle on/off state
-    uint16_t current_pwm_duty;   // Current PWM duty cycle (0-PR6)
-} spindle_state = {0};
 
 // =============================================================================
 // PWM FREQUENCY CALCULATION (Based on Your Hardware Setup)
@@ -47,21 +42,21 @@ static struct {
 // INITIALIZATION
 // =============================================================================
 
-void SPINDLE_Initialize(void) {
+void SPINDLE_Initialize(APP_DATA* appData) {
     // Hardware already initialized by MCC/PLIB
     // TMR6_Initialize() and OCMP8_Initialize() called from SYS_Initialize()
-    
+
     // Set initial state
-    spindle_state.current_rpm = 0;
-    spindle_state.is_running = false;
-    spindle_state.current_pwm_duty = 0;
-    
+    appData->spindleState.current_rpm = 0;
+    appData->spindleState.is_running = false;
+    appData->spindleState.current_pwm_duty = 0;
+
     // Start TMR6 (required for OC8 PWM operation)
     TMR6_Start();
-    
+
     // Enable OC8 PWM output
     OCMP8_Enable();
-    
+
     // Set initial duty cycle to 0% (spindle off)
     OCMP8_CompareSecondaryValueSet(0);
 }
@@ -70,41 +65,41 @@ void SPINDLE_Initialize(void) {
 // PUBLIC API FUNCTIONS
 // =============================================================================
 
-void SPINDLE_SetSpeed(uint32_t rpm) {
-    spindle_state.current_rpm = rpm;
-    
+void SPINDLE_SetSpeed(APP_DATA* appData, uint32_t rpm) {
+    appData->spindleState.current_rpm = rpm;
+
     // Convert RPM to PWM duty cycle
     uint16_t duty_cycle = SPINDLE_RPMToPWMDuty(rpm);
-    spindle_state.current_pwm_duty = duty_cycle;
-    
+    appData->spindleState.current_pwm_duty = duty_cycle;
+
     // Update hardware PWM duty cycle
     OCMP8_CompareSecondaryValueSet(duty_cycle);
 }
 
-void SPINDLE_Start(void) {
-    if (!spindle_state.is_running) {
-        spindle_state.is_running = true;
-        
+void SPINDLE_Start(APP_DATA* appData) {
+    if (!appData->spindleState.is_running) {
+        appData->spindleState.is_running = true;
+
         // Apply current RPM setting
-        SPINDLE_SetSpeed(spindle_state.current_rpm);
+        SPINDLE_SetSpeed(appData, appData->spindleState.current_rpm);
     }
 }
 
-void SPINDLE_Stop(void) {
-    if (spindle_state.is_running) {
-        spindle_state.is_running = false;
-        
+void SPINDLE_Stop(APP_DATA* appData) {
+    if (appData->spindleState.is_running) {
+        appData->spindleState.is_running = false;
+
         // Set PWM duty cycle to 0% (but preserve RPM setting)
         OCMP8_CompareSecondaryValueSet(0);
     }
 }
 
-uint32_t SPINDLE_GetCurrentRPM(void) {
-    return spindle_state.current_rpm;
+uint32_t SPINDLE_GetCurrentRPM(APP_DATA* appData) {
+    return appData->spindleState.current_rpm;
 }
 
-bool SPINDLE_IsRunning(void) {
-    return spindle_state.is_running;
+bool SPINDLE_IsRunning(APP_DATA* appData) {
+    return appData->spindleState.is_running;
 }
 
 // =============================================================================
@@ -167,11 +162,12 @@ uint32_t SPINDLE_PWMDutyToRPM(uint16_t duty) {
 // DIAGNOSTIC/DEBUG FUNCTIONS
 // =============================================================================
 
-void SPINDLE_GetDiagnostics(void) {
+void SPINDLE_GetDiagnostics(APP_DATA* appData) {
     // For debugging - can be called from debug builds
     // PWM frequency: 3.338kHz
-    // Current duty: spindle_state.current_pwm_duty / PWM_PERIOD_TICKS * 100%
-    // Current RPM: spindle_state.current_rpm
-    // Running: spindle_state.is_running
+    // Current duty: appData->spindleState.current_pwm_duty / PWM_PERIOD_TICKS * 100%
+    // Current RPM: appData->spindleState.current_rpm
+    // Running: appData->spindleState.is_running
+    (void)appData;
     (void)0; // Placeholder for debug implementation
 }

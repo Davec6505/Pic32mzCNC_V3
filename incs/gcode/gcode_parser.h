@@ -100,12 +100,12 @@ typedef struct {
 } GCODE_Event;
 
 /* GCODE USART function prototypes */
-void GCODE_USART_Initialize(uint32_t RD_thresholds);
+void GCODE_USART_Initialize(APP_DATA* appData, uint32_t RD_thresholds);
 void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue);
 
 // Soft reset function (handles Ctrl+X/0x18) - consolidates all reset logic
 void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue);
-bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event);
+bool GCODE_GetNextEvent(APP_DATA* appData, GCODE_CommandQueue* cmdQueue, GCODE_Event* event);
 void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue);  // Consume event after successful processing
 
 // Check and send deferred "ok" responses (for flow control and startup deferral)

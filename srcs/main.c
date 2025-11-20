@@ -30,7 +30,9 @@
 #include "definitions.h"                // SYS function prototypes
 
 #include "app.h"                // GCODE parser function prototypes
+
 #include "settings.h"           // Settings module function prototypes
+#include "utils/uart_utils.h"   // For DEBUG_PRINT_APP macro
 
 
 // *****************************************************************************
@@ -41,16 +43,19 @@
 
 int main ( void )
 {
+
   /* Initialize all modules */
   SYS_Initialize ( NULL );
 
   // ✅ CRITICAL: Load settings from flash FIRST
-  // This must happen before APP_Initialize() so settings are available
-  // for any module that needs them during initialization
   SETTINGS_Initialize();
 
   /* Initialize application */
   APP_Initialize();
+
+  // Debug: Indicate main loop entry (only in Debug builds)
+  DEBUG_PRINT_APP("[DEBUG] Entered main loop\r\n");
+  LED1_Set(); // Turn on LED1 to indicate main loop start
 
   // Use Core Timer for a stable 1 Hz LED1 heartbeat (independent of loop load)
   uint32_t hb_last = CORETIMER_CounterGet();
@@ -66,6 +71,7 @@ int main ( void )
     if ((uint32_t)(now_ticks - hb_last) >= HB_INTERVAL) {
       hb_last = now_ticks;
       LED1_Toggle();
+      DEBUG_PRINT_APP("[DEBUG] LED1 heartbeat\r\n");
     }
   }
 
