@@ -99,7 +99,6 @@ void MOTION_SegmentTasks(MotionSegment motionQueue[], uint32_t* head, uint32_t* 
             // ✅ DWELL SEGMENT: Check timer instead of steps
             if (current_segment->type == SEGMENT_TYPE_DWELL) {
                 if (STEPPER_IsDwellComplete()) {
-                    DEBUG_PRINT_MOTION("[COMPLETE] Dwell segment done\r\n");
                     motion_state = MOTION_STATE_SEGMENT_COMPLETE;
                 }
                 break;  // Don't check steps or velocity for dwell
@@ -110,14 +109,10 @@ void MOTION_SegmentTasks(MotionSegment motionQueue[], uint32_t* head, uint32_t* 
             static uint32_t debug_check_counter = 0;
             if (++debug_check_counter >= 1000) {
                 debug_check_counter = 0;
-                DEBUG_PRINT_MOTION("[EXECUTING] steps_completed=%lu, steps_remaining=%lu\r\n",
-                    current_segment->steps_completed, current_segment->steps_remaining);
             }
             
             // Check if segment is complete (ISR updates steps_completed)
             if (current_segment->steps_completed >= current_segment->steps_remaining) {
-                DEBUG_PRINT_MOTION("[COMPLETE] Segment done: %lu >= %lu\r\n",
-                    current_segment->steps_completed, current_segment->steps_remaining);
                 motion_state = MOTION_STATE_SEGMENT_COMPLETE;
                 break;
             }
@@ -219,13 +214,6 @@ void MOTION_Tasks(APP_DATA* appData) {
         // Set initial step rate (PR4 controls OC1 period)
         STEPPER_SetStepRate(appData->currentSegment->initial_rate);
         
-        // ===== DEBUG: Segment Loading =====
-        // This code ONLY appears in debug builds when DEBUG_SEGMENT is enabled
-        // In release builds, the compiler completely removes this code (zero overhead)
-        DEBUG_PRINT_SEGMENT("[SEGMENT] Loaded: steps=%lu, rate=%lu\r\n", 
-                            appData->currentSegment->steps_remaining,
-                            appData->currentSegment->initial_rate);
-        DEBUG_EXEC_SEGMENT(LED1_Set());  // Visual indicator: segment loaded
         
         return;  // Exit and let ISR start stepping
     }
@@ -277,11 +265,6 @@ void MOTION_Tasks(APP_DATA* appData) {
             STEPPER_SetStepRate(new_rate);
             appData->currentStepInterval = new_rate;
             
-            // ⚠️ DISABLED: Too verbose - floods UART and causes crashes
-            // DEBUG_PRINT_MOTION("[MOTION] Rate update: %lu (steps=%lu, phase=%s)\r\n", 
-            //                  new_rate, seg->steps_completed,
-            //                  (seg->steps_completed < seg->accelerate_until) ? "ACCEL" :
-            //                  (seg->steps_completed > seg->decelerate_after) ? "DECEL" : "CRUISE");
         }
     }
     
@@ -302,8 +285,7 @@ void MOTION_Tasks(APP_DATA* appData) {
             // ===== DEBUG: Segment Completion =====
             DEBUG_PRINT_MOTION("[SEGMENT] Complete: %lu >= %lu steps\r\n", 
                 seg->steps_completed, seg->steps_remaining);
-            DEBUG_EXEC_SEGMENT(LED1_Clear());  // Visual indicator: segment done
-            
+
             // Segment complete - remove from queue
             appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
             appData->motionQueueCount--;
@@ -325,19 +307,13 @@ void MOTION_Tasks(APP_DATA* appData) {
     }
 }
 void MOTION_Arc(APP_DATA* appData) {
-    // DEBUG_PRINT_MOTION("[ARC] Entry: state=%d, queueCount=%d\r\n", 
-    //                   appData->arcGenState, appData->motionQueueCount);
-    
+
     // Only generate if arc is active and motion queue has space
     if(appData->arcGenState != ARC_GEN_ACTIVE || appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
-        // DEBUG_PRINT_MOTION("[ARC] Blocked: state=%d, queueCount=%d\r\n", 
-        //                   appData->arcGenState, appData->motionQueueCount);
         return;
     }
     
-    // DEBUG_PRINT_MOTION("[ARC] Generating segment: seg=%lu/%lu, theta=%.3f\r\n",
-    //                   appData->arcSegmentCurrent, appData->arcSegmentTotal, appData->arcTheta);
-    
+
     CoordinatePoint next;
     bool is_last_segment = false;
     
@@ -348,10 +324,7 @@ void MOTION_Arc(APP_DATA* appData) {
         // Use exact end point to prevent accumulated error
         next = appData->arcEndPoint;
         appData->arcGenState = ARC_GEN_IDLE;
-        // DEBUG_PRINT_MOTION("[ARC] ✅ COMPLETE: Arc finished, state now IDLE\r\n");
-        // DEBUG_PRINT_MOTION("[ARC] COMPLETE: Final segment, exact end=(%.2f,%.2f)\r\n",
-        //                   GET_COORDINATE_AXIS(&next, AXIS_X), GET_COORDINATE_AXIS(&next, AXIS_Y));
-        
+  
     } else {
         // ✅ CRITICAL FIX: Increment angle BEFORE calculating next position
         // Otherwise first segment calculates at START theta → zero steps!
@@ -387,9 +360,7 @@ void MOTION_Arc(APP_DATA* appData) {
     
     // Use simple linear move for arc segments (no junction planning needed for smooth arcs)
     KINEMATICS_LinearMoveSimple(appData->arcCurrent, next, appData->arcFeedrate, segment);
-    
-    // DEBUG_PRINT_MOTION("[ARC] After LinearMoveSimple\r\n");
-    
+
     // Add to motion queue
     appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
     appData->motionQueueCount++;
@@ -432,7 +403,6 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
     switch (event->type) {
         case GCODE_EVENT_LINEAR_MOVE:
         {
-            DEBUG_PRINT_MOTION("[MOTION] Linear move event\r\n");
             
             // Check if motion queue has space before processing
             if (appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
@@ -473,10 +443,6 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                         isnan(event_value) ? appData->current[axis] : (appData->current[axis] + event_value));
                 }
                 
-                // ✅ DEBUG: Show final Z coordinate
-                if (axis == AXIS_Z) {
-                    DEBUG_PRINT_MOTION("[MOTION] Z: target=%.3f\r\n", GET_COORDINATE_AXIS(&end, axis));
-                }
             }
             
             // ✅ SOFT LIMIT CHECK - TEMPORARILY DISABLED FOR DEBUG
@@ -516,17 +482,12 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             
             // ✅ CRITICAL: Check if motion queue has space
             if (appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
-                DEBUG_PRINT_MOTION("[LINEAR] Motion queue full (%lu/%d), deferring command\r\n",
-                                  (unsigned long)appData->motionQueueCount, MAX_MOTION_SEGMENTS);
                 return false;  // Queue full, leave event in queue for retry
             }
             
             // Get next queue slot
             MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-            
-            // DEBUG_PRINT_MOTION("[MOTION] Calling KINEMATICS_LinearMove: start=(%.2f,%.2f), end=(%.2f,%.2f), F=%.1f\r\n",
-            //                   start.x, start.y, end.x, end.y, feedrate);
-            
+              
             // ===== JUNCTION PLANNING: Calculate entry and exit velocities =====
             float entry_velocity = 8.33f;  // Default: start from minimum speed (500 mm/min)
             float exit_velocity = 8.33f;   // Default: decelerate to stop
@@ -585,9 +546,6 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             
             // Convert to motion segment with junction velocities
             KINEMATICS_LinearMove(start, end, feedrate, segment, entry_velocity, exit_velocity);
-
-            // DEBUG_PRINT_MOTION("[MOTION] Segment: steps=%lu, dx=%ld, dy=%ld, dz=%ld\r\n",
-            //                   segment->steps_remaining, segment->delta_x, segment->delta_y, segment->delta_z);
 
             // Guard: skip zero-length segments (no steps)
             if (segment->steps_remaining == 0) {
@@ -679,10 +637,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             
             // GRBL radius compensation: Use average radius to compensate for CAM rounding errors
             float radius = (r_start + r_end) / 2.0f;
-            
-            // DEBUG_PRINT_MOTION("[ARC INIT] Radius compensation: r_start=%.4f, r_end=%.4f, avg=%.4f, error=%.4f\r\n",
-            //                   r_start, r_end, radius, radius_error);
-            
+                    
             // Calculate angles
             float start_angle = atan2f(
                 GET_COORDINATE_AXIS(&start, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y), 
@@ -690,16 +645,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             float end_angle = atan2f(
                 GET_COORDINATE_AXIS(&end, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y), 
                 GET_COORDINATE_AXIS(&end, AXIS_X) - GET_COORDINATE_AXIS(&center, AXIS_X));
-            
-            // DEBUG_PRINT_MOTION("[ARC INIT] Start=(%.2f,%.2f) End=(%.2f,%.2f) Center=(%.2f,%.2f)\r\n",
-            //                   GET_COORDINATE_AXIS(&start, AXIS_X), GET_COORDINATE_AXIS(&start, AXIS_Y),
-            //                   GET_COORDINATE_AXIS(&end, AXIS_X), GET_COORDINATE_AXIS(&end, AXIS_Y),
-            //                   GET_COORDINATE_AXIS(&center, AXIS_X), GET_COORDINATE_AXIS(&center, AXIS_Y));
-            // DEBUG_PRINT_MOTION("[ARC INIT] Direction=%s Radius=%.4f (compensated)\r\n",
-            //                   event->data.arcMove.clockwise ? "CW(G2)" : "CCW(G3)", radius);
-            // DEBUG_PRINT_MOTION("[ARC INIT] Start_angle=%.3f End_angle=%.3f\r\n",
-            //                   start_angle, end_angle);
-            
+                      
             float total_angle;
             if(event->data.arcMove.clockwise) {
                 total_angle = start_angle - end_angle;
@@ -708,10 +654,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 total_angle = end_angle - start_angle;
                 if(total_angle <= 0.0f) total_angle += 2.0f * M_PI;
             }
-            
-            // DEBUG_PRINT_MOTION("[ARC INIT] Total_angle=%.3f rad (%.1f deg)\r\n",
-            //                   total_angle, total_angle * 180.0f / M_PI);
-            
+                    
             // Initialize arc state
             appData->arcGenState = ARC_GEN_ACTIVE;
             // DEBUG_PRINT_MOTION("[ARC] ✅ NEW ARC: Initialized, state now ACTIVE\r\n");
@@ -735,10 +678,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             float arc_length = radius * total_angle;  // Use compensated radius
             uint32_t num_segments = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
             if(num_segments < 2) num_segments = 2;  // Minimum 2 segments to prevent division by zero
-            
-            // DEBUG_PRINT_MOTION("[ARC INIT] Arc_length=%.2f mm, Segments=%lu, mm_per_segment=%.3f\r\n",
-            //                   arc_length, (unsigned long)num_segments, settings->mm_per_arc_segment);
-            
+                    
             appData->arcSegmentCurrent = 0;      // Start at segment 0
             appData->arcSegmentTotal = num_segments;  // Store total for termination check
             
@@ -748,10 +688,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             } else {
                 appData->arcThetaIncrement = -fabsf(appData->arcThetaIncrement);
             }
-            
-            // DEBUG_PRINT_MOTION("[ARC INIT] Theta_increment=%.4f rad, Total segments=%lu\r\n",
-            //                   appData->arcThetaIncrement, (unsigned long)num_segments);
-            
+                      
             return true;
         }
         
