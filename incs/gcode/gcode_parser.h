@@ -46,7 +46,8 @@ typedef enum {
     GCODE_EVENT_SET_TOOL,           // Standalone T command (modal)
     GCODE_EVENT_SET_WORK_OFFSET,    // G92 - Set work coordinate system
     GCODE_EVENT_SET_WCS,            // G54-G59 - Select work coordinate system
-    GCODE_EVENT_HOMING              // $H - Homing cycle
+    GCODE_EVENT_HOMING,             // $H - Homing cycle
+    GCODE_EVENT_PROGRAM_END         // M0, M2, M30 - Program end/stop
 } GCODE_EventType;
 
 typedef struct {

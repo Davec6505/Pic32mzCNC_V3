@@ -194,7 +194,7 @@ void MOTION_Tasks(APP_DATA* appData) {
     // Load new segment when currentSegment is NULL and queue has data
     if(appData->currentSegment == NULL && appData->motionQueueCount > 0) {
         
-        DEBUG_PRINT_MOTION("[MOTION_Tasks] Loading segment: queue=%lu\r\n", appData->motionQueueCount);
+        // DEBUG_PRINT_MOTION("[MOTION_Tasks] Loading segment: queue=%lu\r\n", appData->motionQueueCount);
         // Get segment from tail of circular buffer
         appData->currentSegment = &appData->motionQueue[appData->motionQueueTail];
 
@@ -325,18 +325,18 @@ void MOTION_Tasks(APP_DATA* appData) {
     }
 }
 void MOTION_Arc(APP_DATA* appData) {
-    DEBUG_PRINT_MOTION("[ARC] Entry: state=%d, queueCount=%d\r\n", 
-                      appData->arcGenState, appData->motionQueueCount);
+    // DEBUG_PRINT_MOTION("[ARC] Entry: state=%d, queueCount=%d\r\n", 
+    //                   appData->arcGenState, appData->motionQueueCount);
     
     // Only generate if arc is active and motion queue has space
     if(appData->arcGenState != ARC_GEN_ACTIVE || appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
-        DEBUG_PRINT_MOTION("[ARC] Blocked: state=%d, queueCount=%d\r\n", 
-                          appData->arcGenState, appData->motionQueueCount);
+        // DEBUG_PRINT_MOTION("[ARC] Blocked: state=%d, queueCount=%d\r\n", 
+        //                   appData->arcGenState, appData->motionQueueCount);
         return;
     }
     
-    DEBUG_PRINT_MOTION("[ARC] Generating segment: seg=%lu/%lu, theta=%.3f\r\n",
-                      appData->arcSegmentCurrent, appData->arcSegmentTotal, appData->arcTheta);
+    // DEBUG_PRINT_MOTION("[ARC] Generating segment: seg=%lu/%lu, theta=%.3f\r\n",
+    //                   appData->arcSegmentCurrent, appData->arcSegmentTotal, appData->arcTheta);
     
     CoordinatePoint next;
     bool is_last_segment = false;
@@ -348,9 +348,9 @@ void MOTION_Arc(APP_DATA* appData) {
         // Use exact end point to prevent accumulated error
         next = appData->arcEndPoint;
         appData->arcGenState = ARC_GEN_IDLE;
-        DEBUG_PRINT_MOTION("[ARC] ✅ COMPLETE: Arc finished, state now IDLE\r\n");
-        DEBUG_PRINT_MOTION("[ARC] COMPLETE: Final segment, exact end=(%.2f,%.2f)\r\n",
-                          next.x, next.y);
+        // DEBUG_PRINT_MOTION("[ARC] ✅ COMPLETE: Arc finished, state now IDLE\r\n");
+        // DEBUG_PRINT_MOTION("[ARC] COMPLETE: Final segment, exact end=(%.2f,%.2f)\r\n",
+        //                   GET_COORDINATE_AXIS(&next, AXIS_X), GET_COORDINATE_AXIS(&next, AXIS_Y));
         
     } else {
         // ✅ CRITICAL FIX: Increment angle BEFORE calculating next position
@@ -435,8 +435,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             DEBUG_PRINT_MOTION("[MOTION] Linear move event\r\n");
             
             // Check if motion queue has space before processing
-            if(appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
-                DEBUG_PRINT_MOTION("[MOTION] Queue full! Skipping segment (will be lost)\r\n");
+            if (appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+                // DEBUG_PRINT_MOTION("[MOTION] Queue full! Skipping segment (will be lost)\r\n");
                 return false;  // Queue full - event already consumed, segment lost
             }
             
@@ -456,6 +456,13 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 else if (axis == AXIS_Z) event_value = event->data.linearMove.z;
                 else event_value = event->data.linearMove.a;
                 
+                // ✅ DEBUG: Show Z-axis event values
+                if (axis == AXIS_Z) {
+                    DEBUG_PRINT_MOTION("[MOTION] Z: event_value=%.3f current=%.3f mode=%s\r\n",
+                        event_value, appData->current[AXIS_Z], 
+                        appData->absoluteMode ? "ABS" : "REL");
+                }
+                
                 if (appData->absoluteMode) {
                     // G90 absolute mode - use coordinates directly (or current if NAN)
                     SET_COORDINATE_AXIS(&end, axis, 
@@ -464,6 +471,11 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                     // G91 relative mode - add to current position (or keep current if NAN)
                     SET_COORDINATE_AXIS(&end, axis,
                         isnan(event_value) ? appData->current[axis] : (appData->current[axis] + event_value));
+                }
+                
+                // ✅ DEBUG: Show final Z coordinate
+                if (axis == AXIS_Z) {
+                    DEBUG_PRINT_MOTION("[MOTION] Z: target=%.3f\r\n", GET_COORDINATE_AXIS(&end, axis));
                 }
             }
             
@@ -565,8 +577,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                         // Update previous segment's exit velocity for smoother transition
                         entry_velocity = junction_speed;
                         
-                        DEBUG_PRINT_MOTION("[JUNCTION] Junction speed: %.1f mm/sec (entry to current segment)\r\n", 
-                                         junction_speed);
+                        // DEBUG_PRINT_MOTION("[JUNCTION] Junction speed: %.1f mm/sec (entry to current segment)\r\n", 
+                        //                   junction_speed);
                     }
                 }
             }
@@ -616,9 +628,13 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 else event_value = event->data.arcMove.a;
                 
                 if (appData->absoluteMode) {
-                    SET_COORDINATE_AXIS(&end, axis, event_value);
+                    // G90 absolute mode - use event value or current if NAN
+                    SET_COORDINATE_AXIS(&end, axis, 
+                        isnan(event_value) ? appData->current[axis] : event_value);
                 } else {
-                    SET_COORDINATE_AXIS(&end, axis, appData->current[axis] + event_value);
+                    // G91 relative mode - add to current or keep current if NAN
+                    SET_COORDINATE_AXIS(&end, axis,
+                        isnan(event_value) ? appData->current[axis] : (appData->current[axis] + event_value));
                 }
             }
             
@@ -664,8 +680,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // GRBL radius compensation: Use average radius to compensate for CAM rounding errors
             float radius = (r_start + r_end) / 2.0f;
             
-            DEBUG_PRINT_MOTION("[ARC INIT] Radius compensation: r_start=%.4f, r_end=%.4f, avg=%.4f, error=%.4f\r\n",
-                              r_start, r_end, radius, radius_error);
+            // DEBUG_PRINT_MOTION("[ARC INIT] Radius compensation: r_start=%.4f, r_end=%.4f, avg=%.4f, error=%.4f\r\n",
+            //                   r_start, r_end, radius, radius_error);
             
             // Calculate angles
             float start_angle = atan2f(
@@ -675,14 +691,14 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 GET_COORDINATE_AXIS(&end, AXIS_Y) - GET_COORDINATE_AXIS(&center, AXIS_Y), 
                 GET_COORDINATE_AXIS(&end, AXIS_X) - GET_COORDINATE_AXIS(&center, AXIS_X));
             
-            DEBUG_PRINT_MOTION("[ARC INIT] Start=(%.2f,%.2f) End=(%.2f,%.2f) Center=(%.2f,%.2f)\r\n",
-                              GET_COORDINATE_AXIS(&start, AXIS_X), GET_COORDINATE_AXIS(&start, AXIS_Y), 
-                              GET_COORDINATE_AXIS(&end, AXIS_X), GET_COORDINATE_AXIS(&end, AXIS_Y), 
-                              GET_COORDINATE_AXIS(&center, AXIS_X), GET_COORDINATE_AXIS(&center, AXIS_Y));
-            DEBUG_PRINT_MOTION("[ARC INIT] Direction=%s Radius=%.4f (compensated)\r\n",
-                              event->data.arcMove.clockwise ? "CW(G2)" : "CCW(G3)", radius);
-            DEBUG_PRINT_MOTION("[ARC INIT] Start_angle=%.3f End_angle=%.3f\r\n",
-                              start_angle, end_angle);
+            // DEBUG_PRINT_MOTION("[ARC INIT] Start=(%.2f,%.2f) End=(%.2f,%.2f) Center=(%.2f,%.2f)\r\n",
+            //                   GET_COORDINATE_AXIS(&start, AXIS_X), GET_COORDINATE_AXIS(&start, AXIS_Y),
+            //                   GET_COORDINATE_AXIS(&end, AXIS_X), GET_COORDINATE_AXIS(&end, AXIS_Y),
+            //                   GET_COORDINATE_AXIS(&center, AXIS_X), GET_COORDINATE_AXIS(&center, AXIS_Y));
+            // DEBUG_PRINT_MOTION("[ARC INIT] Direction=%s Radius=%.4f (compensated)\r\n",
+            //                   event->data.arcMove.clockwise ? "CW(G2)" : "CCW(G3)", radius);
+            // DEBUG_PRINT_MOTION("[ARC INIT] Start_angle=%.3f End_angle=%.3f\r\n",
+            //                   start_angle, end_angle);
             
             float total_angle;
             if(event->data.arcMove.clockwise) {
@@ -693,12 +709,12 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 if(total_angle <= 0.0f) total_angle += 2.0f * M_PI;
             }
             
-            DEBUG_PRINT_MOTION("[ARC INIT] Total_angle=%.3f rad (%.1f deg)\r\n",
-                              total_angle, total_angle * 180.0f / M_PI);
+            // DEBUG_PRINT_MOTION("[ARC INIT] Total_angle=%.3f rad (%.1f deg)\r\n",
+            //                   total_angle, total_angle * 180.0f / M_PI);
             
             // Initialize arc state
             appData->arcGenState = ARC_GEN_ACTIVE;
-            DEBUG_PRINT_MOTION("[ARC] ✅ NEW ARC: Initialized, state now ACTIVE\r\n");
+            // DEBUG_PRINT_MOTION("[ARC] ✅ NEW ARC: Initialized, state now ACTIVE\r\n");
             appData->arcTheta = start_angle;
             appData->arcThetaStart = start_angle;  // Store initial angle for progress calculation
             appData->arcThetaEnd = end_angle;
@@ -720,8 +736,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             uint32_t num_segments = (uint32_t)ceilf(arc_length / settings->mm_per_arc_segment);
             if(num_segments < 2) num_segments = 2;  // Minimum 2 segments to prevent division by zero
             
-            DEBUG_PRINT_MOTION("[ARC INIT] Arc_length=%.2f mm, Segments=%lu, mm_per_segment=%.3f\r\n",
-                              arc_length, (unsigned long)num_segments, settings->mm_per_arc_segment);
+            // DEBUG_PRINT_MOTION("[ARC INIT] Arc_length=%.2f mm, Segments=%lu, mm_per_segment=%.3f\r\n",
+            //                   arc_length, (unsigned long)num_segments, settings->mm_per_arc_segment);
             
             appData->arcSegmentCurrent = 0;      // Start at segment 0
             appData->arcSegmentTotal = num_segments;  // Store total for termination check
@@ -733,8 +749,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 appData->arcThetaIncrement = -fabsf(appData->arcThetaIncrement);
             }
             
-            DEBUG_PRINT_MOTION("[ARC INIT] Theta_increment=%.4f rad, Total segments=%lu\r\n",
-                              appData->arcThetaIncrement, (unsigned long)num_segments);
+            // DEBUG_PRINT_MOTION("[ARC INIT] Theta_increment=%.4f rad, Total segments=%lu\r\n",
+            //                   appData->arcThetaIncrement, (unsigned long)num_segments);
             
             return true;
         }

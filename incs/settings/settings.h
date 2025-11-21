@@ -35,7 +35,10 @@ typedef struct {
     
     // Homing configuration ($20-$27)
     uint8_t hard_limits_enable;    // $21 - Hard limit enable (bool as uint8)
-    uint8_t homing_enable;         // $22 - Homing cycle enable (bool as uint8, GRBL v1.1: 0=disabled, 1=enabled)
+    uint8_t homing_enable;         // $22 - Homing enable (DUAL MODE: UGS boolean 0/1, internal bitmask 0-15)
+                                    //       UGS writes $22=1 → firmware uses 0x07 (XYZ enabled)
+                                    //       UGS reads $$ → firmware reports 1 if any axis enabled
+                                    //       Manual $22=7 works for per-axis control (advanced users)
     uint8_t homing_dir_mask;       // $23 - Homing dir invert mask
     uint8_t padding2;              // Alignment padding
     float homing_feed_rate;        // $24 - Homing locate feed rate (mm/min)
