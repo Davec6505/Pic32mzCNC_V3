@@ -25,7 +25,7 @@ G94           ; Units per minute feedrate mode
 ;   Z=-60  → Pen touching paper (drawing position)
 ; Jog down to safe height above paper (12mm remaining travel = 60mm from top)
 G90
-G1 Z-12 F300
+G1 Z-50 F300
 ; =====================================
 ; MOVE TO START POSITION
 ; =====================================
@@ -36,7 +36,7 @@ G0 X3 Y0 F1000
 
 ; Lower pen DOWN to paper (60mm down from work zero)
 ; With $132=72 and work zero at 12mm remaining travel, this goes to -48mm work / 24mm machine
-G1 Z-60 F300
+G1 Z-73 F300
 
 ; =====================================
 ; RECTANGLE WITH ROUNDED CORNERS
@@ -62,7 +62,7 @@ G1 Z-50 F300
 G1 X40 Y15 F1000
 
 ; Lower pen DOWN onto paper
-G1 Z-60 F300
+G1 Z-73 F300
 
 ; =====================================
 ; CIRCULAR PATH
@@ -76,10 +76,12 @@ G2 X40 Y15 I10 J0
 ; =====================================
 
 ; Lift pen UP
-G1 Z0 F300
+G1 Z-50 F300
 
 ; Return to origin
 G1 X0 Y0 F1000
+
+G1 Z0 F300
 
 ; Final position: (0, 0, 0) - at safe height
 
