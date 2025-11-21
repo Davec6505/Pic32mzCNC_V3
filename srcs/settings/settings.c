@@ -270,7 +270,19 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         
         // Homing & Limits
         case 21: settings->hard_limits_enable = (uint8_t)value; break;
-        case 22: settings->homing_enable = (uint8_t)value; break;
+        case 22:
+            // ✅ UGS COMPATIBILITY: Translate boolean 0/1 to bitmask
+            // When UGS sends $22=1, enable XYZ axes (0b0111 = 7)
+            // When UGS sends $22=0, disable all axes (0b0000 = 0)
+            // Direct bitmask values (2-255) pass through unchanged for manual control
+            if ((uint8_t)value == 1) {
+                settings->homing_enable = 0x07;  // XYZ enabled (bit 0=X, 1=Y, 2=Z)
+            } else if ((uint8_t)value == 0) {
+                settings->homing_enable = 0x00;  // All disabled
+            } else {
+                settings->homing_enable = (uint8_t)value;  // Direct bitmask (advanced users)
+            }
+            break;
         case 23: settings->homing_dir_mask = (uint8_t)value; break;
         case 24: settings->homing_feed_rate = value; break;
         case 25: settings->homing_seek_rate = value; break;
@@ -361,8 +373,10 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$13=%.3f\r\n", settings->arc_tolerance);
         
     len += sprintf(&settings_buffer[len], "$21=%u\r\n", settings->hard_limits_enable);
-    // ✅ UGS COMPATIBILITY: Report $22 as 1 (boolean) if ANY axis enabled, else 0
-    // Internal bitmask preserved: $22=7 → report as $22=1 for GRBL v1.1 compliance
+    // ✅ UGS COMPATIBILITY: Report $22 as boolean 0/1 for GRBL v1.1 compliance
+    // UGS checks value == "1" (not just non-zero) via "1".equalsIgnoreCase(value)
+    // Internal bitmask preserved for per-axis homing control via $H command
+    // Translation: $22=7 internal → report $22=1 to UGS, $22=0 internal → report $22=0
     len += sprintf(&settings_buffer[len], "$22=%u\r\n", settings->homing_enable ? 1 : 0);
     len += sprintf(&settings_buffer[len], "$23=%u\r\n", settings->homing_dir_mask);
     len += sprintf(&settings_buffer[len], "$24=%.3f\r\n", settings->homing_feed_rate);

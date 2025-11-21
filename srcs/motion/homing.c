@@ -62,11 +62,16 @@ bool HOMING_Start(APP_DATA* appData, uint32_t axes_mask) {
     // Reset persistent limit state tracker (for clean edge detection)
     UTILS_HomingLimitReset();
     
-    // Find first axis to home (start with X=0)
+    // Find first axis to home - SAFETY: Z first (axis 2), then Y (axis 1), then X (axis 0)
+    // Homing order: Z → Y → X (lift tool to safe height before moving XY)
+    // Use H_AXIS typedef to clarify this is homing order, not motor axis type
+    typedef E_AXIS H_AXIS;
+    static const H_AXIS homing_order[] = {AXIS_Z, AXIS_Y, AXIS_X, AXIS_A};
     for (uint8_t i = 0; i < NUM_AXIS; i++) {
-        if (enabled_axes & (1 << i)) {
-            g_homing.current_axis = (E_AXIS)i;
-            UTILS_HomingSetCurrentAxis((E_AXIS)i);  // Set tracker to first axis
+        H_AXIS axis = homing_order[i];
+        if (enabled_axes & (1 << axis)) {
+            g_homing.current_axis = axis;
+            UTILS_HomingSetCurrentAxis(axis);  // Set tracker to first axis
             break;
         }
     }
@@ -130,9 +135,26 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
             break;
             
         case HOMING_STATE_COMPLETE:
-            // Homing complete - set position and move to next axis
+            // Homing complete - set position based on homing direction
             g_homing.axes_homed |= (1 << g_homing.current_axis);
-            KINEMATICS_SetAxisMachinePosition(g_homing.current_axis, 0.0f);
+            
+            // Determine if homed to MAX or MIN
+            CNC_Settings* settings = SETTINGS_GetCurrent();
+            uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
+            bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
+            
+            float home_position = 0.0f;
+            if (home_positive) {
+                // Homing to MAX - set to max travel value (use array index)
+                home_position = settings->max_travel[g_homing.current_axis];
+                DEBUG_PRINT_MOTION("[HOMING_COMPLETE] Axis %d homed to MAX, position=%.3f\r\n",
+                                  g_homing.current_axis, home_position);
+            } else {
+                DEBUG_PRINT_MOTION("[HOMING_COMPLETE] Axis %d homed to MIN, position=0.0\r\n",
+                                  g_homing.current_axis);
+            }
+            
+            KINEMATICS_SetAxisMachinePosition(g_homing.current_axis, home_position);
             
             if (HOMING_NextAxis()) {
                 g_homing.state = HOMING_STATE_SEEK;
@@ -188,8 +210,7 @@ void HOMING_StartSeek(APP_DATA* appData) {
     uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
     bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
     
-    DEBUG_PRINT_MOTION("[HOMING_SEEK] RAW: dir_mask=0x%02X, settings->homing_dir_mask=0x%02X\r\n",
-                      dir_mask, settings->homing_dir_mask);
+    DEBUG_PRINT_MOTION("[HOMING_SEEK] RAW: dir_mask=0x%02X\r\n", dir_mask);
     
     // Calculate search distance based on $23 setting ONLY
     // $23=0 → home to MIN switch (negative direction in machine coordinates)
@@ -198,10 +219,8 @@ void HOMING_StartSeek(APP_DATA* appData) {
     float search_distance = home_positive ? 300.0f : -300.0f;
     
     DEBUG_PRINT_MOTION("[HOMING_SEEK] axis=%d, $23=%d, distance=%.1f\r\n",
-                      g_homing.current_axis, (dir_mask >> g_homing.current_axis) & 0x01, 
+                      g_homing.current_axis, dir_mask, 
                       search_distance);
-    
-    DEBUG_PRINT_MOTION("[HOMING_SEEK] search_distance=%.1f\r\n", search_distance);
     
     // Build target position (current + search distance on current axis)
     CoordinatePoint current = KINEMATICS_GetCurrentPosition();
@@ -384,13 +403,26 @@ bool HOMING_LimitTriggered(void) {
 }
 
 bool HOMING_NextAxis(void) {
-    // Find next axis to home
-    for (uint8_t i = g_homing.current_axis + 1; i < NUM_AXIS; i++) {
-        if (g_homing.axes_to_home & (1 << i)) {
-            g_homing.current_axis = (E_AXIS)i;
+    // Homing order: Z → Y → X → A (same as start order)
+    static const E_AXIS homing_order[] = {AXIS_Z, AXIS_Y, AXIS_X, AXIS_A};
+    
+    // Find current axis in order array
+    uint8_t current_index = NUM_AXIS;  // Invalid default
+    for (uint8_t i = 0; i < NUM_AXIS; i++) {
+        if (homing_order[i] == g_homing.current_axis) {
+            current_index = i;
+            break;
+        }
+    }
+    
+    // Find next axis to home (after current in priority order)
+    for (uint8_t i = current_index + 1; i < NUM_AXIS; i++) {
+        E_AXIS axis = homing_order[i];
+        if (g_homing.axes_to_home & (1 << axis)) {
+            g_homing.current_axis = axis;
             
             // Update limit state tracker for new axis
-            UTILS_HomingSetCurrentAxis((E_AXIS)i);
+            UTILS_HomingSetCurrentAxis(axis);
             
             return true;  // More axes to home
         }

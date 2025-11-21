@@ -153,6 +153,12 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         delta_mm[axis] = GET_COORDINATE_AXIS(&machine_end, axis) - GET_COORDINATE_AXIS(&machine_start, axis);
     }
     
+    DEBUG_PRINT_MOTION("[KIN] Z: start=%.3f end=%.3f delta=%.3f steps/mm=%.1f\r\n",
+                      GET_COORDINATE_AXIS(&machine_start, AXIS_Z),
+                      GET_COORDINATE_AXIS(&machine_end, AXIS_Z),
+                      delta_mm[AXIS_Z],
+                      stepper->steps_per_mm[AXIS_Z]);
+    
     // Convert mm to steps WITH ACCUMULATION to preserve fractional steps
     // Using static file-scope accumulators
     static float step_accumulator[NUM_AXIS] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -163,11 +169,13 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         step_accumulator[axis] -= (float)segment_buffer->delta[axis];
     }
     
-    DEBUG_PRINT_MOTION("[KINEMATICS] dx=%.4f dy=%.4f → steps: X=%ld Y=%ld Z=%ld A=%ld (acc: %.3f,%.3f)\r\n",
-                      delta_mm[AXIS_X], delta_mm[AXIS_Y], 
-                      segment_buffer->delta[AXIS_X], segment_buffer->delta[AXIS_Y],
-                      segment_buffer->delta[AXIS_Z], segment_buffer->delta[AXIS_A],
-                      step_accumulator[AXIS_X], step_accumulator[AXIS_Y]);
+    DEBUG_PRINT_MOTION("[KIN] Z: steps=%ld\r\n", segment_buffer->delta[AXIS_Z]);
+    
+    // DEBUG_PRINT_MOTION("[KINEMATICS] dx=%.4f dy=%.4f → steps: X=%ld Y=%ld Z=%ld A=%ld (acc: %.3f,%.3f)\r\n",
+    //                   delta_mm[AXIS_X], delta_mm[AXIS_Y], 
+    //                   segment_buffer->delta[AXIS_X], segment_buffer->delta[AXIS_Y],
+    //                   segment_buffer->delta[AXIS_Z], segment_buffer->delta[AXIS_A],
+    //                   step_accumulator[AXIS_X], step_accumulator[AXIS_Y]);
     
     // ✅ ARRAY-BASED: Determine dominant axis (highest ABSOLUTE step count) - for Bresenham and timing
     int32_t max_delta = 0;
@@ -225,10 +233,9 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     }
     segment_buffer->nominal_rate = (uint32_t)(TIMER_FREQ / steps_per_sec);
     
-    // ✅ DEBUG: Print timing calculations
-    DEBUG_PRINT_MOTION("[KINEMATICS] F=%.1f mm/min, steps/mm=%.1f, steps/sec=%.1f, nominal_rate=%lu ticks (%.2fms)\r\n",
-        feedrate, steps_per_mm_dominant, steps_per_sec, 
-        segment_buffer->nominal_rate, (float)segment_buffer->nominal_rate / TIMER_FREQ * 1000.0f);
+    // DEBUG_PRINT_MOTION("[KINEMATICS] F=%.1f mm/min, steps/mm=%.1f, steps/sec=%.1f, nominal_rate=%lu ticks (%.2fms)\\r\\n",
+    //     feedrate, steps_per_mm_dominant, steps_per_sec, 
+    //     segment_buffer->nominal_rate, (float)segment_buffer->nominal_rate / TIMER_FREQ * 1000.0f);
     
     // Calculate acceleration profile (GRBL-style trapezoidal)
     // Distance to accelerate: d = v² / (2*a)

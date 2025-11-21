@@ -93,8 +93,12 @@ static inline char* find_char(char* s, char key){
     return NULL;
 }
 static float parse_float_after(char* start){
-    if (!start || !start[1]) return 0.0f;
-    return (float)strtof(start + 1, NULL);
+    if (!start || !start[1]) return NAN;
+    char* endptr = NULL;
+    float value = (float)strtof(start + 1, &endptr);
+    // If no conversion occurred, endptr == start+1
+    if (endptr == start + 1) return NAN;
+    return value;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -148,8 +152,10 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     appData->modalToolNumber = 0;   // T0
     
     /* 6. Clear alarm state */
+    // Clear alarm but suppress hard limits until user moves off limit
+    // This prevents immediate re-alarm after soft reset while on limit
     g_hard_limit_alarm = false;
-    g_suppress_hard_limits = true;  // Ignore hard limits until they clear
+    g_suppress_hard_limits = true;  // Will auto-clear in IDLE when limits released
     appData->alarmCode = 0;
     grblAlarm = false;
     
@@ -492,6 +498,8 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
     if (cmd[0] == 'M') {
         char* pend = NULL;
         int mnum = (int)strtol(&cmd[1], &pend, 10);
+        if (mnum == 0) { ev->type = GCODE_EVENT_PROGRAM_END; return true; }  // M0 - Program stop
+        if (mnum == 2) { ev->type = GCODE_EVENT_PROGRAM_END; return true; }  // M2 - Program end
         if (mnum == 3) {
             ev->type = GCODE_EVENT_SPINDLE_ON;
             char* pS = find_char((char*)cmd, 'S');
@@ -501,6 +509,7 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         if (mnum == 5) { ev->type = GCODE_EVENT_SPINDLE_OFF; return true; }
         if (mnum == 7) { ev->type = GCODE_EVENT_COOLANT_ON; return true; }
         if (mnum == 9) { ev->type = GCODE_EVENT_COOLANT_OFF; return true; }
+        if (mnum == 30) { ev->type = GCODE_EVENT_PROGRAM_END; return true; } // M30 - Program end and reset
     }
     
     // System commands ($H, $X, etc.)
@@ -1050,7 +1059,22 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             // g_hard_limit_alarm declared in stepper.h (already included at top)
             g_hard_limit_alarm = false;
             
-            DEBUG_PRINT_GCODE("[GCODE] Alarm cleared via $X command\r\n");
+            // ✅ CRITICAL FIX: Clear hard limit suppression flag
+            // This allows recovery after moving off limit switch
+            // User must physically move off limit before $X will work
+            CNC_Settings* settings = SETTINGS_GetCurrent();
+            if (!MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+                // Limits are clear - allow recovery
+                g_suppress_hard_limits = false;
+                DEBUG_PRINT_GCODE("[GCODE] Alarm cleared via $X - limits clear, recovery allowed\r\n");
+            } else {
+                // Still on limit - cannot clear alarm
+                UART_Printf("[MSG:Cannot clear alarm - move off limit switch first]\r\n");
+                g_hard_limit_alarm = true;  // Keep alarm active
+                grblAlarm = true;
+                send_ok = false;  // Don't send ok for failed $X
+            }
+            
             handled = true;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'F') {

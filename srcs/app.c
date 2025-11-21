@@ -298,6 +298,12 @@ void APP_Tasks ( void )
                         if (MOTION_ProcessGcodeEvent(&appData, &event)) {
                             // Event processed successfully - consume it from queue
                             GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
+                        } else if (event.type == GCODE_EVENT_PROGRAM_END) {
+                            // ✅ CRITICAL FIX: M0, M2, M30 (program end) - not handled by motion
+                            // Consume the event and remain in IDLE state
+                            // This prevents machine from getting stuck after file completion
+                            DEBUG_PRINT_APP("[APP] Program end (M0/M2/M30) - file complete\r\n");
+                            GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
                         }
                         // If processing failed (queue full), leave event in queue for next iteration
                     }
@@ -445,6 +451,14 @@ void APP_Tasks ( void )
             
             // User must acknowledge alarm and reset
             STEPPER_DisableAll();
+            
+            // ✅ CRITICAL FIX: Clear hard limit suppression when limits physically released
+            // This allows $X to work after user moves machine off limit switch
+            CNC_Settings* settings = SETTINGS_GetCurrent();
+            if (g_suppress_hard_limits && !MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+                g_suppress_hard_limits = false;
+                DEBUG_PRINT_APP("[APP_ALARM] Hard limit suppression cleared - all limits released\r\n");
+            }
             
             // ✅ Check if alarm cleared by $X command
             if (!g_hard_limit_alarm && appData.alarmCode == 1) {
