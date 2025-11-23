@@ -37,7 +37,7 @@ A CNC motion control system based on the GRBL v1.1 protocol compatibility, 4-axi
 - **Optimal Performance**: 2.5µs pulse width, 256 microstepping support
 - **Trapezoidal Profiling**: Acceleration/deceleration with velocity planning
 - **Arc Interpolation**: G2/G3 with $13 radius compensation
-- **Emergency Stop**: Real-time response with hardware limit support
+- **Emergency Stop**: Real-time response with hardware limit support - gpio needs adding to complete this feature.
 - **Non-Blocking Design**: Zero blocking loops - app state machine runs continuously during motion
 
 ### GRBL v1.1 Protocol
@@ -137,7 +137,7 @@ Motion Completes → motionSegmentCompleted flag set
 
 **Microcontroller**: PIC32MZ2048EFH100  
 **System Clock**: 200MHz  
-**Peripheral Clock**: 50MHz (PBCLK3)  
+**Peripheral Clock**: 50MHz (PBCLK3) - TMR 
 **Hardware FPU**: Single-precision enabled
 
 ### Timer Configuration
@@ -147,7 +147,7 @@ Motion Completes → motionSegmentCompleted flag set
 
 ### Memory Map (Flash)
 ```
-0x9D000000 - 0x9D17FFFF : Application code (~1.5MB)
+0x9D000000 - 0x9D17FFFF : Refer to other/Release/memoryfile.xml
 0x9D180000 - 0x9D183FFF : GRBL settings (16KB, KSEG0 cached)
 0x9D1F4000 - 0x9D1FFFFF : MikroE bootloader (48KB)
 ```
@@ -238,11 +238,14 @@ make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"
 # DEBUG_UART - UART communication
 # DEBUG_APP - Application state machine
 
+# build
+make
+
 # Clean build
-make clean && make
+make all
 
 # Flash firmware
-make flash
+use mikroe bootloader.
 ```
 
 ### Testing

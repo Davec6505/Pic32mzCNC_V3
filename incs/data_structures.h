@@ -151,7 +151,8 @@ typedef enum {
 // ============================================================================
 // Application Data (Master Structure)
 // ============================================================================
-
+// stack size note: Keep this structure under 128KB, although MIPS can handle more,
+// large arrays (motion queue, command queue) can bloat stack usage quickly.
 typedef struct {
     APP_STATES state;
     
