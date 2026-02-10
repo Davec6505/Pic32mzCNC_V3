@@ -1,4 +1,20 @@
-# GitHub Copilot Instructions for Pic32mzCNC_V3# GitHub Copilot Instructions for Pic32mzCNC_V3
+# GitHub Copilot Instructions for Pic32mzCNC_V3
+
+## 🔴 CRITICAL: Change Tracking Requirements
+
+**ALL code changes MUST be documented in STATUS.md**
+
+For every code addition, modification, or correction:
+- ✅ **DO**: Update `STATUS.md` with: File path, Line number, Function name, Description of change
+- ✅ **DO**: Create planning documents (e.g., LITEPLACER_GRBL_IMPLEMENTATION.md)
+- ❌ **DO NOT**: Create individual .md files for each code change/session
+- ❌ **DO NOT**: Create change log files for corrections or additions
+
+**Example STATUS.md Entry**:
+```
+- `incs/gcode/gcode_parser.h:35` - Added `GCODE_EVENT_PROBE_TOWARD` enum value
+- `srcs/gcode/gcode_parser.c:456` - `parse_command_to_event()` - Added G38.2/G38.3 parsing
+```
 
 All sub README's are under docs/readme
 
