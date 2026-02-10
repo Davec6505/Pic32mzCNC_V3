@@ -149,6 +149,17 @@ typedef enum {
 } APP_STATES;
 
 // ============================================================================
+// Probe States (G38.x commands)
+// ============================================================================
+
+typedef enum {
+    PROBE_STATE_IDLE,
+    PROBE_STATE_MOVING,
+    PROBE_STATE_TRIGGERED,
+    PROBE_STATE_FAILED
+} ProbeState;
+
+// ============================================================================
 // Application Data (Master Structure)
 // ============================================================================
 // stack size note: Keep this structure under 128KB, although MIPS can handle more,
@@ -214,6 +225,12 @@ typedef struct {
     bool motionActive;
     // true when a segment completes (signals to check deferred ok)
     bool motionSegmentCompleted;
+    
+    // ✅ Probe state (G38.x commands)
+    ProbeState probeState;           // Current probe operation state
+    bool probeSuccess;               // true if probe triggered, false if missed
+    bool probeAlarmOnFail;           // true for G38.2/G38.4, false for G38.3/G38.5
+    CoordinatePoint probePosition;   // Position where probe triggered
 } APP_DATA;
 
 #endif // DATA_STRUCTURES_H

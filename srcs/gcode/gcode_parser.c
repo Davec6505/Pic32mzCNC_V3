@@ -415,6 +415,60 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             }
         }
 
+        // G38.2, G38.3, G38.4, G38.5 - Probe commands
+        if (gnum == 38) {
+            // Parse subcode after decimal point (e.g., G38.2 -> subcode = 2)
+            char* pDot = find_char((char*)cmd, '.');
+            if (pDot) {
+                int subcode = (int)strtol(pDot + 1, NULL, 10);
+                if (subcode >= 2 && subcode <= 5) {
+                    // Determine probe direction and alarm behavior
+                    if (subcode == 2 || subcode == 3) {
+                        ev->type = GCODE_EVENT_PROBE_TOWARD;  // Probe toward workpiece
+                        ev->data.probe.probe_toward = true;
+                    } else {  // subcode == 4 || subcode == 5
+                        ev->type = GCODE_EVENT_PROBE_AWAY;    // Probe away from workpiece
+                        ev->data.probe.probe_toward = false;
+                    }
+                    
+                    // Set alarm behavior: G38.2 and G38.4 alarm on failure
+                    ev->data.probe.alarm_on_fail = (subcode == 2 || subcode == 4);
+                    
+                    // Parse axis parameters and feedrate
+                    const float unit_scale = unitsInches ? 25.4f : 1.0f;
+                    
+                    // Array-based axis parameter parsing
+                    float axis_values[NUM_AXIS];
+                    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                        char* pAxis = find_char((char*)cmd, axis_letters[axis]);
+                        axis_values[axis] = pAxis ? parse_float_after(pAxis) : NAN;
+                    }
+                    
+                    // Store target coordinates (NAN = no change for that axis)
+                    ev->data.probe.x = !isnan(axis_values[AXIS_X]) ? axis_values[AXIS_X] * unit_scale : NAN;
+                    ev->data.probe.y = !isnan(axis_values[AXIS_Y]) ? axis_values[AXIS_Y] * unit_scale : NAN;
+                    ev->data.probe.z = !isnan(axis_values[AXIS_Z]) ? axis_values[AXIS_Z] * unit_scale : NAN;
+                    ev->data.probe.a = !isnan(axis_values[AXIS_A]) ? axis_values[AXIS_A] * unit_scale : NAN;
+                    
+                    // Parse feedrate (required for probe moves)
+                    char* pF = find_char((char*)cmd, 'F');
+                    ev->data.probe.feedrate = pF ? (parse_float_after(pF) * unit_scale) : 0.0f;
+                    
+                    DEBUG_PRINT_GCODE("[PARSE] Probe G38.%d: toward=%d alarm=%d Z=%.2f F=%.1f\r\n",
+                                     subcode, ev->data.probe.probe_toward, 
+                                     ev->data.probe.alarm_on_fail,
+                                     ev->data.probe.z, ev->data.probe.feedrate);
+                    
+                    return true;
+                } else {
+                    DEBUG_PRINT_GCODE("[PARSE] Invalid G38 subcode: %d\r\n", subcode);
+                    return false;
+                }
+            }
+            DEBUG_PRINT_GCODE("[PARSE] G38 missing subcode\r\n");
+            return false;
+        }
+
         if (gnum == 0 || gnum == 1) {
             ev->type = GCODE_EVENT_LINEAR_MOVE;
             DEBUG_PRINT_GCODE("[PARSE] Linear move (G%d)\r\n", gnum);

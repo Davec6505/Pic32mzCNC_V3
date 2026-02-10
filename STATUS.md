@@ -34,16 +34,24 @@
   - `bool alarm_on_fail` - true for G38.2/G38.4, false for G38.3/G38.5
   - `bool probe_toward` - true = toward (G38.2/G38.3), false = away (G38.4/G38.5)
 
+### Phase 2: Parser Implementation ✅ COMPLETE
+
+#### File: `srcs/gcode/gcode_parser.c`
+
+**Line 418** - `parse_command_to_event()` function  
+- **Added**: G38.x probe command parsing block (57 lines)
+- Parses G38.2, G38.3, G38.4, G38.5 with decimal subcode detection
+- Determines probe direction: toward (G38.2/G38.3) or away (G38.4/G38.5)
+- Sets alarm behavior: true for G38.2/G38.4, false for G38.3/G38.5
+- Parses XYZAF parameters with unit scaling (mm/inches)
+- Returns `GCODE_EVENT_PROBE_TOWARD` or `GCODE_EVENT_PROBE_AWAY`
+- Debug logging for probe parameters
+
 ---
 
 ## 📝 Pending Implementation
 
-### Phase 2: Parser Implementation
-- [ ] `srcs/gcode/gcode_parser.c` - `parse_command_to_event()` - Add G38.2/G38.3/G38.4/G38.5 parsing
-- [ ] Parse probe parameters (XYZAF)
-- [ ] Set alarm_on_fail and probe_toward flags based on subcode
-
-### Phase 3: Probe State Machine
+### Phase 3: Probe State Machine (IN PROGRESS)
 - [ ] `incs/data_structures.h` - Add probe state fields to APP_DATA
 - [ ] `srcs/app.c` - `APP_Tasks()` - Add probe event handling
 - [ ] `srcs/app.c` - Add probe trigger monitoring
@@ -81,12 +89,12 @@
 | Phase | Status | Files Modified | Lines Changed |
 |-------|--------|----------------|---------------|
 | Phase 1: Event Types | ✅ Complete | 1 | +10 |
-| Phase 2: Parser | ⬜ Pending | - | - |
-| Phase 3: State Machine | ⬜ Pending | - | - |
+| Phase 2: Parser | ✅ Complete | 1 | +57 |
+| Phase 3: State Machine | 🔄 In Progress | - | - |
 | Phase 4: Hardware Config | ⬜ Pending | - | - |
 | Phase 5: Testing | ⬜ Pending | - | - |
 
-**Total Progress**: 20% (1/5 phases complete)
+**Total Progress**: 40% (2/5 phases complete)
 
 ---
 
