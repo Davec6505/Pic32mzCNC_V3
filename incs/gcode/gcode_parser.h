@@ -47,7 +47,9 @@ typedef enum {
     GCODE_EVENT_SET_WORK_OFFSET,    // G92 - Set work coordinate system
     GCODE_EVENT_SET_WCS,            // G54-G59 - Select work coordinate system
     GCODE_EVENT_HOMING,             // $H - Homing cycle
-    GCODE_EVENT_PROGRAM_END         // M0, M2, M30 - Program end/stop
+    GCODE_EVENT_PROGRAM_END,        // M0, M2, M30 - Program end/stop
+    GCODE_EVENT_PROBE_TOWARD,       // G38.2, G38.3 - Probe toward workpiece
+    GCODE_EVENT_PROBE_AWAY          // G38.4, G38.5 - Probe away from workpiece
 } GCODE_EventType;
 
 typedef struct {
@@ -97,6 +99,13 @@ typedef struct {
         struct {
             uint32_t axes_mask;     // Bitmap of axes to home (bit 0=X, 1=Y, 2=Z, 3=A)
         } homing;
+        
+        struct {
+            float x, y, z, a;       // Target coordinates for probe move
+            float feedrate;         // Probe feedrate
+            bool alarm_on_fail;     // true for G38.2/G38.4, false for G38.3/G38.5
+            bool probe_toward;      // true = toward (G38.2/G38.3), false = away (G38.4/G38.5)
+        } probe;
     } data;
 } GCODE_Event;
 

@@ -403,6 +403,297 @@ switch (appData.motionPhase) {
 
 ---
 
+## 🔌 LitePlacer Integration Requirements
+
+**Status**: 🚧 In Progress - Implementation Checklist
+
+This firmware is being integrated with LitePlacer Pick-and-Place software. Below are the requirements that need verification/implementation for seamless integration.
+
+### 📡 Protocol Requirements
+
+#### 1. **Position Reporting Format** ⬜ TODO
+**Required**: Standard GRBL status query response
+
+**Send**: `?`
+
+**Expected Response**:
+```
+<Idle|MPos:43.123,12.456,78.901,0.000|FS:0,0>
+```
+
+**Format Details**:
+- State: `Idle`, `Run`, `Hold`, `Alarm`, `Home`, `Check`
+- MPos: Machine position (X, Y, Z, A in mm)
+- FS: Feed rate and spindle speed
+
+**Current Status**: ❓ Need to verify format
+- [ ] Test `?` command and capture output
+- [ ] Verify all 4 axes (XYZA) are reported
+- [ ] Confirm position precision (3 decimal places minimum)
+
+---
+
+#### 2. **Probe Response (G38.2)** ⬜ TODO
+**Required**: Probe position feedback after successful trigger
+
+**Send**: `G38.2 Z-100 F300`
+
+**Expected Response Option A** (Preferred):
+```
+[PRB:43.123,12.456,78.901,0.000:1]
+ok
+```
+- `PRB:` probe result message
+- Position where probe triggered (XYZA)
+- `:1` = success, `:0` = failed (no contact)
+
+**Expected Response Option B** (Acceptable):
+```
+ok
+<Idle|MPos:43.123,12.456,78.901,0.000>
+```
+- Position in subsequent status query
+
+**Current Status**: ❓ Need to implement/verify
+- [ ] Verify G38.2 is implemented
+- [ ] Test probe trigger detection
+- [ ] Capture probe response format
+- [ ] Verify Z position preservation (no reset to 0)
+- [ ] Test probe failure timeout
+
+**Critical for LitePlacer**: 
+- Probe MUST preserve Z position where switch triggers
+- No automatic backoff/reset during calibration
+- Position accuracy within 0.1mm
+
+---
+
+#### 3. **Error and Alarm Handling** ⬜ TODO
+**Required**: Clear error/alarm messages for fault recovery
+
+**Expected Formats**:
+
+**Errors** (recoverable):
+```
+error:9
+```
+- Numeric error codes (GRBL standard)
+- See [GRBL Error Codes](https://github.com/gnea/grbl/wiki/Grbl-v1.1-Interface#grbl-response-messages)
+
+**Alarms** (require reset):
+```
+ALARM:1
+```
+- Numeric alarm codes
+- Machine enters locked state
+- Requires `$X` to unlock
+
+**Current Status**: ❓ Need to verify
+- [ ] Test invalid G-code (trigger error)
+- [ ] Test limit switch trigger (trigger alarm)
+- [ ] Verify `$X` unlock command
+- [ ] Capture error/alarm message formats
+
+---
+
+#### 4. **Settings Commands** ✅ CONFIRMED
+**Required**: GRBL settings management
+
+| Command | Description | Status |
+|---------|-------------|--------|
+| `$$` | View all settings | ✅ Verified in README |
+| `$100=80` | Set steps/mm for X | ✅ Standard GRBL |
+| `$H` | Home all axes | ✅ Verified in README |
+| `$X` | Clear alarm state | ✅ Standard GRBL |
+| `$RST=$` | Reset to defaults | ✅ Verified in README |
+
+**Current Status**: ✅ Confirmed working
+- [x] All commands documented in README
+
+---
+
+#### 5. **Real-Time Commands** ✅ CONFIRMED
+**Required**: Non-blocking emergency controls
+
+| Command | Description | Status |
+|---------|-------------|--------|
+| `?` | Status query | ✅ Verified in README |
+| `!` | Feed hold | ✅ Verified in README |
+| `~` | Resume | ✅ Verified in README |
+| `Ctrl+X` | Soft reset | ✅ Verified in README |
+
+**Current Status**: ✅ Confirmed working
+
+---
+
+### 🔌 Hardware Interface Requirements
+
+#### 6. **Limit Switch Configuration** ⬜ TODO
+**Required**: GPIO mapping for limit/probe inputs
+
+**Questions**:
+1. Which GPIO pins are limit switches?
+   ```c
+   // Example needed:
+   #define LIMIT_X_PIN     PORTAbits.RA0
+   #define LIMIT_Y_PIN     PORTAbits.RA1
+   #define LIMIT_Z_MIN_PIN PORTAbits.RA2
+   #define LIMIT_Z_MAX_PIN PORTAbits.RA3  // Used as probe input
+   ```
+
+2. Is Z-max limit switch used as probe input?
+   - [ ] Yes - shared pin (standard GRBL)
+   - [ ] No - separate probe pin
+
+3. Active HIGH or LOW?
+   - [ ] Active HIGH (switch closes to +5V)
+   - [ ] Active LOW (switch closes to GND)
+
+4. Are pull-up/pull-down resistors enabled?
+   - [ ] Internal pull-ups enabled
+   - [ ] External resistors used
+
+**Current Status**: ❓ Need GPIO documentation
+- [ ] Document limit switch pin assignments
+- [ ] Confirm probe input configuration
+- [ ] Test switch trigger detection
+
+---
+
+#### 7. **Serial Communication Settings** ✅ CONFIRMED
+**Required**: UART configuration for host communication
+
+| Setting | Value | Status |
+|---------|-------|--------|
+| Baud Rate | 115200 | ✅ Confirmed in README |
+| Data Bits | 8 | ✅ Standard |
+| Stop Bits | 1 | ✅ Standard |
+| Parity | None | ✅ Standard |
+| Flow Control | None | ❓ Need verification |
+
+**Questions**:
+- Do you use XON/XOFF software flow control?
+  - [ ] Yes - send XOFF when buffer full
+  - [ ] No - rely on deferred "ok" responses
+
+- Do you use RTS/CTS hardware flow control?
+  - [ ] Yes - hardware handshaking
+  - [ ] No - not implemented
+
+**Current Status**: ✅ Mostly confirmed
+- [x] Baud rate verified (115200)
+- [ ] Flow control method needs verification
+
+---
+
+### 🧪 Test Cases for Integration
+
+#### Test 1: Status Query Loop ⬜ TODO
+```gcode
+?
+?
+?
+```
+**Expected**: 3 status reports with current position
+**Verify**: Position format matches expected
+
+---
+
+#### Test 2: Simple Movement ⬜ TODO
+```gcode
+G90 G21
+G0 X10 Y10
+?
+```
+**Expected**: Machine moves to (10,10), status shows MPos:10.000,10.000,...
+
+---
+
+#### Test 3: Probe Calibration Sequence ⬜ TODO
+```gcode
+G90 G21
+G0 Z50
+G38.2 Z-40 F300
+?
+```
+**Expected**: 
+1. Probe triggers at ~Z=43mm
+2. Either `[PRB:x,y,43.xxx,a:1]` or position in status
+3. Z position preserved (not reset to 0)
+
+---
+
+#### Test 4: Error Recovery ⬜ TODO
+```gcode
+G999
+$X
+?
+```
+**Expected**:
+1. `error:X` (invalid G-code)
+2. Machine recovers
+3. Status shows Idle state
+
+---
+
+#### Test 5: Alarm and Clear ⬜ TODO
+```gcode
+(Trigger limit switch manually)
+$X
+?
+```
+**Expected**:
+1. `ALARM:X`
+2. `$X` clears alarm
+3. Status shows Idle, not Alarm
+
+---
+
+### 📋 Implementation Priority
+
+| Priority | Item | Estimated Effort | Status |
+|----------|------|------------------|--------|
+| 🔴 HIGH | Verify G38.2 probe implementation | 2-4 hours | ⬜ TODO |
+| 🔴 HIGH | Test probe position reporting | 1 hour | ⬜ TODO |
+| 🔴 HIGH | Capture protocol responses | 1 hour | ⬜ TODO |
+| 🟡 MEDIUM | Document GPIO limit switch pins | 30 min | ⬜ TODO |
+| 🟡 MEDIUM | Verify error/alarm formats | 1 hour | ⬜ TODO |
+| 🟢 LOW | Document flow control method | 15 min | ⬜ TODO |
+
+---
+
+### 🎯 Next Steps
+
+1. **Protocol Capture Session** (30-60 minutes)
+   - Connect to firmware via serial terminal (PuTTY/Tera Term)
+   - Send test commands from Test Cases above
+   - Copy/paste all responses to a text file
+   - Share output for LitePlacer integration code
+
+2. **GPIO Documentation** (15-30 minutes)
+   - Review `srcs/utils/utils.c` or hardware config
+   - Document limit switch pin assignments
+   - Note active HIGH/LOW configuration
+
+3. **Integration Development** (LitePlacer side)
+   - Create `PIC32MZGrblControl.cs` class
+   - Implement GRBL protocol parser
+   - Test with captured protocol responses
+   - Integrate into LitePlacer CNC abstraction
+
+---
+
+### 📞 Contact for Integration
+
+**Integration Partner**: LitePlacer-DEV project  
+**Repository**: https://github.com/Davec6505/LitePlacer-DEV  
+**Branch**: patch1  
+**Integration Lead**: Dave C
+
+**Questions/Issues**: Create issue in LitePlacer-DEV repo with tag `pic32mz-integration`
+
+---
+
 ## 📄 License
 
 Proprietary - All rights reserved.
