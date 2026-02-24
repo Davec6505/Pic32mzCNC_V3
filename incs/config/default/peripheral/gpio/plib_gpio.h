@@ -62,45 +62,15 @@
 // *****************************************************************************
 
 
-/*** Macros for EnA pin ***/
-#define EnA_Set()               (LATGSET = (1U<<15))
-#define EnA_Clear()             (LATGCLR = (1U<<15))
-#define EnA_Toggle()            (LATGINV= (1U<<15))
-#define EnA_OutputEnable()      (TRISGCLR = (1U<<15))
-#define EnA_InputEnable()       (TRISGSET = (1U<<15))
-#define EnA_Get()               ((PORTG >> 15) & 0x1U)
-#define EnA_GetLatch()          ((LATG >> 15) & 0x1U)
-#define EnA_PIN                  GPIO_PIN_RG15
-
-/*** Macros for EnZ pin ***/
-#define EnZ_Set()               (LATASET = (1U<<5))
-#define EnZ_Clear()             (LATACLR = (1U<<5))
-#define EnZ_Toggle()            (LATAINV= (1U<<5))
-#define EnZ_OutputEnable()      (TRISACLR = (1U<<5))
-#define EnZ_InputEnable()       (TRISASET = (1U<<5))
-#define EnZ_Get()               ((PORTA >> 5) & 0x1U)
-#define EnZ_GetLatch()          ((LATA >> 5) & 0x1U)
-#define EnZ_PIN                  GPIO_PIN_RA5
-
-/*** Macros for EnY pin ***/
-#define EnY_Set()               (LATESET = (1U<<5))
-#define EnY_Clear()             (LATECLR = (1U<<5))
-#define EnY_Toggle()            (LATEINV= (1U<<5))
-#define EnY_OutputEnable()      (TRISECLR = (1U<<5))
-#define EnY_InputEnable()       (TRISESET = (1U<<5))
-#define EnY_Get()               ((PORTE >> 5) & 0x1U)
-#define EnY_GetLatch()          ((LATE >> 5) & 0x1U)
-#define EnY_PIN                  GPIO_PIN_RE5
-
-/*** Macros for EnX pin ***/
-#define EnX_Set()               (LATESET = (1U<<6))
-#define EnX_Clear()             (LATECLR = (1U<<6))
-#define EnX_Toggle()            (LATEINV= (1U<<6))
-#define EnX_OutputEnable()      (TRISECLR = (1U<<6))
-#define EnX_InputEnable()       (TRISESET = (1U<<6))
-#define EnX_Get()               ((PORTE >> 6) & 0x1U)
-#define EnX_GetLatch()          ((LATE >> 6) & 0x1U)
-#define EnX_PIN                  GPIO_PIN_RE6
+/*** Macros for EnXYZA pin ***/
+#define EnXYZA_Set()               (LATESET = (1U<<6))
+#define EnXYZA_Clear()             (LATECLR = (1U<<6))
+#define EnXYZA_Toggle()            (LATEINV= (1U<<6))
+#define EnXYZA_OutputEnable()      (TRISECLR = (1U<<6))
+#define EnXYZA_InputEnable()       (TRISESET = (1U<<6))
+#define EnXYZA_Get()               ((PORTE >> 6) & 0x1U)
+#define EnXYZA_GetLatch()          ((LATE >> 6) & 0x1U)
+#define EnXYZA_PIN                  GPIO_PIN_RE6
 
 /*** Macros for LED1 pin ***/
 #define LED1_Set()               (LATESET = (1U<<7))
@@ -161,6 +131,46 @@
 #define LED2_Get()               ((PORTA >> 9) & 0x1U)
 #define LED2_GetLatch()          ((LATA >> 9) & 0x1U)
 #define LED2_PIN                  GPIO_PIN_RA9
+
+/*** Macros for SPI2_CS_X pin ***/
+#define SPI2_CS_X_Set()               (LATASET = (1U<<1))
+#define SPI2_CS_X_Clear()             (LATACLR = (1U<<1))
+#define SPI2_CS_X_Toggle()            (LATAINV= (1U<<1))
+#define SPI2_CS_X_OutputEnable()      (TRISACLR = (1U<<1))
+#define SPI2_CS_X_InputEnable()       (TRISASET = (1U<<1))
+#define SPI2_CS_X_Get()               ((PORTA >> 1) & 0x1U)
+#define SPI2_CS_X_GetLatch()          ((LATA >> 1) & 0x1U)
+#define SPI2_CS_X_PIN                  GPIO_PIN_RA1
+
+/*** Macros for SPI2_CS_Y pin ***/
+#define SPI2_CS_Y_Set()               (LATFSET = (1U<<13))
+#define SPI2_CS_Y_Clear()             (LATFCLR = (1U<<13))
+#define SPI2_CS_Y_Toggle()            (LATFINV= (1U<<13))
+#define SPI2_CS_Y_OutputEnable()      (TRISFCLR = (1U<<13))
+#define SPI2_CS_Y_InputEnable()       (TRISFSET = (1U<<13))
+#define SPI2_CS_Y_Get()               ((PORTF >> 13) & 0x1U)
+#define SPI2_CS_Y_GetLatch()          ((LATF >> 13) & 0x1U)
+#define SPI2_CS_Y_PIN                  GPIO_PIN_RF13
+
+/*** Macros for SPI2_CS_Z pin ***/
+#define SPI2_CS_Z_Set()               (LATFSET = (1U<<12))
+#define SPI2_CS_Z_Clear()             (LATFCLR = (1U<<12))
+#define SPI2_CS_Z_Toggle()            (LATFINV= (1U<<12))
+#define SPI2_CS_Z_OutputEnable()      (TRISFCLR = (1U<<12))
+#define SPI2_CS_Z_InputEnable()       (TRISFSET = (1U<<12))
+#define SPI2_CS_Z_Get()               ((PORTF >> 12) & 0x1U)
+#define SPI2_CS_Z_GetLatch()          ((LATF >> 12) & 0x1U)
+#define SPI2_CS_Z_PIN                  GPIO_PIN_RF12
+
+/*** Macros for SPI2_CS_A pin ***/
+#define SPI2_CS_A_Set()               (LATBSET = (1U<<12))
+#define SPI2_CS_A_Clear()             (LATBCLR = (1U<<12))
+#define SPI2_CS_A_Toggle()            (LATBINV= (1U<<12))
+#define SPI2_CS_A_OutputEnable()      (TRISBCLR = (1U<<12))
+#define SPI2_CS_A_InputEnable()       (TRISBSET = (1U<<12))
+#define SPI2_CS_A_Get()               ((PORTB >> 12) & 0x1U)
+#define SPI2_CS_A_GetLatch()          ((LATB >> 12) & 0x1U)
+#define SPI2_CS_A_PIN                  GPIO_PIN_RB12
 
 /*** Macros for Coolant pin ***/
 #define Coolant_Set()               (LATBSET = (1U<<15))

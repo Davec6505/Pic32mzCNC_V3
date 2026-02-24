@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "common.h"           // For STEPPER_DRIVER_TMC5160 and hardware config
 #include "data_structures.h"  // For E_AXIS enum and NUM_AXIS
 
 
@@ -23,8 +24,11 @@ extern GPIO_SetFunc axis_step_set[];
 extern GPIO_ClearFunc axis_step_clear[];
 extern GPIO_SetFunc axis_dir_set[];
 extern GPIO_ClearFunc axis_dir_clear[];
+#ifndef STEPPER_DRIVER_TMC5160
+// Per-axis enable pins (legacy discrete stepper drivers only)
 extern GPIO_SetFunc axis_enable_set[];
 extern GPIO_ClearFunc axis_enable_clear[];
+#endif
 
 // Limit switch function pointer arrays
 extern GPIO_GetFunc axis_limit_min_get[];
@@ -61,13 +65,23 @@ static inline void __attribute__((always_inline)) AXIS_DirClear(E_AXIS axis) {
     axis_dir_clear[axis]();
 }
 
+#ifdef STEPPER_DRIVER_TMC5160
+#include "peripheral/gpio/plib_gpio.h"  // For EnXYZA_Set/Clear macros
+// Single shared enable pin — all TMC5160 ENN pins wired together (active LOW)
+static inline void __attribute__((always_inline)) STEPPERS_Enable(void)  { EnXYZA_Clear(); } // ENN low  = enabled
+static inline void __attribute__((always_inline)) STEPPERS_Disable(void) { EnXYZA_Set(); }   // ENN high = disabled
+// Compatibility shims — both resolve to the single shared pin
+static inline void __attribute__((always_inline)) AXIS_EnableSet(E_AXIS axis)   { (void)axis; STEPPERS_Enable(); }
+static inline void __attribute__((always_inline)) AXIS_EnableClear(E_AXIS axis) { (void)axis; STEPPERS_Disable(); }
+#else
+// Per-axis enable (legacy discrete stepper drivers)
 static inline void __attribute__((always_inline)) AXIS_EnableSet(E_AXIS axis) {
     axis_enable_set[axis]();
 }
-
 static inline void __attribute__((always_inline)) AXIS_EnableClear(E_AXIS axis) {
     axis_enable_clear[axis]();
 }
+#endif
 
 static inline bool __attribute__((always_inline)) AXIS_LimitMinGet(E_AXIS axis) {
     return axis_limit_min_get[axis]();
