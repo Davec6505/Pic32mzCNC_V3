@@ -18,6 +18,7 @@ typedef struct {
     uint8_t step_direction_invert; // $3 - direction port invert mask (0-255)
     uint8_t step_enable_invert;    // $4 - invert step enable pin (bool as uint8)
     uint8_t limit_pins_invert;     // $5 - invert limit pins (bool as uint8)
+    uint8_t probe_invert;          // $6 - probe pin invert (0=active low, 1=active high)
     
     // Arc configuration ($12-$13)
     float mm_per_arc_segment;      // $12 - Arc segment length in mm (default 0.1mm)

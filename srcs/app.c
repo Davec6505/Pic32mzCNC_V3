@@ -271,6 +271,84 @@ void APP_Tasks ( void )
                 MOTION_Arc(&appData);
             }
             
+            // ===== PROBE MONITORING (G38.x COMMANDS) =====
+            // Check probe input during motion and handle trigger/failure
+            if (appData.probeState == PROBE_STATE_MOVING) {
+                // Check if probe input triggered (Z-max with $6 invert applied)
+                CNC_Settings* settings = SETTINGS_GetCurrent();
+                bool probe_triggered = PROBE_Get(settings->probe_invert);
+                
+                if (probe_triggered) {
+                    // ✅ PROBE TRIGGERED - Stop motion immediately
+                    DEBUG_PRINT_MOTION("[PROBE] Triggered! Stopping motion\r\n");
+                    
+                    // Stop all motion
+                    TMR4_Stop();
+                    OCMP1_Disable();
+                    STEPPER_DisableAll();
+                    
+                    // Clear motion queue
+                    appData.motionQueueHead = 0;
+                    appData.motionQueueTail = 0;
+                    appData.motionQueueCount = 0;
+                    appData.currentSegment = NULL;
+                    
+                    // Save trigger position (current position is exact trigger point)
+                    appData.probePosition.coordinate[AXIS_X] = appData.current[AXIS_X];
+                    appData.probePosition.coordinate[AXIS_Y] = appData.current[AXIS_Y];
+                    appData.probePosition.coordinate[AXIS_Z] = appData.current[AXIS_Z];
+                    appData.probePosition.coordinate[AXIS_A] = appData.current[AXIS_A];
+                    
+                    // Mark success and transition to triggered state
+                    appData.probeSuccess = true;
+                    appData.probeState = PROBE_STATE_TRIGGERED;
+                    
+                } else if (appData.motionQueueCount == 0 && !appData.probeSuccess) {
+                    // ✅ PROBE FAILED - Reached target without trigger
+                    DEBUG_PRINT_MOTION("[PROBE] Failed - no trigger detected\r\n");
+                    appData.probeState = PROBE_STATE_FAILED;
+                }
+            }
+            
+            // Handle probe completion (triggered or failed)
+            if (appData.probeState == PROBE_STATE_TRIGGERED) {
+                // Send probe result: [PRB:x,y,z,a:1]
+                UART_Printf("[PRB:%.3f,%.3f,%.3f,%.3f:1]\r\n",
+                           appData.probePosition.coordinate[AXIS_X],
+                           appData.probePosition.coordinate[AXIS_Y],
+                           appData.probePosition.coordinate[AXIS_Z],
+                           appData.probePosition.coordinate[AXIS_A]);
+                UART_SendOK();
+                
+                // Reset probe state
+                appData.probeState = PROBE_STATE_IDLE;
+                
+                DEBUG_PRINT_MOTION("[PROBE] Success reported\r\n");
+                
+            } else if (appData.probeState == PROBE_STATE_FAILED) {
+                if (appData.probeAlarmOnFail) {
+                    // G38.2 or G38.4 - Trigger ALARM
+                    UART_Printf("ALARM:5\r\n");  // Probe fail alarm
+                    appData.state = APP_ALARM;
+                    appData.alarmCode = 5;
+                    
+                    DEBUG_PRINT_MOTION("[PROBE] ALARM:5 triggered (probe failed)\r\n");
+                } else {
+                    // G38.3 or G38.5 - No alarm, just report failure
+                    UART_Printf("[PRB:%.3f,%.3f,%.3f,%.3f:0]\r\n",
+                               appData.current[AXIS_X],
+                               appData.current[AXIS_Y],
+                               appData.current[AXIS_Z],
+                               appData.current[AXIS_A]);
+                    UART_SendOK();
+                    
+                    DEBUG_PRINT_MOTION("[PROBE] Failure reported (no alarm)\r\n");
+                }
+                
+                // Reset probe state
+                appData.probeState = PROBE_STATE_IDLE;
+            }
+            
             // ===== HOMING STATE MACHINE (NON-BLOCKING) =====
             // Process homing cycle if active
             HOMING_Tasks(&appData);

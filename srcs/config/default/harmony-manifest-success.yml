@@ -4,13 +4,13 @@
 
 
 project: Pic32mz_SingleTmr_OCR
-creation_date: 2025-11-17T21:45:35.540Z[Europe/London]    # ISO 8601 format: https://www.w3.org/TR/NOTE-datetime
+creation_date: 2026-02-23T07:21:47.748Z[Europe/London]    # ISO 8601 format: https://www.w3.org/TR/NOTE-datetime
 operating_system: Windows 11
 mcc_mode: IDE            # [IDE|Standalone|Headless]
-mcc_version: v5.6.3
-mcc_core_version: v5.8.3
-mplabx_version: v6.25        # if MPLAB X plugin only
-harmony_version: v5.6.3
+mcc_version: v5.6.4
+mcc_core_version: v5.8.4
+mplabx_version: v6.30        # if MPLAB X plugin only
+harmony_version: v5.6.4
 compiler: XC32 4.60
 
 modules:

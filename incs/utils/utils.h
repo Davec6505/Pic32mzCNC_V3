@@ -148,6 +148,16 @@ static inline bool __attribute__((always_inline)) LIMIT_CheckAxis(E_AXIS axis, u
     return (LIMIT_GetMin(axis) ^ inverted) || (LIMIT_GetMax(axis) ^ inverted);
 }
 
+// ===== PROBE INPUT ABSTRACTION =====
+
+// Probe input is Z-max limit switch (standard GRBL convention)
+// $6 probe invert setting: 0=normally open (NO), 1=normally closed (NC)
+// Returns true when probe is triggered (contact made)
+static inline bool __attribute__((always_inline)) PROBE_Get(uint8_t probe_invert) {
+    bool pin_state = LIMIT_GetMax(AXIS_Z);  // Z-max limit is probe input
+    return pin_state ^ (probe_invert ? 1 : 0);  // Apply invert setting
+}
+
 // String tokenization utilities for G-code parsing
 #define MAX_TOKENS 16           // Maximum tokens per line (G90G1X10Y10F100S200M3 = ~8 tokens)
 #define MAX_TOKEN_LENGTH 32     // Maximum length per token

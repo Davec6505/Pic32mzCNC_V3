@@ -257,7 +257,7 @@ endif
 # Assign all Include directories dynamically, first run "make build_dir" from terminal.
 # Get all directories under INC_DIR recursively (up to 4 levels deep)
 define get_inc_dirs
-$(sort $(dir $(wildcard $(1)/*/)) $(dir $(wildcard $(1)/*/*/)) $(dir $(wildcard $(1)/*/*/*/)) $(dir $(wildcard $(1)/*/*/*/*/)))
+$(sort $(dir $(wildcard $(1)/*/)) $(dir $(wildcard $(1)/*/*/)) $(dir $(wildcard $(1)/*/*/*/)) $(dir $(wildcard $(1)/*/*/*/*/)) $(dir $(wildcard $(1)/*/*/*/*/*/)))
 endef
 
 INC_SUBDIRS := $(call get_inc_dirs,$(INC_DIR))
@@ -377,7 +377,7 @@ platform:
 # This is useful for organizing the build output and include files.
 # To run this target, use: make build_dir
 # Get all directories under SRC_DIR dynamically (similar to how we get source files)
-SRC_DIRS := $(sort $(dir $(wildcard $(SRC_DIR)/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/*/)))
+SRC_DIRS := $(sort $(dir $(wildcard $(SRC_DIR)/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/*/*/*/)))
 # Filter out startup directory from automatic creation and convert to relative paths
 SRC_SUBDIRS := $(sort $(filter-out startup/,$(SRC_DIRS:$(SRC_DIR)/%=%)))
 

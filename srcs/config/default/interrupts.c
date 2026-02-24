@@ -68,6 +68,8 @@
 // *****************************************************************************
 void OUTPUT_COMPARE_1_Handler (void);
 void TIMER_5_Handler (void);
+void SPI2_RX_Handler (void);
+void SPI2_TX_Handler (void);
 void UART3_FAULT_Handler (void);
 void UART3_RX_Handler (void);
 void UART3_TX_Handler (void);
@@ -87,6 +89,16 @@ void __attribute__((used)) __ISR(_OUTPUT_COMPARE_1_VECTOR, ipl4SRS) OUTPUT_COMPA
 void __attribute__((used)) __ISR(_TIMER_5_VECTOR, ipl4SRS) TIMER_5_Handler (void)
 {
     TIMER_5_InterruptHandler();
+}
+
+void __attribute__((used)) __ISR(_SPI2_RX_VECTOR, ipl1SRS) SPI2_RX_Handler (void)
+{
+    SPI2_RX_InterruptHandler();
+}
+
+void __attribute__((used)) __ISR(_SPI2_TX_VECTOR, ipl1SRS) SPI2_TX_Handler (void)
+{
+    SPI2_TX_InterruptHandler();
 }
 
 void __attribute__((used)) __ISR(_UART3_FAULT_VECTOR, ipl1SRS) UART3_FAULT_Handler (void)

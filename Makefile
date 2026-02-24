@@ -120,7 +120,7 @@ endif
 
 build_dir:
 	@echo "###### BUILDING DIRECTORIES FOR OUTPUT BINARIES #######"
-	cd srcs && $(BUILD_DIR) BUILD_CONFIG=$(BUILD_CONFIG)
+	cd srcs && $(BUILD_DIR) BUILD_CONFIG=$(BUILD_CONFIG) DRY_RUN=$(DRY_RUN)
 	@echo "############ BUILDING DIRECTORIES COMPLETED ###########"
 
 debug:

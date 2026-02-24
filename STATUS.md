@@ -1,9 +1,35 @@
 # Pic32mzCNC_V3 - Development Status Tracker
 
 **Branch**: `liteplacer`  
-**Feature**: LitePlacer G38.x Probe Implementation  
+**Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: February 10, 2026
+**Last Updated**: February 23, 2026
+
+---
+
+## 🔧 Infrastructure Changes - February 23, 2026
+
+### TMC5160 SPI Driver - Infrastructure Setup
+
+- **MCC**: SPI2 peripheral added and configured (SPI Master mode)
+- `srcs/config/config/default/peripheral/spi/spi_master/plib_spi2_master.c` - MCC generated SPI2 PLIB (source)
+- `incs/config/config/default/peripheral/spi/spi_master/plib_spi2_master.h` - MCC generated SPI2 PLIB (header, moved to incs)
+- `incs/config/config/default/peripheral/spi/spi_master/plib_spi_master_common.h` - MCC common SPI types (header, moved to incs)
+
+### Build System Fixes
+
+- `Makefile:124` - `build_dir` target now forwards `DRY_RUN=$(DRY_RUN)` to inner make
+- `srcs/Makefile:380` - `SRC_DIRS` wildcard extended from 4 to 6 levels deep (covers `spi/spi_master/` nesting)
+
+### Next Steps for TMC5160
+
+- **TODO**: Confirm CS GPIO pin assignments from PCB/MCC pin manager
+- **TODO**: Create `srcs/motion/tmc5160.c` and `incs/motion/tmc5160.h`
+- **TODO**: Add CS wrappers to `srcs/utils/utils.c` following LED pattern
+- **TODO**: Call `TMC5160_Initialize()` from `APP_CONFIG` in `srcs/app.c`
+- **TODO**: Add rate-limited `TMC5160_CheckStatus()` call in `APP_IDLE` in `srcs/app.c`
+
+**Planning Document**: See `TMC5160 SPI Driver` section in `.github/copilot-instructions.md`
 
 ---
 
@@ -51,19 +77,34 @@
 
 ## 📝 Pending Implementation
 
-### Phase 3: Probe State Machine (IN PROGRESS)
-- [ ] `incs/data_structures.h` - Add probe state fields to APP_DATA
-- [ ] `srcs/app.c` - `APP_Tasks()` - Add probe event handling
-- [ ] `srcs/app.c` - Add probe trigger monitoring
-- [ ] `srcs/app.c` - Add probe result reporting `[PRB:x,y,z,a:1]`
-- [ ] `srcs/app.c` - Add probe failure handling (ALARM:5)
+### Phase 3: Probe State Machine (80% COMPLETE ✅)
+- [x] `incs/data_structures.h:145` - Add `ProbeState` enum (IDLE, MOVING, TRIGGERED, FAILED)
+- [x] `incs/data_structures.h:210` - Add probe state fields to APP_DATA (probeState, probeSuccess, probeAlarmOnFail, probePosition)
+- [x] `srcs/motion/motion.c:812` - `MOTION_ProcessGcodeEvent()` - Add GCODE_EVENT_PROBE_TOWARD/AWAY handling (68 lines)
+  - Builds start/end coordinates from probe event data
+  - Calls `KINEMATICS_LinearMove()` with probe_speed (8.33 mm/s)
+  - Initializes `appData->probeState = PROBE_STATE_MOVING`
+- [x] `srcs/app.c:278` - `APP_Tasks()` - Add probe trigger monitoring (70 lines)
+  - Checks `LIMIT_GetMax(AXIS_Z)` during PROBE_STATE_MOVING
+  - Applies $6 probe invert setting
+  - On trigger: stops motion, saves position to probePosition, sets PROBE_STATE_TRIGGERED
+  - On completion without trigger: sets PROBE_STATE_FAILED
+- [x] `srcs/app.c:290` - Add probe result reporting for PROBE_STATE_TRIGGERED
+  - Sends `[PRB:x,y,z,a:1]` and "ok"
+- [x] `srcs/app.c:302` - Add probe failure handling for PROBE_STATE_FAILED
+  - If probeAlarmOnFail: triggers `ALARM:5`, enters APP_ALARM state
+  - Else: sends `[PRB:x,y,z,a:0]` and "ok"
 
-### Phase 4: Hardware Configuration
-- [ ] `srcs/utils/utils.c` - Configure Z-max limit as probe input
-- [ ] `incs/utils/utils.h` - Add `PROBE_Get()` inline function
-- [ ] Apply $6 probe invert setting
+### Phase 4: Hardware Configuration (100% COMPLETE ✅)
+- [x] `incs/utils/utils.h:155` - Add `PROBE_Get()` inline function
+  - Uses Z-max limit switch as probe input (GRBL standard)
+  - Applies $6 probe invert setting (NO/NC switch configuration)
+  - Returns true when probe contact made
+- [x] `srcs/app.c:283` - Updated probe trigger detection to use `PROBE_Get()`
+  - Replaced manual `LIMIT_GetMax(AXIS_Z)` + invert logic
+  - Now uses hardware abstraction layer for cleaner code
 
-### Phase 5: Testing
+### Phase 5: Testing (PENDING)
 - [ ] Test G38.2 probe with trigger detection
 - [ ] Test G38.3 probe without alarm on failure
 - [ ] Verify `[PRB:...]` response format

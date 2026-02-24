@@ -802,6 +802,76 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             DEBUG_PRINT_MOTION("[DWELL] Enqueued %.3f second dwell segment (%lu ticks)\r\n", seconds, (unsigned long)ticks);
             return true;
         }
+        
+        case GCODE_EVENT_PROBE_TOWARD:
+        case GCODE_EVENT_PROBE_AWAY:
+        {
+            // G38.2/G38.3 (probe toward) or G38.4/G38.5 (probe away)
+            
+            // Check if motion queue has space before processing
+            if (appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+                return false;  // Queue full - retry later
+            }
+            
+            // ✅ ARRAY-BASED: Build start coordinate from current position
+            CoordinatePoint start = {{
+                appData->current[AXIS_X], appData->current[AXIS_Y],
+                appData->current[AXIS_Z], appData->current[AXIS_A]
+            }};
+            CoordinatePoint end;
+            
+            // ✅ ARRAY-BASED: Build end coordinate (absolute mode only for probing)
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                float event_value;
+                // Extract event value based on axis
+                if (axis == AXIS_X) event_value = event->data.probe.x;
+                else if (axis == AXIS_Y) event_value = event->data.probe.y;
+                else if (axis == AXIS_Z) event_value = event->data.probe.z;
+                else event_value = event->data.probe.a;
+                
+                // Probing uses absolute coordinates only (NAN = no change)
+                SET_COORDINATE_AXIS(&end, axis, 
+                    isnan(event_value) ? appData->current[axis] : event_value);
+            }
+            
+            // Get feedrate (required for probe moves)
+            float feedrate = event->data.probe.feedrate;
+            if (feedrate <= 0.0f) {
+                // Probe requires explicit feedrate
+                DEBUG_PRINT_MOTION("[PROBE] Error: No feedrate specified for probe move\r\n");
+                return false;
+            }
+            
+            // Get next queue slot
+            MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
+            
+            // Convert to motion segment (probe moves always start/end at minimum speed)
+            float probe_speed = 8.33f;  // ~500 mm/min minimum speed
+            KINEMATICS_LinearMove(start, end, feedrate, segment, probe_speed, probe_speed);
+            
+            // Guard: skip zero-length segments
+            if (segment->steps_remaining == 0) {
+                DEBUG_PRINT_MOTION("[PROBE] Zero-length probe move - skipping\r\n");
+                return true;
+            }
+            
+            // Initialize probe state
+            appData->probeState = PROBE_STATE_MOVING;
+            appData->probeSuccess = false;
+            appData->probeAlarmOnFail = event->data.probe.alarm_on_fail;
+            
+            // Add to motion queue
+            appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+            appData->motionQueueCount++;
+            
+            DEBUG_PRINT_MOTION("[PROBE] Started G38.%d: alarm=%d feedrate=%.1f\r\n",
+                             event->data.probe.alarm_on_fail ? 2 : 3,
+                             event->data.probe.alarm_on_fail,
+                             feedrate);
+            
+            return true;
+        }
+        
         case GCODE_EVENT_COOLANT_ON:
         case GCODE_EVENT_COOLANT_OFF:
         case GCODE_EVENT_SET_TOOL:
