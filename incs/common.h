@@ -12,13 +12,10 @@
 // ║  Uncomment ONE of the following to match the physical hardware.            ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
-// TMC5160 SPI stepper drivers (single shared EN pin, CS per axis via SPI)
-// Enables: SPI startup config, DRVSTATUS diagnostics, StealthChop, single EN
-// #define STEPPER_DRIVER_TMC5160
-
-// Legacy Step/Dir discrete stepper drivers (A4988, DRV8825, TMC2208 UART-less)
-// Uses per-axis EN pins, no SPI communication
-#define STEPPER_DRIVER_LEGACY
+// ── Stepper driver selection: uncomment ONE, comment the other ──────────────
+// #define STEPPER_DRIVER_TMC5160   // TMC5160 via SPI2, single shared EN pin
+#define   STEPPER_DRIVER_LEGACY     // A4988/DRV8825/TMC2208, per-axis EN pins
+// ─────────────────────────────────────────────────────────────────────────────
 
 #if !defined(STEPPER_DRIVER_TMC5160) && !defined(STEPPER_DRIVER_LEGACY)
     #error "Hardware config error: define either STEPPER_DRIVER_TMC5160 or STEPPER_DRIVER_LEGACY in common.h"
