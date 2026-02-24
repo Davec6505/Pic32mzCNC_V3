@@ -27,6 +27,7 @@
 #include "utils/uart_utils.h"  // Non-blocking UART utilities
 #include "utils/utils.h"       // For UTILS_InitAxisConfig
 #include "motion.h"
+#include "motion/tmc5160.h"    // TMC5160 SPI stepper driver
 
 // *****************************************************************************
 // *****************************************************************************
@@ -184,6 +185,10 @@ void APP_Tasks ( void )
             STEPPER_Initialize(&appData);                   // ✅ Pass APP_DATA reference for ISR phase signaling
             MOTION_Initialize();                            // Motion planning initialization  
             KINEMATICS_Initialize();                        // Initialize work coordinates
+
+#ifdef STEPPER_DRIVER_TMC5160
+            TMC5160_Initialize();                          // Configure TMC5160 drivers via SPI2
+#endif
             
             appData.state = APP_LOAD_SETTINGS;
             break;
@@ -245,6 +250,21 @@ void APP_Tasks ( void )
         
         case APP_IDLE:
         {
+
+#ifdef STEPPER_DRIVER_TMC5160
+            // Rate-limited TMC5160 DRVSTATUS diagnostic poll (~10Hz)
+            // Uses CoreTimer tick difference to avoid blocking motion
+            static uint32_t tmc_last_poll = 0;
+            uint32_t tmc_now = CORETIMER_CounterGet();
+            // CoreTimer runs at CPU/2 = 100MHz. 100,000,000 ticks = 1s -> 10Hz = 10,000,000
+            if ((tmc_now - tmc_last_poll) >= 10000000UL) {
+                tmc_last_poll = tmc_now;
+                if (TMC5160_Tasks()) {
+                    // Fault detected — log (alarm handling can be added here later)
+                    UART_Printf("[TMC5160] Driver fault detected!\r\n");
+                }
+            }
+#endif
 
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
             // Flow control uses appData.motionQueueCount directly (no sync needed)
