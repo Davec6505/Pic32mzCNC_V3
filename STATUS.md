@@ -1,9 +1,111 @@
 # Pic32mzCNC_V3 - Development Status Tracker
 
-**Branch**: `liteplacer`  
+**Branch**: `tmc5160`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: February 23, 2026
+**Last Updated**: February 26, 2026
+
+---
+
+## 🔧 Build System Flattened — February 26, 2026
+
+Removed `Debug`/`Release` subdirectory split from the build system. Single output path for all
+builds — no hardware JTAG debugger is available so the distinction was meaningless.
+
+**Output change**:
+- Before: `bins/Release/CNC_V3.hex`, `objs/Release/`, `other/Release/`, `libs/Release/`
+- After:  `bins/CNC_V3.hex`, `objs/`, `other/`, `libs/`
+
+**Deleted directories**: `bins/Release`, `bins/Debug`, `objs/Release`, `objs/Debug`,
+`other/Release`, `other/Debug`, `libs/Release`, `libs/Debug`
+
+**Files modified**:
+- `Makefile` — Removed `BUILD_CONFIG ?= Release`, all `$(BUILD_CONFIG)` references,
+  `clean_all` target; `build` target now does `cd bins && xc32-bin2hex`
+- `srcs/Makefile` — Removed `BUILD_CONFIG ?= Default`; `BIN_DIR/OBJ_DIR/OUT_DIR/LIB_DIR`
+  now flat; replaced `ifeq Debug/Release/error` block with single `OPT_FLAGS := -g -O$(OPT_LEVEL)`;
+  `build_dir` no longer creates `bins/Debug` and `bins/Release`; map file is `CS23.map`
+
+**Serial debug output** still controlled by `DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"` — same
+compile-time zero-overhead mechanism, just no longer tied to a build config name.
+
+**Build verified**: `bins/CNC_V3.hex` (262637 bytes), only pre-existing bootloader pragma warning.
+
+---
+
+## 🔧 TMC5160 Runtime Settings via $= — February 26, 2026
+
+Added `$200–$253` parameter range for TMC5160 runtime motor tuning. Parameters persist in NVM
+flash and take effect immediately (re-configures the driver via SPI without rebooting).
+All code is guarded `#ifdef HAS_TMC5160_AXIS` — DRV8825-only builds compile identically to before.
+
+**Parameter Map** (values are applied per-axis: 0=X, 1=Y, 2=Z, 3=A):
+
+| Param  | Axis | Description                                               | Default |
+|--------|------|-----------------------------------------------------------|---------|
+| $200–$203 | X–A | Chopper mode: 1=StealthChop 2=SpreadCycle 3=Mixed 4=CoolStep | 1 |
+| $210–$213 | X–A | Run current 0–31 (linear % of Vref)                      | 20      |
+| $220–$223 | X–A | Hold current 0–31                                         | 10      |
+| $230–$233 | X–A | Microstep resolution (0=256 … 8=full-step)                | 4 (16µ) |
+| $240–$243 | X–A | TPWMTHRS — StealthChop→SpreadCycle crossover (Mixed mode) | 500     |
+| $250–$253 | X–A | TCOOLTHRS — CoolStep lower velocity threshold             | 0       |
+
+**Files changed:**
+
+- `incs/settings/settings.h:7` — Added `#include "common.h"` so `HAS_TMC5160_AXIS` is visible
+- `incs/settings/settings.h:58–65` — Added `#ifdef HAS_TMC5160_AXIS` block with 6 arrays inside `CNC_Settings`
+- `incs/settings/settings.h:SETTINGS_VERSION` — Bumped 2 → 3 (struct changed; old flash data is invalid and triggers defaults)
+- `srcs/settings/settings.c:default_settings` — Added `#ifdef HAS_TMC5160_AXIS` block with sensible defaults matching `g_default_cfg` in `tmc5160.c`
+- `srcs/settings/settings.c:SETTINGS_SetValue()` — Added `case 200–253` inside `#ifdef HAS_TMC5160_AXIS`
+- `srcs/settings/settings.c:SETTINGS_GetValue()` — Added `case 200–253` inside `#ifdef HAS_TMC5160_AXIS`
+- `srcs/settings/settings.c:SETTINGS_PrintAll()` — Added 24 `sprintf` lines for `$200–$253` inside `#ifdef HAS_TMC5160_AXIS`
+- `incs/motion/tmc5160.h:24` — Added `#include "settings/settings.h"` for `CNC_Settings` type
+- `incs/motion/tmc5160.h:TMC5160_ApplySettings()` — New public API function declaration
+- `srcs/motion/tmc5160.c:TMC5160_ApplySettings()` — Implementation: validates axis is TMC5160, builds `TMC5160_AxisConfig` from settings arrays, calls `TMC5160_ConfigAxis()`
+- `srcs/gcode/gcode_parser.c:includes` — Added `#ifdef HAS_TMC5160_AXIS` guard around `#include "motion/tmc5160.h"`
+- `srcs/gcode/gcode_parser.c:$n=v handler` — Added hook: when param in [200,253], calls `TMC5160_ApplySettings((E_AXIS)(param % 10), s)` immediately after flash save
+
+**Build**: ✅ Clean Release — `bins/Release/CS23.hex` (316 KB, February 26, 2026)
+
+---
+
+## 🔧 Per-Axis Mixed Driver System — February 26, 2026
+
+### Correction: enable wrappers must delegate to enable_all_set/clear
+- `srcs/utils/utils.c:enable_x/y/z/a_set/clear` - Fixed: per-axis DRV8825 enable wrappers now call `enable_all_set()` / `enable_all_clear()` (the user-defined single-pin wrapper) instead of calling `EnXYZA_Set/Clear` directly. This respects the existing `enable_all_*` abstraction layer and keeps all future EN pin changes in one place.
+- `incs/common.h:DRIVER_DRV8825 comment` - Updated comment to note shared `EnXYZA` pin (no per-axis EN on this PCB)
+- `.github/copilot-instructions.md` - Added **🔴 CRITICAL: PCB Hardware Constraints** section at top documenting the single shared `EnXYZA` (RE6) enable pin, the absence of `EnX/EnY/EnZ/EnA` macros, and the per-axis driver define system — so this is never accidentally broken again
+
+Replaced the global `STEPPER_DRIVER_TMC5160` / `STEPPER_DRIVER_LEGACY` compile switch with a
+fully configurable per-axis driver assignment system supporting mixed TMC5160 + DRV8825 on the
+same board (e.g. 2+2 or 3+1). All selection is compile-time; zero runtime overhead.
+
+- `incs/common.h:17-60` - **Replaced** global driver `#define` with:
+  - `DRIVER_TMC5160 1` / `DRIVER_DRV8825 2` — driver type tokens
+  - `AXIS_X_DRIVER` / `AXIS_Y_DRIVER` / `AXIS_Z_DRIVER` / `AXIS_A_DRIVER` — per-axis assignment (edit to match wiring)
+  - `HAS_TMC5160_AXIS` — auto-derived; defined if ≥1 axis is TMC5160; gates all SPI code
+  - `HAS_DRV8825_AXIS` — auto-derived; defined if ≥1 axis is DRV8825; gates per-axis enable arrays
+  - `TMC5160_AXIS_MASK` — compile-time bitmask (bit N = axis N is TMC5160); used by mixed-driver enable inlines
+- `incs/motion/tmc5160.h:22,119` - Changed `#ifdef STEPPER_DRIVER_TMC5160` guard → `#ifdef HAS_TMC5160_AXIS`
+- `srcs/motion/tmc5160.c:17` - Changed file-level guard → `#ifdef HAS_TMC5160_AXIS`
+- `srcs/motion/tmc5160.c:TMC5160_Initialize()` - Replaced 4-axis loop with per-axis `#if (AXIS_x_DRIVER == DRIVER_TMC5160)` blocks; CS deassert and ConfigAxis only called for assigned TMC5160 axes
+- `srcs/motion/tmc5160.c:TMC5160_Tasks()` - Replaced 4-axis loop with per-axis `#if` blocks using `POLL_TMC_AXIS()` local macro; DRV8825 axes never polled over SPI
+- `srcs/motion/tmc5160.c:268` - Updated closing `#endif` comment
+- `incs/utils/utils.h:27-31` - Changed enable extern guard `#ifndef STEPPER_DRIVER_TMC5160` → `#ifdef HAS_DRV8825_AXIS`
+- `incs/utils/utils.h:STEPPERS_Enable/Disable` - **Replaced** binary TMC5160/legacy block with mixed-driver implementation: TMC5160 block (`#ifdef HAS_TMC5160_AXIS`) + DRV8825 per-axis `#if` blocks (`#ifdef HAS_DRV8825_AXIS`)
+- `incs/utils/utils.h:AXIS_EnableSet/Clear` - **Replaced** with three-way `#if defined(HAS_TMC5160_AXIS) && defined(HAS_DRV8825_AXIS)` / `elif TMC5160` / `else DRV8825`; mixed path uses `TMC5160_AXIS_MASK` bitmask for single-compare runtime dispatch (compiler dead-strips one branch for pure configs)
+- `srcs/utils/utils.c:enable wrappers` - Changed guard `#ifndef STEPPER_DRIVER_TMC5160` → `#ifdef HAS_DRV8825_AXIS`
+- `srcs/utils/utils.c:axis_enable_set[] arrays` - Changed guard `#ifndef STEPPER_DRIVER_TMC5160` → `#ifdef HAS_DRV8825_AXIS`; full 4-entry arrays always compiled when DRV8825 present (TMC5160 entries unreachable via bitmask)
+- `srcs/app.c:APP_CONFIG` - Changed `#ifdef STEPPER_DRIVER_TMC5160` → `#ifdef HAS_TMC5160_AXIS`
+- `srcs/app.c:APP_IDLE` - Changed `#ifdef STEPPER_DRIVER_TMC5160` → `#ifdef HAS_TMC5160_AXIS`
+
+**Example configurations** (edit `AXIS_x_DRIVER` lines in `incs/common.h`):
+```
+X+Y=TMC5160, Z+A=DRV8825:  AXIS_X=TMC5160 AXIS_Y=TMC5160 AXIS_Z=DRV8825 AXIS_A=DRV8825
+X+Y+Z=TMC5160, A=DRV8825:  AXIS_X=TMC5160 AXIS_Y=TMC5160 AXIS_Z=TMC5160 AXIS_A=DRV8825
+All TMC5160:                all four = DRIVER_TMC5160
+All DRV8825:                all four = DRIVER_DRV8825  (previous STEPPER_DRIVER_LEGACY behaviour)
+```
 
 ---
 
@@ -127,27 +229,28 @@
 
 ## 📊 Implementation Progress
 
-| Phase | Status | Files Modified | Lines Changed |
-|-------|--------|----------------|---------------|
-| Phase 1: Event Types | ✅ Complete | 1 | +10 |
-| Phase 2: Parser | ✅ Complete | 1 | +57 |
-| Phase 3: State Machine | 🔄 In Progress | - | - |
-| Phase 4: Hardware Config | ⬜ Pending | - | - |
-| Phase 5: Testing | ⬜ Pending | - | - |
+| Phase | Status | Description |
+|-------|--------|-------------|
+| Phase 1: Event Types | ✅ Complete | `GCODE_EVENT_PROBE_TOWARD/AWAY` added to parser.h |
+| Phase 2: Parser | ✅ Complete | G38.2/3/4/5 parsing in gcode_parser.c |
+| Phase 3: State Machine | ✅ Complete | `MOTION_ProcessGcodeEvent`, probe monitoring in APP_Tasks |
+| Phase 4: Hardware Config | ✅ Complete | `PROBE_Get()` inline, Z-max as probe input, $6 invert |
+| Phase 5: Testing | ⬜ Pending | Flash to dev rig and verify [PRB:...] response |
 
-**Total Progress**: 40% (2/5 phases complete)
+**Total Progress**: 80% (4/5 phases complete)
 
 ---
 
 ## 🎯 Next Action
 
-**Continue with Phase 2**: Implement G38.x parsing in `srcs/gcode/gcode_parser.c`
+**Phase 5 — Testing**: Flash `bins/CNC_V3.hex` to dev rig and verify G38.x probe behaviour.
 
-**Expected Changes**:
-- Parse G38.2, G38.3, G38.4, G38.5 commands
-- Extract XYZAF parameters
-- Create probe event with appropriate flags
-- Return event to main loop for processing
+**Test sequence**:
+```gcode
+G38.2 Z-10 F100   ; probe toward — expect [PRB:x,y,z,a:1] on contact, ALARM:5 if no contact
+G38.3 Z-10 F100   ; probe toward no alarm — expect [PRB:x,y,z,a:0] on miss
+G38.4 Z10  F100   ; probe away — contact must break to succeed
+```
 
 ---
 

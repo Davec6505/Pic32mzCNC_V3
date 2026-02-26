@@ -1,5 +1,22 @@
 # GitHub Copilot Instructions for Pic32mzCNC_V3
 
+## 🔴 CRITICAL: PCB Hardware Constraints — READ BEFORE EDITING GPIO CODE
+
+### Stepper Enable Pin
+- **Single shared enable pin only**: `EnXYZA` (RE6) — `EnXYZA_Set()` / `EnXYZA_Clear()` / `EnXYZA_Toggle()`
+- **There are NO per-axis enable GPIO macros** (`EnX_Set`, `EnY_Set`, etc. do NOT exist in `plib_gpio.h`)
+- All per-axis enable wrappers in `srcs/utils/utils.c` delegate to `enable_all_set()` / `enable_all_clear()`
+- Do NOT introduce `EnX_Set/Clear`, `EnY_Set/Clear`, `EnZ_Set/Clear`, `EnA_Set/Clear` — they will cause compiler errors
+- This applies to BOTH `DRIVER_TMC5160` and `DRIVER_DRV8825` axes on this board
+
+### Driver Selection
+- Per-axis driver type is set in `incs/common.h` via `AXIS_X_DRIVER` … `AXIS_A_DRIVER`
+- Valid values: `DRIVER_TMC5160` or `DRIVER_DRV8825`
+- Do NOT use the old `STEPPER_DRIVER_TMC5160` / `STEPPER_DRIVER_LEGACY` defines — they are removed
+- Use `HAS_TMC5160_AXIS` / `HAS_DRV8825_AXIS` aggregate flags for conditional compilation
+
+---
+
 ## 🔴 CRITICAL: Change Tracking Requirements
 
 **ALL code changes MUST be documented in STATUS.md**
@@ -2257,12 +2274,24 @@ static inline void TMC_CS_X_Clear(void) { /* GPIO */ }
 // Y, Z, A follow same pattern
 ```
 
-### GRBL Settings for Phase 2 (deferred)
+### GRBL Settings for TMC5160 — IMPLEMENTED ✅ ($200–$253)
 
-New settings to add to CNC_Settings struct:
-- $140-$143 - TMC run current per axis (0-31)
-- $144-$147 - TMC hold current per axis (0-31)
-- $148-$151 - TMC microstep resolution per axis (1/2/4/8/16/32/64/128/256)
+Added to `CNC_Settings` struct (guarded `#ifdef HAS_TMC5160_AXIS`). Persist to NVM flash
+(SETTINGS_VERSION = 3). Changes take effect immediately via `TMC5160_ApplySettings()` — no reboot needed.
+
+| Param      | Axis | Description                                               | Default |
+|------------|------|-----------------------------------------------------------|---------|
+| $200–$203  | X–A  | Chopper mode: 1=StealthChop 2=SpreadCycle 3=Mixed 4=CoolStep | 1   |
+| $210–$213  | X–A  | Run current 0–31 (linear % of Vref)                      | 20      |
+| $220–$223  | X–A  | Hold current 0–31                                         | 10      |
+| $230–$233  | X–A  | Microstep resolution (0=256 … 8=full-step)                | 4 (16µ) |
+| $240–$243  | X–A  | TPWMTHRS — StealthChop→SpreadCycle crossover (Mixed mode) | 500     |
+| $250–$253  | X–A  | TCOOLTHRS — CoolStep lower velocity threshold             | 0       |
+
+Parameter format: `$2XY=value` where X=tens digit (0=mode,1=irun,2=ihold,3=mres,4=pwmthrs,5=coolthrs)
+and Y=axis (0=X, 1=Y, 2=Z, 3=A). Only active when `HAS_TMC5160_AXIS` is defined.
+Handler in `srcs/gcode/gcode_parser.c` calls `TMC5160_ApplySettings((E_AXIS)(param % 10), s)`
+immediately after flash save.
 
 ### StallGuard2 / Sensorless Homing (Phase 2 - deferred)
 

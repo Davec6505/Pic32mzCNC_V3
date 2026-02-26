@@ -1,705 +1,404 @@
-# Pic32mzCNC_V3 - CNC Motion Control System
+# Pic32mzCNC_V3 — CNC Motion Control System
 
-**CNC Controller for PIC32MZ Microcontrollers**
-
-A CNC motion control system based on the GRBL v1.1 protocol compatibility, 4-axis coordinated motion, and hardware-optimized stepper control.
-
-## 🎯 Key Design Concept
-
-**Virtual Dominant Axis Architecture** - Unlike traditional GRBL implementations that use a fixed 30kHz timer interrupt running continuously, this system uses OC1 continuous pulse mode as a virtual dominant axis. The ISR only fires at the actual step rate needed for motion, eliminating thousands of wasted interrupts per second and dramatically reducing CPU overhead.
+GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, targeting LitePlacer pick-and-place and general CNC applications. Supports mixed TMC5160 (SPI) and DRV8825/A4988/TMC2208 (step-dir) stepper drivers on the same board.
 
 ---
 
 ## 🚀 Status
 
-**Under Active Development** - Testing with UGS, Candle, bCNC  
-**Firmware**: `bins/Release/CS23.hex` (264KB)  
-**Latest Build**: November 20, 2025
+**Branch**: `tmc5160` (active development mainline)
+**Firmware**: `bins/CNC_V3.hex`
+**Last build**: February 26, 2026
 
-### Current State
-- ✅ GRBL v1.1 protocol fully compliant
-- ✅ 4-axis coordinated motion (XYZA) - (B,C) can be added.
-- ✅ Arc interpolation with radius compensation
-- ✅ Flow control with deferred "ok" responses
-- ✅ Soft reset recovery (Ctrl+X)
-- ✅ NVM flash settings persistence (KSEG0 addressing)
-- ✅ File streaming with automatic completion
-- ✅ Non-blocking architecture - app state machine runs continuously, zero blocking loops during motion
-
----
-
-## ⚡ Key Features
-
-### Motion Control
-- **4-Axis Coordination**: XYZA stepper control with Bresenham interpolation
-- **Virtual Dominant Axis**: OC1 continuous pulse mode drives ISR at step rate - no fixed 30kHz timer, only fires when motion needed
-- **Hardware Timing**: TMR4 (781.25kHz) + OC1 variable period based on current step interval
-- **Optimal Performance**: 2.5µs pulse width, 256 microstepping support
-- **Trapezoidal Profiling**: Acceleration/deceleration with velocity planning
-- **Arc Interpolation**: G2/G3 with $13 radius compensation
-- **Emergency Stop**: Real-time response with hardware limit support - gpio needs adding to complete this feature.
-- **Non-Blocking Design**: Zero blocking loops - app state machine runs continuously during motion
-
-### GRBL v1.1 Protocol
-- **Full Compliance**: Status reports, real-time commands, flow control
-- **G-Code Support**: G0/G1, G2/G3, G4, G17/G18/G19, G90/G91, G92, G10 L20
-- **Modal Commands**: M3/M5 (spindle), M7/M9 (coolant), F (feedrate), S (speed), T (tool)
-- **Real-Time Control**: `?` status, `!` feed hold, `~` resume, Ctrl+X soft reset
-- **System Commands**: `$$` settings, `$I` info, `$G` state, `$#` offsets, `$H` homing
-
-### Hardware Abstraction
-- **Clean GPIO Layer**: Function pointer arrays for all axis/limit operations
-- **LED Pattern Design**: Direct register access with zero-overhead inlining
-- **Simplified Architecture**: Flat structures, no unnecessary nesting
-- **Hardware Validation**: Automatic OC1/TMR4 restart after soft reset
+| Feature | Status |
+|---------|--------|
+| GRBL v1.1 protocol | ✅ Complete |
+| 4-axis coordinated motion (XYZA) | ✅ Complete |
+| Trapezoidal velocity profiling | ✅ Complete |
+| Arc interpolation G2/G3 + radius compensation | ✅ Complete |
+| Homing ($H) — 4-phase cycle | ✅ Complete |
+| Spindle PWM (M3/M5 via OC8/TMR6) | ✅ Complete |
+| NVM flash settings persistence | ✅ Complete |
+| Flow control — deferred "ok" | ✅ Complete |
+| Soft reset recovery (Ctrl+X) | ✅ Complete |
+| G38.2/3/4/5 probe commands | ✅ Implemented — testing pending |
+| Per-axis driver selection (TMC5160 / DRV8825) | ✅ Complete |
+| TMC5160 SPI driver + runtime settings ($200–$253) | ✅ Complete |
+| StallGuard2 / sensorless homing | 🔲 Phase 2 (deferred) |
 
 ---
 
-## 🏗️ Architecture Overview
+## ⚙️ Hardware
 
-### System Flow
+| Item | Detail |
+|------|--------|
+| MCU | PIC32MZ2048EFH100 |
+| CPU clock | 200 MHz (MIPS32r2) |
+| Peripheral clock | 50 MHz (PBCLK3) |
+| CoreTimer | 100 MHz (CPU/2) |
+| FPU | Single-precision hardware (`-mhard-float -msingle-float`) |
+| Step timer | TMR4 1:64 → 781.25 kHz (1.28 µs/tick) |
+| Step output | OC1 continuous-pulse dual-compare mode |
+| Spindle PWM | OC8 / TMR6 @ 3.338 kHz |
+| SPI2 | Mode 3, ~1.923 MHz (BRG=12), 8-bit, MSSEN=0 |
+| Bootloader | MikroE USB HID @ 0x9D1F4000 (48 KB) |
 
-```
-User Input (UART) → G-Code Parser → Event Queue → Kinematics → Motion Queue → Stepper ISR → Motors
-                         ↓              ↓             ↓            ↓
-                    Flow Control   Modal State   Velocity     Position
-                                                 Profiling    Tracking
-```
+### GPIO Pin Assignments
 
-### Main Components
-
-1. **G-Code Parser** (`srcs/gcode/gcode_parser.c`)
-   - Event-driven architecture
-   - Tokenization with combined modal splitting
-   - Flow control with deferred "ok" responses
-   - Real-time character handling
-
-2. **Kinematics** (`srcs/motion/kinematics.c`)
-   - Linear move physics calculations
-   - Arc interpolation (incremental)
-   - Velocity profiling (trapezoidal)
-   - Coordinate transformations
-
-3. **Motion Controller** (`srcs/motion/motion.c`)
-   - Segment queue management
-   - Priority phase system
-   - Velocity updates (accel/cruise/decel)
-
-4. **Stepper Control** (`srcs/motion/stepper.c`)
-   - Hardware abstraction (TMR4/OC1)
-   - Bresenham interpolation
-   - ISR for step pulse generation
-
-5. **Settings** (`srcs/settings/settings.c`)
-   - Persistent NVM flash storage (KSEG0 @ 0x9D180000)
-   - GRBL parameters (29 settings)
-   - Callback pattern for flash writes
+| Signal | Pin | Notes |
+|--------|-----|-------|
+| EnXYZA | RE6 | Shared enable for all axes (active LOW) |
+| SPI2_CS_X | RA1 | TMC5160 chip-select X |
+| SPI2_CS_Y | RF13 | TMC5160 chip-select Y |
+| SPI2_CS_Z | RF12 | TMC5160 chip-select Z |
+| SPI2_CS_A | RB12 | TMC5160 chip-select A |
+| X Min/Max | RA4 / RA7 | Limit switches |
+| Y Min/Max | RD0 / RE0 | Limit switches |
+| Z Min/Max | RD13 / RE1 | Limit / probe (Z-Max = probe input) |
+| A Min/Max | RA6 / RB1 | Limit switches |
 
 ---
 
-## 🔄 Process Flow
+## 🔧 Driver Configuration
 
-### Motion Execution Pipeline
+Per-axis driver type is set at compile time in [`incs/common.h`](incs/common.h). Edit the four `AXIS_x_DRIVER` lines to match physical wiring — everything else is auto-derived.
 
-```
-1. UART Receive → rxBuffer accumulates bytes
-2. Line Complete → Tokenize and parse
-3. Event Created → Add to command queue
-4. Event Processed → Generate motion segment
-5. Segment Queued → Add to motion queue (16 segment buffer)
-6. Segment Loaded → STEPPER_LoadSegment() configures TMR4/OC1
-7. ISR Executes → OCP1_ISR fires at step rate
-8. Bresenham → Subordinate axes step when error accumulates
-9. Velocity Update → Accel/cruise/decel phases (main loop)
-10. Completion → Dequeue segment, load next
-```
-
-### Flow Control Mechanism
-
-```
-Command Received → Check motion queue occupancy
-                    ↓
-        motionQueueCount > 0?
-                    ↓
-              Yes ─→ Defer "ok" (set okPending = true)
-              No  ─→ Send "ok" immediately
-                    ↓
-Motion Completes → motionSegmentCompleted flag set
-                    ↓
-        Check deferred ok in IDLE loop
-                    ↓
-        motionQueueCount == 0? → Send deferred "ok"
-```
-
----
-
-## 🔧 Hardware Configuration
-
-**Microcontroller**: PIC32MZ2048EFH100  
-**System Clock**: 200MHz  
-**Peripheral Clock**: 50MHz (PBCLK3) - TMR 
-**Hardware FPU**: Single-precision enabled
-
-### Timer Configuration
-- **TMR4**: 16-bit, 1:64 prescaler (781.25kHz, 1.28µs/tick)
-- **OC1**: X-axis continuous pulse mode (dual-compare)
-- **OC8/TMR6**: Spindle PWM (3.338kHz)
-
-### Memory Map (Flash)
-```
-0x9D000000 - 0x9D17FFFF : Refer to other/Release/memoryfile.xml
-0x9D180000 - 0x9D183FFF : GRBL settings (16KB, KSEG0 cached)
-0x9D1F4000 - 0x9D1FFFFF : MikroE bootloader (48KB)
-```
-
-**Critical**: NVM writes MUST use KSEG0 cached addresses (0x9D...), NOT KSEG1 uncached (0xBD...).
-
----
-
-## 📞 Call Structure (Runtime Hierarchy)
-
-```
-main.c (Entry point)
-  └── app.c (Main state machine - APP_Tasks)
-      │
-      ├── APP_INIT → settings/settings.c (Register NVM callback)
-      ├── APP_LOAD_SETTINGS → settings/settings.c (Load from flash)
-      │
-      ├── APP_IDLE → (Main processing loop)
-      │   ├── motion/motion.c (Motion queue management)
-      │   ├── gcode/gcode_parser.c (Parse G-code events)
-      │   ├── motion/kinematics.c (Generate motion segments)
-      │   └── motion/stepper.c (Load segments to hardware)
-      │
-      ├── APP_HOMING → motion/homing.c ($H command - 4 phase cycle)
-      │
-      └── APP_ALARM → motion/stepper.c (Emergency stop)
-
-ISR (Hardware interrupts - runs asynchronously)
-  ├── stepper.c::OCP1_ISR (Bresenham + step pulses)
-  ├── stepper.c::TMR5_Callback (Pulse width timing)
-  ├── motion/spindle.c (M3/M5 PWM control)
-  └── UART3_ISR (Ring buffer updates - RX/TX)
-
-utils/ (Called from all states - helper functions)
-  ├── utils.c (GPIO abstraction - inline functions)
-  └── uart_utils.c (Non-blocking UART)
-```
-
-## 📁 File Structure (Directory Layout)
-
-```
-Pic32mzCNC_V3/
-├── srcs/                      # Source code
-│   ├── main.c                 # Entry point
-│   ├── app.c                  # Main application state machine
-│   ├── gcode/
-│   │   └── gcode_parser.c     # GRBL protocol parser
-│   ├── motion/
-│   │   ├── stepper.c          # Hardware abstraction (TMR4/OC1)
-│   │   ├── motion.c           # Motion queue management
-│   │   ├── kinematics.c       # Physics & velocity profiling
-│   │   ├── homing.c           # $H command
-│   │   └── spindle.c          # M3/M5 PWM control
-│   ├── settings/
-│   │   └── settings.c         # Persistent NVM storage
-│   └── utils/
-│       ├── utils.c            # GPIO abstraction
-│       └── uart_utils.c       # Non-blocking UART
-├── incs/                      # Header files
-│   ├── data_structures.h      # Unified structures
-│   ├── common.h               # Debug system
-│   └── ...
-├── bins/Release/              # Build outputs
-│   └── CS23.hex               # Production firmware
-├── docs/                      # Documentation
-├── ps_commands/               # PowerShell test scripts
-└── Makefile                   # Build system
-```
-
----
-
-## 🚀 Quick Start
-
-### Building
-
-```powershell
-# Release build (default, optimized)
-make
-
-# Debug build with motion tracing
-make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"
-
-# Available DEBUG_FLAGS:
-# DEBUG_MOTION - Motion planning and segment execution
-# DEBUG_GCODE - G-code parsing and event processing
-# DEBUG_STEPPER - Low-level stepper ISR
-# DEBUG_SEGMENT - Segment loading and queue management
-# DEBUG_UART - UART communication
-# DEBUG_APP - Application state machine
-
-# build
-make
-
-# Clean build
-make all
-
-# Flash firmware
-use mikroe bootloader.
-```
-
-### Testing
-
-```powershell
-# Run test script (UART at 115200 baud)
-.\ps_commands\test_gcode.ps1 -FilePath .\gcode_tests\01_simple_square.gcode
-
-# Code search utilities
-.\ps_commands\search.ps1 -wordToFind "STEPPER_LoadSegment"              # Find function usage
-.\ps_commands\search_functions.ps1  -functionName "motion/stepper.c"    # List all functions in file
-``
-
-
-# Manual testing via PuTTY/terminal
-?                    # Status query
-$$                   # View all settings
-$H                   # Home all axes
-G90 G1 X10 F500     # Move 10mm in X
-`
-
-### G-Code Sender Setup (UGS)
-1. Port: Select COM port (115200 baud)
-2. Firmware: GRBL
-3. Settings: Auto-connect enabled
-4. Visualization: Real-time position updates
-
----
-
-## 📊 Key Algorithms
-
-### Bresenham Interpolation (ISR)
 ```c
-// Dominant axis always steps
-AXIS_StepSet(dominant_axis);
-
-// Subordinate axes step when error accumulates
-for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-    error[axis] += delta[axis];
-    if (error[axis] >= dominant_delta) {
-        AXIS_StepSet(axis);
-        error[axis] -= dominant_delta;
-    }
-}
+// ── Per-axis driver assignment ────────────────────────────────────────────────
+#define AXIS_X_DRIVER   DRIVER_DRV8825   // change to DRIVER_TMC5160 when fitted
+#define AXIS_Y_DRIVER   DRIVER_DRV8825
+#define AXIS_Z_DRIVER   DRIVER_DRV8825
+#define AXIS_A_DRIVER   DRIVER_DRV8825
 ```
 
-### Trapezoidal Velocity Profiling (Main Loop)
-```c
-if (steps_completed < accelerate_until) {
-    // Acceleration phase: decrease interval (increase speed)
-    step_interval -= rate_delta;
-} else if (steps_completed > decelerate_after) {
-    // Deceleration phase: increase interval (decrease speed)
-    step_interval += rate_delta;
-}
-// Cruise phase: no change to interval
+**Valid values**: `DRIVER_TMC5160` or `DRIVER_DRV8825`
+Mixing is fully supported (e.g. X+Y = TMC5160, Z+A = DRV8825).
+
+**Auto-derived flags** (do not edit):
+- `HAS_TMC5160_AXIS` — defined when ≥1 axis is TMC5160; gates all SPI / TMC register code
+- `HAS_DRV8825_AXIS` — defined when ≥1 axis is DRV8825; gates per-axis enable arrays
+- `TMC5160_AXIS_MASK` — compile-time bitmask used by mixed-driver enable inlines
+
+> **PCB note**: There is **one shared EN pin** (`EnXYZA` RE6) for all axes. There are no per-axis `EnX/EnY/EnZ/EnA` GPIO macros — they do not exist in `plib_gpio.h`. All enable logic routes through `enable_all_set()` / `enable_all_clear()`.
+
+---
+
+## 🏗️ Architecture
+
+### Key Design Concept
+
+**Virtual Dominant Axis** — OC1 fires the ISR only at the actual step rate needed, not at a fixed 30 kHz background rate. CPU load scales with motion speed, not a fixed overhead.
+
+### Motion Pipeline
+
+```
+UART RX → Parser → Event Queue → Kinematics → Motion Queue → STEPPER_LoadSegment → OC1 ISR
+                        ↓              ↓              ↓                               ↓
+                   Flow Control   Velocity       Position                      Bresenham
+                   (defer "ok")   Profile        Tracking                   subordinate axes
+```
+
+### Call Hierarchy
+
+```
+main.c
+  └── app.c — APP_Tasks() state machine
+        ├── APP_INIT        → settings.c (register NVM callback)
+        ├── APP_LOAD_SETTINGS → settings.c (read flash after peripherals ready)
+        ├── APP_CONFIG      → TMC5160_Initialize() [#ifdef HAS_TMC5160_AXIS]
+        ├── APP_IDLE
+        │     ├── motion.c  — motion queue, phase system
+        │     ├── gcode_parser.c — parse events, flow control
+        │     ├── kinematics.c — generate motion segments
+        │     ├── stepper.c — load segments to TMR4/OC1
+        │     └── TMC5160_Tasks() [rate-limited 10 Hz, #ifdef HAS_TMC5160_AXIS]
+        ├── APP_HOMING      → homing.c ($H — 4-phase seek/locate/pulloff/complete)
+        └── APP_ALARM       → stepper.c (emergency stop, STEPPER_DisableAll)
+
+ISR (asynchronous)
+  ├── OCP1_ISR  — Bresenham step pulses (stepper.c)
+  ├── TMR5_Callback — pulse width timing (stepper.c)
+  ├── OC8 / TMR6 — spindle PWM (spindle.c)
+  └── UART3_ISR — ring buffer RX/TX
 ```
 
 ### Priority Phase System
+
+The main loop processes motion phases in strict priority order so G-code parsing never blocks step timing:
+
 ```c
-// Main loop processes motion phases in order
-switch (appData.motionPhase) {
-    case MOTION_PHASE_VELOCITY:   // Update step rate
-    case MOTION_PHASE_BRESENHAM:  // Update error terms
-    case MOTION_PHASE_SCHEDULE:   // Update OCx registers
-    case MOTION_PHASE_COMPLETE:   // Check completion
-    case MOTION_PHASE_IDLE:       // Safe for G-code processing
-}
+MOTION_PHASE_VELOCITY  = 0   // update step rate (accel/cruise/decel)
+MOTION_PHASE_BRESENHAM = 1   // accumulate error terms
+MOTION_PHASE_SCHEDULE  = 2   // write OCx registers
+MOTION_PHASE_COMPLETE  = 3   // check segment done, load next
+MOTION_PHASE_IDLE      = 255 // safe to process G-code / UART
+```
+
+### Flow Control
+
+```
+Command received
+  motionQueueCount > 0? → defer "ok" (okPending = true)
+  motionQueueCount == 0? → send "ok" immediately
+
+Segment completes → motionSegmentCompleted flag
+  → CheckDeferredOk(): if okPending && count==0 → send "ok"
 ```
 
 ---
 
-## 🎯 Design Principles
+## 📡 GRBL v1.1 Protocol
 
-### Code Style Best Practices
+### Supported G-Codes
 
-1. **External Variables**: Always declare in headers, never in function scope
-   ```c
-   // ✅ GOOD - Header declaration
-   extern volatile bool g_hard_limit_alarm;  // stepper.h
-   
-   // ❌ BAD - Function scope extern
-   void MyFunction(void) {
-       extern volatile bool g_hard_limit_alarm;  // DON'T!
-   }
-   ```
+| Code | Description |
+|------|-------------|
+| G0, G1 | Rapid / linear move |
+| G2, G3 | Arc (CW / CCW), helical |
+| G4 | Dwell (P seconds) |
+| G17, G18, G19 | Plane selection |
+| G20, G21 | Inches / mm |
+| G28, G30 | Go to predefined position |
+| G38.2–G38.5 | Probe toward/away |
+| G90, G91 | Absolute / incremental |
+| G92 | Set current position |
+| G10 L20 | Set work coordinate offset |
 
-2. **Array-Based Axis Control**: No switch statements
-   ```c
-   // ✅ GOOD - Loop over axes
-   for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-       SET_COORDINATE_AXIS(&target, axis, value[axis]);
-   }
-   
-   // ❌ BAD - Individual assignments
-   target.x = value_x;
-   target.y = value_y;
-   ```
+### Supported M-Codes
 
-3. **Debug System**: Compile-time with zero runtime overhead
-   ```c
-   // ✅ GOOD - Removed in release builds
-   DEBUG_PRINT_MOTION("[MOTION] Message\r\n");
-   
-   // ❌ BAD - Runtime overhead
-   if (debug_enabled) { printf(...); }
-   ```
+| Code | Description |
+|------|-------------|
+| M3, M4, M5 | Spindle CW / CCW / off |
+| M7, M8, M9 | Coolant mist / flood / off |
 
-4. **Single Instance Pattern**: All data in APP_DATA
-   ```c
-   // ✅ GOOD - Centralized in APP_DATA
-   appData.motionQueueCount
-   
-   // ❌ BAD - Static module data
-   static uint32_t motionQueueCount;
-   ```
+### Real-Time Commands
 
----
+| Char | Action |
+|------|--------|
+| `?` | Status report (no "ok") |
+| `!` | Feed hold |
+| `~` | Resume |
+| Ctrl+X | Soft reset + GRBL banner |
 
-## 📚 Documentation
+### System Commands
 
-- **[Settings Reference](docs/readme/SETTINGS_REFERENCE.md)** - GRBL parameters ($0-$132)
-- **[Debug System Tutorial](docs/readme/DEBUG_SYSTEM_TUTORIAL.md)** - Compile-time debugging
-- **[Memory Map](docs/readme/MEMORY_MAP.md)** - Flash layout and NVM details
-- **[Architecture](docs/readme/ARCHITECTURE.md)** - Technical deep dive
+| Command | Description |
+|---------|-------------|
+| `$$` | Print all settings |
+| `$n=v` | Set parameter n to value v |
+| `$I` | Build info |
+| `$G` | Modal state |
+| `$#` | Work offsets |
+| `$H` | Home all axes |
+| `$X` | Clear alarm |
+| `$C` | Toggle check mode |
+| `$RST=*` / `$RST=$` / `$RST=#` | Reset all / settings / WCS |
 
 ---
 
-## 🧪 Validated Test Results
+## ⚙️ Settings Reference
 
-**Rectangle Test**: ✅ Complete dual iteration (0,0,0 final position)  
-**Circle Test**: ✅ 20 segments, 0.025mm final error  
-**Arc Compensation**: ✅ $13 tolerance handles CAM rounding  
-**Back-to-Back Execution**: ✅ Multiple files without reset  
-**Soft Reset Recovery**: ✅ Ctrl+X + motion restart working  
+### Standard GRBL Parameters ($0–$132)
+
+| Param | Description | Default |
+|-------|-------------|---------|
+| $0 | Step pulse width (µs) | 10 |
+| $1 | Step idle delay (ms) | 25 |
+| $2 | Step port invert mask | 0 |
+| $3 | Direction port invert mask | 0 |
+| $4 | Step enable invert | 0 |
+| $5 | Limit pins invert | 0 |
+| $6 | Probe pin invert | 0 |
+| $10 | Status report mask | 1 |
+| $11 | Junction deviation (mm) | 0.010 |
+| $12 | Arc tolerance (mm/segment) | 0.002 |
+| $13 | Arc radius compensation tolerance (mm) | 0.002 |
+| $20 | Soft limits enable | 0 |
+| $21 | Hard limits enable | 0 |
+| $22 | Homing cycle enable | 0 |
+| $23 | Homing direction mask | 0 |
+| $24 | Homing feed rate (mm/min) | 500 |
+| $25 | Homing seek rate (mm/min) | 2000 |
+| $26 | Homing debounce (µs) | 250 |
+| $27 | Homing pull-off (mm) | 2.0 |
+| $100–$103 | Steps/mm — X Y Z A | 80 |
+| $110–$113 | Max rate (mm/min) — X Y Z A | 5000 |
+| $120–$123 | Acceleration (mm/s²) — X Y Z A | 200 |
+| $130–$133 | Max travel (mm) — X Y Z A | 200 |
+
+### TMC5160 Parameters ($200–$253) — active only when `HAS_TMC5160_AXIS`
+
+Applied immediately via SPI on write; persisted to NVM flash (SETTINGS_VERSION = 3).
+
+| Params | Axis | Description | Default |
+|--------|------|-------------|---------|
+| $200–$203 | X–A | Chopper mode: 1=StealthChop 2=SpreadCycle 3=Mixed 4=CoolStep | 1 |
+| $210–$213 | X–A | Run current (0–31) | 20 |
+| $220–$223 | X–A | Hold current (0–31) | 10 |
+| $230–$233 | X–A | Microstep resolution (0=256µ … 8=full step) | 4 (16µ) |
+| $240–$243 | X–A | TPWMTHRS — StealthChop→SpreadCycle crossover | 500 |
+| $250–$253 | X–A | TCOOLTHRS — CoolStep lower velocity threshold | 0 |
+
+Format: `$2XY=value` — X = tens digit (0=mode, 1=irun, 2=ihold, 3=mres, 4=pwmthrs, 5=coolthrs), Y = axis (0=X, 1=Y, 2=Z, 3=A).
+
+**Example**: `$211=25` → set X-axis run current to 25.
 
 ---
 
-## 🔧 Troubleshooting
+## 🔍 G38.x Probe
 
-### Motors don't run after power-up
-- Check stepper enable pins (verify $4 invert setting)
-- Run `$H` to home if hard limits enabled
-- Send `$X` if in alarm state
+Implemented using Z-Max limit pin as probe input. The `$6` setting inverts the polarity for NO/NC switch wiring.
 
-### Settings lost after power cycle
-- Verify flash address is KSEG0 (0x9D...) not KSEG1 (0xBD...)
-- Check `SETTINGS_VERSION` matches flash data
-- Use `$RST=$` to restore defaults
+| Command | Behaviour |
+|---------|-----------|
+| G38.2 | Probe toward — alarm on no contact |
+| G38.3 | Probe toward — no alarm on miss |
+| G38.4 | Probe away — alarm on no contact |
+| G38.5 | Probe away — no alarm on miss |
 
-### Motion jerky or stuttering
-- Increase acceleration ($120-$123 settings)
-- Verify steps/mm calibration ($100-$103)
-- Check microstepping matches driver config
+**Response on success**: `[PRB:x,y,z,a:1]` then `ok`
+**Response on failure**: `[PRB:x,y,z,a:0]` then `ok` (or `ALARM:5` for G38.2/G38.4)
+
+Position is captured at the exact moment of trigger — no automatic backoff.
 
 ---
 
-## 🔌 LitePlacer Integration Requirements
+## 🗂️ File Structure
 
-**Status**: 🚧 In Progress - Implementation Checklist
-
-This firmware is being integrated with LitePlacer Pick-and-Place software. Below are the requirements that need verification/implementation for seamless integration.
-
-### 📡 Protocol Requirements
-
-#### 1. **Position Reporting Format** ⬜ TODO
-**Required**: Standard GRBL status query response
-
-**Send**: `?`
-
-**Expected Response**:
 ```
-<Idle|MPos:43.123,12.456,78.901,0.000|FS:0,0>
+Pic32mzCNC_V3/
+├── srcs/
+│   ├── app.c                  # Main state machine
+│   ├── main.c                 # Entry point
+│   ├── gcode/
+│   │   └── gcode_parser.c     # GRBL protocol, flow control, G38.x
+│   ├── motion/
+│   │   ├── stepper.c          # TMR4/OC1 hardware, ISR, Bresenham
+│   │   ├── motion.c           # Segment queue, phase system
+│   │   ├── kinematics.c       # Velocity profiling, arc math
+│   │   ├── homing.c           # $H 4-phase cycle
+│   │   ├── spindle.c          # M3/M5 OC8 PWM
+│   │   ├── motion_utils.c     # Enable/limit helpers
+│   │   └── tmc5160.c          # TMC5160 SPI driver [HAS_TMC5160_AXIS]
+│   ├── settings/
+│   │   └── settings.c         # NVM flash persistence
+│   └── utils/
+│       ├── utils.c            # GPIO abstraction (step/dir/enable/limit arrays)
+│       └── uart_utils.c       # Non-blocking UART helpers
+├── incs/
+│   ├── common.h               # Driver selection, debug flags
+│   ├── data_structures.h      # APP_DATA, MotionSegment, GCODE_CommandQueue
+│   ├── motion/tmc5160.h       # TMC5160 register map and API
+│   └── utils/utils.h          # Inline GPIO functions, PROBE_Get()
+├── bins/
+│   └── CNC_V3.hex             # Production firmware
+├── docs/readme/               # Detailed reference documents
+├── gcode_tests/               # Test G-code files
+├── tests/                     # Validation G-code files
+└── ps_commands/               # PowerShell test scripts
 ```
 
-**Format Details**:
-- State: `Idle`, `Run`, `Hold`, `Alarm`, `Home`, `Check`
-- MPos: Machine position (X, Y, Z, A in mm)
-- FS: Feed rate and spindle speed
-
-**Current Status**: ❓ Need to verify format
-- [ ] Test `?` command and capture output
-- [ ] Verify all 4 axes (XYZA) are reported
-- [ ] Confirm position precision (3 decimal places minimum)
-
 ---
 
-#### 2. **Probe Response (G38.2)** ⬜ TODO
-**Required**: Probe position feedback after successful trigger
+## 🔨 Build
 
-**Send**: `G38.2 Z-100 F300`
+Always run `make` from the repository root.
 
-**Expected Response Option A** (Preferred):
+```powershell
+# Release build (default)
+make
+
+# With serial debug output
+make DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"
+
+# Clean then build
+make clean && make
 ```
-[PRB:43.123,12.456,78.901,0.000:1]
-ok
+
+**Output**: `bins/CNC_V3.hex`
+
+**Available `DEBUG_FLAGS`** (compile-time, zero release overhead):
+
+| Flag | Traces |
+|------|--------|
+| `DEBUG_MOTION` | Motion planning, segment execution |
+| `DEBUG_GCODE` | G-code parsing, event processing |
+| `DEBUG_STEPPER` | ISR, pulse generation |
+| `DEBUG_SEGMENT` | Segment loading, queue management |
+| `DEBUG_UART` | UART communication |
+| `DEBUG_APP` | Application state machine |
+
+### Flash
+
+```powershell
+# USB HID bootloader
+C:\Users\davec\GIT\MikroC_bootloader\bins\mikro_hb.exe bins\CNC_V3.hex
 ```
-- `PRB:` probe result message
-- Position where probe triggered (XYZA)
-- `:1` = success, `:0` = failed (no contact)
 
-**Expected Response Option B** (Acceptable):
+Or use the **Flash MikroC Bootloader (USB)** task in VS Code.
+
+---
+
+## 🧪 Testing
+
+```powershell
+# Run a G-code file
+.\ps_commands\test_gcode.ps1 -FilePath .\gcode_tests\01_simple_square.gcode
+
+# Rectangle (double iteration)
+.\ps_commands\test_double_rectangle.ps1
 ```
-ok
-<Idle|MPos:43.123,12.456,78.901,0.000>
+
+**Manual via PuTTY** (115200, 8N1):
+
 ```
-- Position in subsequent status query
-
-**Current Status**: ❓ Need to implement/verify
-- [ ] Verify G38.2 is implemented
-- [ ] Test probe trigger detection
-- [ ] Capture probe response format
-- [ ] Verify Z position preservation (no reset to 0)
-- [ ] Test probe failure timeout
-
-**Critical for LitePlacer**: 
-- Probe MUST preserve Z position where switch triggers
-- No automatic backoff/reset during calibration
-- Position accuracy within 0.1mm
-
----
-
-#### 3. **Error and Alarm Handling** ⬜ TODO
-**Required**: Clear error/alarm messages for fault recovery
-
-**Expected Formats**:
-
-**Errors** (recoverable):
+?              # Status report
+$$             # View all settings
+$H             # Home all axes
+$X             # Clear alarm
+G90 G21        # Absolute, mm
+G1 X10 F500    # Move X 10 mm
+G38.2 Z-10 F100  # Probe toward Z
 ```
-error:9
+
+### Validated Results
+
+| Test | Result |
+|------|--------|
+| Rectangle — dual iteration | ✅ Pass |
+| Circle — 20 segments, 0.025 mm error | ✅ Pass |
+| Arc radius compensation | ✅ Pass |
+| Back-to-back file execution | ✅ Pass |
+| Soft reset recovery (Ctrl+X) | ✅ Pass |
+| G38.x probe | ⏳ Pending hardware test |
+
+---
+
+## 💾 Memory Map
+
 ```
-- Numeric error codes (GRBL standard)
-- See [GRBL Error Codes](https://github.com/gnea/grbl/wiki/Grbl-v1.1-Interface#grbl-response-messages)
-
-**Alarms** (require reset):
+0x9D000000 – 0x9D17FFFF   Application code (~1.5 MB)
+0x9D180000 – 0x9D183FFF   GRBL settings NVM (16 KB, KSEG0 0x9D...)
+0x9D1F4000 – 0x9D1FFFFF   MikroE USB HID bootloader (48 KB)
+0xBFC00000 – 0xBFC02FFF   Boot flash / config words (12 KB)
 ```
-ALARM:1
-```
-- Numeric alarm codes
-- Machine enters locked state
-- Requires `$X` to unlock
 
-**Current Status**: ❓ Need to verify
-- [ ] Test invalid G-code (trigger error)
-- [ ] Test limit switch trigger (trigger alarm)
-- [ ] Verify `$X` unlock command
-- [ ] Capture error/alarm message formats
+> NVM writes use KSEG0 (0x9D…) addresses — **not** KSEG1 (0xBD…).
 
 ---
 
-#### 4. **Settings Commands** ✅ CONFIRMED
-**Required**: GRBL settings management
+## 📚 Reference Documents
 
-| Command | Description | Status |
-|---------|-------------|--------|
-| `$$` | View all settings | ✅ Verified in README |
-| `$100=80` | Set steps/mm for X | ✅ Standard GRBL |
-| `$H` | Home all axes | ✅ Verified in README |
-| `$X` | Clear alarm state | ✅ Standard GRBL |
-| `$RST=$` | Reset to defaults | ✅ Verified in README |
-
-**Current Status**: ✅ Confirmed working
-- [x] All commands documented in README
+- [Settings Reference](docs/readme/SETTINGS_REFERENCE.md)
+- [Debug System Tutorial](docs/readme/DEBUG_SYSTEM_TUTORIAL.md)
+- [Memory Map](docs/readme/MEMORY_MAP.md)
+- [Architecture](docs/readme/ARCHITECTURE.md)
+- [LitePlacer GRBL Implementation](docs/readme/LITEPLACER_GRBL_IMPLEMENTATION.md)
+- [Development Log](STATUS.md)
 
 ---
 
-#### 5. **Real-Time Commands** ✅ CONFIRMED
-**Required**: Non-blocking emergency controls
-
-| Command | Description | Status |
-|---------|-------------|--------|
-| `?` | Status query | ✅ Verified in README |
-| `!` | Feed hold | ✅ Verified in README |
-| `~` | Resume | ✅ Verified in README |
-| `Ctrl+X` | Soft reset | ✅ Verified in README |
-
-**Current Status**: ✅ Confirmed working
-
----
-
-### 🔌 Hardware Interface Requirements
-
-#### 6. **Limit Switch Configuration** ⬜ TODO
-**Required**: GPIO mapping for limit/probe inputs
-
-**Questions**:
-1. Which GPIO pins are limit switches?
-   ```c
-   // Example needed:
-   #define LIMIT_X_PIN     PORTAbits.RA0
-   #define LIMIT_Y_PIN     PORTAbits.RA1
-   #define LIMIT_Z_MIN_PIN PORTAbits.RA2
-   #define LIMIT_Z_MAX_PIN PORTAbits.RA3  // Used as probe input
-   ```
-
-2. Is Z-max limit switch used as probe input?
-   - [ ] Yes - shared pin (standard GRBL)
-   - [ ] No - separate probe pin
-
-3. Active HIGH or LOW?
-   - [ ] Active HIGH (switch closes to +5V)
-   - [ ] Active LOW (switch closes to GND)
-
-4. Are pull-up/pull-down resistors enabled?
-   - [ ] Internal pull-ups enabled
-   - [ ] External resistors used
-
-**Current Status**: ❓ Need GPIO documentation
-- [ ] Document limit switch pin assignments
-- [ ] Confirm probe input configuration
-- [ ] Test switch trigger detection
-
----
-
-#### 7. **Serial Communication Settings** ✅ CONFIRMED
-**Required**: UART configuration for host communication
-
-| Setting | Value | Status |
-|---------|-------|--------|
-| Baud Rate | 115200 | ✅ Confirmed in README |
-| Data Bits | 8 | ✅ Standard |
-| Stop Bits | 1 | ✅ Standard |
-| Parity | None | ✅ Standard |
-| Flow Control | None | ❓ Need verification |
-
-**Questions**:
-- Do you use XON/XOFF software flow control?
-  - [ ] Yes - send XOFF when buffer full
-  - [ ] No - rely on deferred "ok" responses
-
-- Do you use RTS/CTS hardware flow control?
-  - [ ] Yes - hardware handshaking
-  - [ ] No - not implemented
-
-**Current Status**: ✅ Mostly confirmed
-- [x] Baud rate verified (115200)
-- [ ] Flow control method needs verification
-
----
-
-### 🧪 Test Cases for Integration
-
-#### Test 1: Status Query Loop ⬜ TODO
-```gcode
-?
-?
-?
-```
-**Expected**: 3 status reports with current position
-**Verify**: Position format matches expected
-
----
-
-#### Test 2: Simple Movement ⬜ TODO
-```gcode
-G90 G21
-G0 X10 Y10
-?
-```
-**Expected**: Machine moves to (10,10), status shows MPos:10.000,10.000,...
-
----
-
-#### Test 3: Probe Calibration Sequence ⬜ TODO
-```gcode
-G90 G21
-G0 Z50
-G38.2 Z-40 F300
-?
-```
-**Expected**: 
-1. Probe triggers at ~Z=43mm
-2. Either `[PRB:x,y,43.xxx,a:1]` or position in status
-3. Z position preserved (not reset to 0)
-
----
-
-#### Test 4: Error Recovery ⬜ TODO
-```gcode
-G999
-$X
-?
-```
-**Expected**:
-1. `error:X` (invalid G-code)
-2. Machine recovers
-3. Status shows Idle state
-
----
-
-#### Test 5: Alarm and Clear ⬜ TODO
-```gcode
-(Trigger limit switch manually)
-$X
-?
-```
-**Expected**:
-1. `ALARM:X`
-2. `$X` clears alarm
-3. Status shows Idle, not Alarm
-
----
-
-### 📋 Implementation Priority
-
-| Priority | Item | Estimated Effort | Status |
-|----------|------|------------------|--------|
-| 🔴 HIGH | Verify G38.2 probe implementation | 2-4 hours | ⬜ TODO |
-| 🔴 HIGH | Test probe position reporting | 1 hour | ⬜ TODO |
-| 🔴 HIGH | Capture protocol responses | 1 hour | ⬜ TODO |
-| 🟡 MEDIUM | Document GPIO limit switch pins | 30 min | ⬜ TODO |
-| 🟡 MEDIUM | Verify error/alarm formats | 1 hour | ⬜ TODO |
-| 🟢 LOW | Document flow control method | 15 min | ⬜ TODO |
-
----
-
-### 🎯 Next Steps
-
-1. **Protocol Capture Session** (30-60 minutes)
-   - Connect to firmware via serial terminal (PuTTY/Tera Term)
-   - Send test commands from Test Cases above
-   - Copy/paste all responses to a text file
-   - Share output for LitePlacer integration code
-
-2. **GPIO Documentation** (15-30 minutes)
-   - Review `srcs/utils/utils.c` or hardware config
-   - Document limit switch pin assignments
-   - Note active HIGH/LOW configuration
-
-3. **Integration Development** (LitePlacer side)
-   - Create `PIC32MZGrblControl.cs` class
-   - Implement GRBL protocol parser
-   - Test with captured protocol responses
-   - Integrate into LitePlacer CNC abstraction
-
----
-
-### 📞 Contact for Integration
-
-**Integration Partner**: LitePlacer-DEV project  
-**Repository**: https://github.com/Davec6505/LitePlacer-DEV  
-**Branch**: patch1  
-**Integration Lead**: Dave C
-
-**Questions/Issues**: Create issue in LitePlacer-DEV repo with tag `pic32mz-integration`
-
----
-
-## 📄 License
-
-Proprietary - All rights reserved.
-
----
-
-**Firmware Build**: `1.1h.20251120`  
-**Hardware**: PIC32MZ2048EFH100 @ 200MHz  
+**Hardware**: PIC32MZ2048EFH100 @ 200 MHz
+**Compiler**: XC32 v4.60
 **Repository**: github.com/Davec6505/Pic32mzCNC_V3
+**Integration target**: [LitePlacer-DEV](https://github.com/Davec6505/LitePlacer-DEV)
