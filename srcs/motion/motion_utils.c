@@ -14,15 +14,8 @@ const GPIO_PIN DIR_PINS[AXIS_COUNT] = {
     DirA_PIN     // AXIS_A = 3
 };
 
-// Enable GPIO pin numbers (indexed by axis) — legacy discrete drivers only
-#ifndef STEPPER_DRIVER_TMC5160
-const GPIO_PIN EN_PINS[AXIS_COUNT] = {
-    EnX_PIN,     // AXIS_X = 0
-    EnY_PIN,     // AXIS_Y = 1
-    EnZ_PIN,     // AXIS_Z = 2
-    EnA_PIN      // AXIS_A = 3
-};
-#endif
+// Enable GPIO pin numbers: PCB has ONE shared enable pin (EnXYZA / RE6).
+// No per-axis EN_PINS array — use enable_all_set/clear() or STEPPERS_Enable/Disable().
 
 // Step GPIO pin numbers (indexed by axis)
 // NOTE: Step pins are configured as INPUTS (connected to OC modules)
@@ -95,18 +88,15 @@ void MOTION_UTILS_EnableAxis(E_AXIS axis, bool enable, uint8_t invert_mask)
  */
 void MOTION_UTILS_EnableAllAxes(bool enable, uint8_t invert_mask)
 {
-#ifdef STEPPER_DRIVER_TMC5160
-    // Single shared EN pin — ignore per-axis invert mask, ENN is active LOW
-    if(enable) {
-        STEPPERS_Enable();   // Pull ENN low  → all drivers active
+    // PCB has a single shared EnXYZA (RE6) enable pin.
+    // STEPPERS_Enable/Disable() handles both TMC5160 (ENN active-LOW) and
+    // DRV8825 axes through the shared pin — no per-axis dispatch needed.
+    (void)invert_mask;  // Shared pin: invert mask not applicable
+    if (enable) {
+        STEPPERS_Enable();   // Pull ENN low  -> all drivers active
     } else {
-        STEPPERS_Disable();  // Pull ENN high → all drivers disabled
+        STEPPERS_Disable();  // Pull ENN high -> all drivers disabled
     }
-#else
-    for(uint8_t axis = 0; axis < AXIS_COUNT; axis++){
-        MOTION_UTILS_EnableAxis((E_AXIS)axis, enable, invert_mask);
-    }
-#endif
 }
 
 /* Disable all axes (safety function - no inversion check)

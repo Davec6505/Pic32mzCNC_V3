@@ -17,10 +17,11 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "common.h"           // For STEPPER_DRIVER_TMC5160 define
+#include "common.h"           // For HAS_TMC5160_AXIS, AXIS_x_DRIVER defines
 #include "data_structures.h"  // For E_AXIS
+#include "settings/settings.h" // For CNC_Settings (TMC5160_ApplySettings)
 
-#ifdef STEPPER_DRIVER_TMC5160
+#ifdef HAS_TMC5160_AXIS
 
 // ===== TMC5160 REGISTER MAP =====
 #define TMC5160_REG_GCONF       0x00  // Global configuration
@@ -28,8 +29,11 @@
 #define TMC5160_REG_IOIN        0x04  // Inputs
 #define TMC5160_REG_IHOLD_IRUN  0x10  // Current control
 #define TMC5160_REG_TPOWERDOWN  0x11  // Power-down delay after standstill
-#define TMC5160_REG_TPWMTHRS    0x13  // StealthChop upper velocity threshold
+#define TMC5160_REG_TPWMTHRS    0x13  // StealthChop upper velocity threshold (MIXED: SC→SpreadCycle crossover)
+#define TMC5160_REG_TCOOLTHRS   0x14  // CoolStep / StallGuard2 lower velocity threshold
+#define TMC5160_REG_THIGH       0x15  // High-speed full-stepping threshold
 #define TMC5160_REG_CHOPCONF    0x6C  // Chopper configuration + microstep
+#define TMC5160_REG_COOLCONF    0x6D  // CoolStep and StallGuard2 configuration
 #define TMC5160_REG_DRVSTATUS   0x6F  // Driver status flags (read-only)
 #define TMC5160_REG_PWMCONF     0x70  // StealthChop PWM configuration
 #define TMC5160_REG_PWM_SCALE   0x71  // StealthChop amplitude (read-only)
@@ -70,14 +74,21 @@
 #define TMC5160_DRVSTATUS_SG_RESULT_MASK  0x3FFUL
 
 // ===== DRIVER CONFIGURATION =====
-// Adjust these per your hardware (motor current, microstepping)
+// Adjust irun/ihold to your motor + sense resistor combination.
+// mode comes from AXIS_x_TMC_MODE in common.h.
 typedef struct {
-    uint8_t  irun;        // Run current  0-31 (maps to ~32 steps of Vref)
-    uint8_t  ihold;       // Hold current 0-31 (typically 50% of irun)
+    uint8_t  irun;        // Run current  0-31 (~32 steps of Vref)
+    uint8_t  ihold;       // Hold current 0-31 (typically 30-50% of irun)
     uint8_t  iholddelay;  // Hold current ramp-down delay (0-15, x2^18 clk)
     uint8_t  mres;        // Microstep resolution (TMC5160_MRES_xxx)
-    bool     stealthchop; // Enable StealthChop (quiet) mode
-    uint32_t tpwm_thrs;   // StealthChop speed threshold (0=always on)
+    uint8_t  mode;        // Chopper mode (TMC5160_MODE_xxx from common.h)
+    uint32_t tpwm_thrs;   // TPWMTHRS: StealthChop→SpreadCycle crossover velocity
+                          //   MIXED/COOLSTEP mode: set to mid-speed TSTEP value
+                          //   STEALTHCHOP mode:    0 (ignored, always StealthChop)
+                          //   SPREADCYCLE mode:    0 (ignored, SpreadCycle always)
+    uint32_t tcoolthrs;   // TCOOLTHRS: CoolStep/StallGuard2 lower threshold
+                          //   COOLSTEP mode: set per motor (0 = all speeds)
+                          //   Other modes:   0 (CoolStep disabled)
 } TMC5160_AxisConfig;
 
 // ===== DIAGNOSTIC STATUS =====
@@ -107,6 +118,10 @@ uint32_t TMC5160_ReadRegister(E_AXIS axis, uint8_t reg);
 // Per-axis configuration (called from TMC5160_Initialize)
 void TMC5160_ConfigAxis(E_AXIS axis, const TMC5160_AxisConfig* cfg);
 
+// Apply runtime settings from CNC_Settings to a single axis (re-calls TMC5160_ConfigAxis)
+// Call after $200-$253 parameter changes via gcode_parser $n=v handler
+void TMC5160_ApplySettings(E_AXIS axis, const CNC_Settings* settings);
+
 // Get last polled status for an axis
 const TMC5160_Status* TMC5160_GetStatus(E_AXIS axis);
 
@@ -114,5 +129,5 @@ const TMC5160_Status* TMC5160_GetStatus(E_AXIS axis);
 void TMC5160_SetRunCurrent(E_AXIS axis, uint8_t irun);
 void TMC5160_SetHoldCurrent(E_AXIS axis, uint8_t ihold);
 
-#endif /* STEPPER_DRIVER_TMC5160 */
+#endif /* HAS_TMC5160_AXIS */
 #endif /* TMC5160_H */

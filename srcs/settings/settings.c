@@ -97,6 +97,18 @@ static const CNC_Settings default_settings = {
     .mm_per_arc_segment = 0.5f,    // $12 - Increased from 0.1mm - creates larger segments with reliable step counts
     .arc_tolerance = 0.002f,       // $13 - GRBL v1.1 default: 0.002mm (2 microns) for radius error compensation
     
+#ifdef HAS_TMC5160_AXIS
+    // TMC5160 runtime defaults ($200-$253)
+    // irun=20 (~63% of Vref), ihold=10, mres=4 (16 microsteps), mode=StealthChop
+    .tmc_mode       = {TMC5160_MODE_STEALTHCHOP, TMC5160_MODE_STEALTHCHOP,
+                       TMC5160_MODE_STEALTHCHOP, TMC5160_MODE_STEALTHCHOP},
+    .tmc_irun       = {20, 20, 20, 20},
+    .tmc_ihold      = {10, 10, 10, 10},
+    .tmc_mres       = { 4,  4,  4,  4},  // 4 = TMC5160_MRES_16 (16 microsteps)
+    .tmc_tpwm_thrs  = {500, 500, 500, 500},
+    .tmc_tcoolthrs  = {0, 0, 0, 0},
+#endif
+
     .checksum = 0  // Will be calculated
 };
 
@@ -289,6 +301,44 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 26: settings->homing_debounce = (uint32_t)value; break;
         case 27: settings->homing_pull_off = value; break;
         
+#ifdef HAS_TMC5160_AXIS
+        // TMC5160 axis mode ($200-$203)
+        case 200: settings->tmc_mode[0] = (uint8_t)value; break;
+        case 201: settings->tmc_mode[1] = (uint8_t)value; break;
+        case 202: settings->tmc_mode[2] = (uint8_t)value; break;
+        case 203: settings->tmc_mode[3] = (uint8_t)value; break;
+
+        // TMC5160 run current ($210-$213)
+        case 210: settings->tmc_irun[0] = (uint8_t)value; break;
+        case 211: settings->tmc_irun[1] = (uint8_t)value; break;
+        case 212: settings->tmc_irun[2] = (uint8_t)value; break;
+        case 213: settings->tmc_irun[3] = (uint8_t)value; break;
+
+        // TMC5160 hold current ($220-$223)
+        case 220: settings->tmc_ihold[0] = (uint8_t)value; break;
+        case 221: settings->tmc_ihold[1] = (uint8_t)value; break;
+        case 222: settings->tmc_ihold[2] = (uint8_t)value; break;
+        case 223: settings->tmc_ihold[3] = (uint8_t)value; break;
+
+        // TMC5160 microstep resolution ($230-$233)
+        case 230: settings->tmc_mres[0] = (uint8_t)value; break;
+        case 231: settings->tmc_mres[1] = (uint8_t)value; break;
+        case 232: settings->tmc_mres[2] = (uint8_t)value; break;
+        case 233: settings->tmc_mres[3] = (uint8_t)value; break;
+
+        // TMC5160 StealthChop->SpreadCycle threshold ($240-$243)
+        case 240: settings->tmc_tpwm_thrs[0] = (uint32_t)value; break;
+        case 241: settings->tmc_tpwm_thrs[1] = (uint32_t)value; break;
+        case 242: settings->tmc_tpwm_thrs[2] = (uint32_t)value; break;
+        case 243: settings->tmc_tpwm_thrs[3] = (uint32_t)value; break;
+
+        // TMC5160 CoolStep lower threshold ($250-$253)
+        case 250: settings->tmc_tcoolthrs[0] = (uint32_t)value; break;
+        case 251: settings->tmc_tcoolthrs[1] = (uint32_t)value; break;
+        case 252: settings->tmc_tcoolthrs[2] = (uint32_t)value; break;
+        case 253: settings->tmc_tcoolthrs[3] = (uint32_t)value; break;
+#endif
+
         default:
             return false;  // Invalid parameter
     }
@@ -345,7 +395,39 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         case 25: return settings->homing_seek_rate;
         case 26: return (float)settings->homing_debounce;
         case 27: return settings->homing_pull_off;
-        
+
+#ifdef HAS_TMC5160_AXIS
+        case 200: return (float)settings->tmc_mode[0];
+        case 201: return (float)settings->tmc_mode[1];
+        case 202: return (float)settings->tmc_mode[2];
+        case 203: return (float)settings->tmc_mode[3];
+
+        case 210: return (float)settings->tmc_irun[0];
+        case 211: return (float)settings->tmc_irun[1];
+        case 212: return (float)settings->tmc_irun[2];
+        case 213: return (float)settings->tmc_irun[3];
+
+        case 220: return (float)settings->tmc_ihold[0];
+        case 221: return (float)settings->tmc_ihold[1];
+        case 222: return (float)settings->tmc_ihold[2];
+        case 223: return (float)settings->tmc_ihold[3];
+
+        case 230: return (float)settings->tmc_mres[0];
+        case 231: return (float)settings->tmc_mres[1];
+        case 232: return (float)settings->tmc_mres[2];
+        case 233: return (float)settings->tmc_mres[3];
+
+        case 240: return (float)settings->tmc_tpwm_thrs[0];
+        case 241: return (float)settings->tmc_tpwm_thrs[1];
+        case 242: return (float)settings->tmc_tpwm_thrs[2];
+        case 243: return (float)settings->tmc_tpwm_thrs[3];
+
+        case 250: return (float)settings->tmc_tcoolthrs[0];
+        case 251: return (float)settings->tmc_tcoolthrs[1];
+        case 252: return (float)settings->tmc_tcoolthrs[2];
+        case 253: return (float)settings->tmc_tcoolthrs[3];
+#endif
+
         default:
             return 0.0f;
     }
@@ -412,6 +494,34 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     
 
 
+
+#ifdef HAS_TMC5160_AXIS
+    // TMC5160 runtime settings ($200-$253) - only shown when TMC5160 driver compiled in
+    len += sprintf(&settings_buffer[len], "$200=%u\r\n", settings->tmc_mode[0]);
+    len += sprintf(&settings_buffer[len], "$201=%u\r\n", settings->tmc_mode[1]);
+    len += sprintf(&settings_buffer[len], "$202=%u\r\n", settings->tmc_mode[2]);
+    len += sprintf(&settings_buffer[len], "$203=%u\r\n", settings->tmc_mode[3]);
+    len += sprintf(&settings_buffer[len], "$210=%u\r\n", settings->tmc_irun[0]);
+    len += sprintf(&settings_buffer[len], "$211=%u\r\n", settings->tmc_irun[1]);
+    len += sprintf(&settings_buffer[len], "$212=%u\r\n", settings->tmc_irun[2]);
+    len += sprintf(&settings_buffer[len], "$213=%u\r\n", settings->tmc_irun[3]);
+    len += sprintf(&settings_buffer[len], "$220=%u\r\n", settings->tmc_ihold[0]);
+    len += sprintf(&settings_buffer[len], "$221=%u\r\n", settings->tmc_ihold[1]);
+    len += sprintf(&settings_buffer[len], "$222=%u\r\n", settings->tmc_ihold[2]);
+    len += sprintf(&settings_buffer[len], "$223=%u\r\n", settings->tmc_ihold[3]);
+    len += sprintf(&settings_buffer[len], "$230=%u\r\n", settings->tmc_mres[0]);
+    len += sprintf(&settings_buffer[len], "$231=%u\r\n", settings->tmc_mres[1]);
+    len += sprintf(&settings_buffer[len], "$232=%u\r\n", settings->tmc_mres[2]);
+    len += sprintf(&settings_buffer[len], "$233=%u\r\n", settings->tmc_mres[3]);
+    len += sprintf(&settings_buffer[len], "$240=%lu\r\n", (unsigned long)settings->tmc_tpwm_thrs[0]);
+    len += sprintf(&settings_buffer[len], "$241=%lu\r\n", (unsigned long)settings->tmc_tpwm_thrs[1]);
+    len += sprintf(&settings_buffer[len], "$242=%lu\r\n", (unsigned long)settings->tmc_tpwm_thrs[2]);
+    len += sprintf(&settings_buffer[len], "$243=%lu\r\n", (unsigned long)settings->tmc_tpwm_thrs[3]);
+    len += sprintf(&settings_buffer[len], "$250=%lu\r\n", (unsigned long)settings->tmc_tcoolthrs[0]);
+    len += sprintf(&settings_buffer[len], "$251=%lu\r\n", (unsigned long)settings->tmc_tcoolthrs[1]);
+    len += sprintf(&settings_buffer[len], "$252=%lu\r\n", (unsigned long)settings->tmc_tcoolthrs[2]);
+    len += sprintf(&settings_buffer[len], "$253=%lu\r\n", (unsigned long)settings->tmc_tcoolthrs[3]);
+#endif
 
     // ✅ GRBL protocol: blank line + ok
     len += sprintf(&settings_buffer[len], "\r\nok\r\n");

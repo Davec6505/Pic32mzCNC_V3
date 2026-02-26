@@ -7,6 +7,19 @@
 
 ---
 
+## 🔧 UART3 TX Buffer Restored — February 26, 2026
+
+MCC regeneration (during SPI2/TMC5160 addition) reverted `UART3_WRITE_BUFFER_SIZE` from 1024 back
+to 256. This caused UGS to disconnect immediately after sending `$$` — the settings response
+(~400-500 bytes) overflowed the 256-byte TX ring buffer.
+
+- `srcs/config/default/peripheral/uart/plib_uart3.c:60` — `UART3_WRITE_BUFFER_SIZE` restored to `1024U`
+- `srcs/config/default/peripheral/uart/plib_uart3.c:61` — `UART3_WRITE_BUFFER_SIZE_9BIT` restored to `1024U >> 1`
+
+> ⚠️ After **any** MCC regeneration always verify `UART3_WRITE_BUFFER_SIZE = 1024U` in this file.
+
+---
+
 ## 🔧 Build System Flattened — February 26, 2026
 
 Removed `Debug`/`Release` subdirectory split from the build system. Single output path for all

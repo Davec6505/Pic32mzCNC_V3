@@ -18,7 +18,15 @@ static inline void __attribute__((always_inline)) led1_toggle(void) { LED1_Toggl
 static inline void __attribute__((always_inline)) led2_toggle(void) { LED2_Toggle(); }
 GPIO_ToggleFunc led_toggle[] = {led1_toggle, led2_toggle};
 
+
+
 // ===== AXIS GPIO WRAPPERS (following clean LED pattern) =====
+
+// Enable pin wrapper common enable pin for all stepper drives
+static inline void __attribute__((always_inline)) enable_all_set(void)   { EnXYZA_Set(); }
+static inline void __attribute__((always_inline)) enable_all_clear(void) { EnXYZA_Clear(); }
+static inline void __attribute__((always_inline)) enable_all_toggle(void) { EnXYZA_Toggle(); }
+
 // Step pin wrappers (one per axis)
 static inline void __attribute__((always_inline)) step_x_set(void)   { StepX_Set(); }
 static inline void __attribute__((always_inline)) step_x_clear(void) { StepX_Clear(); }
@@ -39,17 +47,6 @@ static inline void __attribute__((always_inline)) dir_z_clear(void) { DirZ_Clear
 static inline void __attribute__((always_inline)) dir_a_set(void)   { DirA_Set(); }
 static inline void __attribute__((always_inline)) dir_a_clear(void) { DirA_Clear(); }
 
-// Enable pin wrappers \u2014 legacy discrete drivers only
-#ifndef STEPPER_DRIVER_TMC5160
-static inline void __attribute__((always_inline)) enable_x_set(void)   { EnX_Set(); }
-static inline void __attribute__((always_inline)) enable_x_clear(void) { EnX_Clear(); }
-static inline void __attribute__((always_inline)) enable_y_set(void)   { EnY_Set(); }
-static inline void __attribute__((always_inline)) enable_y_clear(void) { EnY_Clear(); }
-static inline void __attribute__((always_inline)) enable_z_set(void)   { EnZ_Set(); }
-static inline void __attribute__((always_inline)) enable_z_clear(void) { EnZ_Clear(); }
-static inline void __attribute__((always_inline)) enable_a_set(void)   { EnA_Set(); }
-static inline void __attribute__((always_inline)) enable_a_clear(void) { EnA_Clear(); }
-#endif
 
 // Limit switch wrappers (min/max per axis)
 static inline bool __attribute__((always_inline)) x_min_get(void) { return X_Min_Get(); }
@@ -76,14 +73,7 @@ GPIO_ClearFunc axis_dir_clear[NUM_AXIS] = {
     dir_x_clear, dir_y_clear, dir_z_clear, dir_a_clear
 };
 
-#ifndef STEPPER_DRIVER_TMC5160
-GPIO_SetFunc axis_enable_set[NUM_AXIS] = {
-    enable_x_set, enable_y_set, enable_z_set, enable_a_set
-};
-GPIO_ClearFunc axis_enable_clear[NUM_AXIS] = {
-    enable_x_clear, enable_y_clear, enable_z_clear, enable_a_clear
-};
-#endif
+// Single shared EN pin (EnXYZA / RE6) covers all axes — no per-axis enable arrays needed.
 
 GPIO_GetFunc axis_limit_min_get[NUM_AXIS] = {
     x_min_get, y_min_get, z_min_get, a_min_get

@@ -8,18 +8,79 @@
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║                       HARDWARE CONFIGURATION                               ║
 // ║                                                                            ║
-// ║  Select stepper driver type at compile time.                               ║
-// ║  Uncomment ONE of the following to match the physical hardware.            ║
+// ║  Per-axis stepper driver assignment.  Edit the four AXIS_x_DRIVER lines   ║
+// ║  below to match your physical wiring.  Everything else is auto-derived.   ║
+// ║                                                                            ║
+// ║  Mixing is fully supported — e.g. X+Y = TMC5160, Z+A = DRV8825.          ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
-// ── Stepper driver selection: uncomment ONE, comment the other ──────────────
-// #define STEPPER_DRIVER_TMC5160   // TMC5160 via SPI2, single shared EN pin
-#define   STEPPER_DRIVER_LEGACY     // A4988/DRV8825/TMC2208, per-axis EN pins
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Driver type tokens (do NOT change these values) ─────────────────────────
+#define DRIVER_TMC5160  1   // TMC5160 via SPI2  — shared ENN pin (active LOW)
+#define DRIVER_DRV8825  2   // DRV8825 / A4988 / TMC2208 step-dir — uses shared EnXYZA pin
 
-#if !defined(STEPPER_DRIVER_TMC5160) && !defined(STEPPER_DRIVER_LEGACY)
-    #error "Hardware config error: define either STEPPER_DRIVER_TMC5160 or STEPPER_DRIVER_LEGACY in common.h"
+// ── Per-axis driver assignment: set each to DRIVER_TMC5160 or DRIVER_DRV8825 ─
+#define AXIS_X_DRIVER   DRIVER_DRV8825  // DRIVER_TMC5160 when TMC drivers arrive
+#define AXIS_Y_DRIVER   DRIVER_DRV8825  // DRIVER_TMC5160 when TMC drivers arrive
+#define AXIS_Z_DRIVER   DRIVER_DRV8825
+#define AXIS_A_DRIVER   DRIVER_DRV8825
+
+// ── Auto-derived aggregate flags (do NOT edit) ───────────────────────────────
+// HAS_TMC5160_AXIS — defined when ≥1 axis uses TMC5160; gates all SPI / TMC code.
+#if (AXIS_X_DRIVER == DRIVER_TMC5160) || (AXIS_Y_DRIVER == DRIVER_TMC5160) || \
+    (AXIS_Z_DRIVER == DRIVER_TMC5160) || (AXIS_A_DRIVER == DRIVER_TMC5160)
+    #define HAS_TMC5160_AXIS
 #endif
+
+// HAS_DRV8825_AXIS — defined when ≥1 axis uses a discrete driver with per-axis EN.
+#if (AXIS_X_DRIVER == DRIVER_DRV8825) || (AXIS_Y_DRIVER == DRIVER_DRV8825) || \
+    (AXIS_Z_DRIVER == DRIVER_DRV8825) || (AXIS_A_DRIVER == DRIVER_DRV8825)
+    #define HAS_DRV8825_AXIS
+#endif
+
+#if !defined(HAS_TMC5160_AXIS) && !defined(HAS_DRV8825_AXIS)
+    #error "Hardware config: at least one AXIS_x_DRIVER must be set to DRIVER_TMC5160 or DRIVER_DRV8825"
+#endif
+
+// ── TMC5160_AXIS_MASK ─────────────────────────────────────────────────────────
+// Compile-time bitmask: bit N set means axis N is a TMC5160.  Used by the
+// mixed-driver enable inlines in utils.h.  Bit positions match E_AXIS (X=0 …).
+#define TMC5160_AXIS_MASK \
+    (((AXIS_X_DRIVER == DRIVER_TMC5160) ? (1u << 0) : 0u) | \
+     ((AXIS_Y_DRIVER == DRIVER_TMC5160) ? (1u << 1) : 0u) | \
+     ((AXIS_Z_DRIVER == DRIVER_TMC5160) ? (1u << 2) : 0u) | \
+     ((AXIS_A_DRIVER == DRIVER_TMC5160) ? (1u << 3) : 0u))
+
+// ── TMC5160 chopper mode tokens (only consulted for DRIVER_TMC5160 axes) ──────
+//
+//  TMC5160_MODE_STEALTHCHOP  Voltage-mode chopper.  Completely silent at all
+//                            speeds.  Best for plotting, engraving, slow feeds.
+//                            (GCONF.en_pwm_mode=1, TPWMTHRS=0)
+//
+//  TMC5160_MODE_SPREADCYCLE  Advanced current-mode chopper.  Highest torque
+//                            and dynamics, slight audible switching noise.
+//                            Best for high-speed cutting feeds.
+//                            (GCONF.en_pwm_mode=0)
+//
+//  TMC5160_MODE_MIXED        StealthChop at low speed, automatic switch to
+//                            SpreadCycle above TPWMTHRS velocity threshold.
+//                            Best of both worlds for mixed-duty machines.
+//                            (GCONF.en_pwm_mode=1, TPWMTHRS=cfg->tpwm_thrs)
+//
+//  TMC5160_MODE_COOLSTEP     MIXED + CoolStep load-adaptive current reduction.
+//                            Saves up to 75% motor current at light loads.
+//                            Requires TCOOLTHRS and COOLCONF tuning per motor.
+//                            (as MIXED, plus TCOOLTHRS + COOLCONF written)
+#define TMC5160_MODE_STEALTHCHOP  1
+#define TMC5160_MODE_SPREADCYCLE  2
+#define TMC5160_MODE_MIXED        3
+#define TMC5160_MODE_COOLSTEP     4
+
+// ── Per-axis TMC5160 chopper mode: set each to a TMC5160_MODE_xxx token ───────
+// (Ignored for axes where AXIS_x_DRIVER == DRIVER_DRV8825)
+#define AXIS_X_TMC_MODE   TMC5160_MODE_STEALTHCHOP
+#define AXIS_Y_TMC_MODE   TMC5160_MODE_STEALTHCHOP
+#define AXIS_Z_TMC_MODE   TMC5160_MODE_STEALTHCHOP
+#define AXIS_A_TMC_MODE   TMC5160_MODE_STEALTHCHOP
 
 #define NUM_OF_AXIS 4  // X, Y, Z, A
 
@@ -55,8 +116,9 @@
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║                          DEBUG INFRASTRUCTURE                              ║
 // ║                                                                            ║
-// ║  Professional compile-time debug system with ZERO runtime overhead        ║
-// ║  Debug code is completely removed from release builds via preprocessor    ║
+// ║  Professional compile-time debug system with ZERO runtime overhead         ║
+// ║  in release builds.  Enable with DEBUG_FLAGS="DEBUG_MOTION DEBUG_G         
+// ║  Debug code is completely removed from release builds via preprocessor     
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
 // ===== HOW TO USE =====

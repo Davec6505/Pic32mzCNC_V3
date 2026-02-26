@@ -186,7 +186,7 @@ void APP_Tasks ( void )
             MOTION_Initialize();                            // Motion planning initialization  
             KINEMATICS_Initialize();                        // Initialize work coordinates
 
-#ifdef STEPPER_DRIVER_TMC5160
+#ifdef HAS_TMC5160_AXIS
             TMC5160_Initialize();                          // Configure TMC5160 drivers via SPI2
 #endif
             
@@ -234,7 +234,19 @@ void APP_Tasks ( void )
             // ✅ CRITICAL: Reload stepper invert masks ($0-$5) after settings loaded from flash
             // This ensures direction_invert_mask, step_pulse_invert_mask, enable_invert are current
             STEPPER_ReloadSettings();
-            
+
+#ifdef HAS_TMC5160_AXIS
+            // ✅ Re-apply TMC5160 driver config from flash-loaded settings
+            // TMC5160_Initialize() ran in APP_CONFIG with compile-time defaults;
+            // now apply whatever the user saved via $200-$253 at runtime.
+            {
+                E_AXIS ax;
+                for (ax = AXIS_X; ax < NUM_AXIS; ax++) {
+                    TMC5160_ApplySettings(ax, settings);
+                }
+            }
+#endif
+
             appData.state = APP_GCODE_INIT;
             break;
         }
@@ -251,7 +263,7 @@ void APP_Tasks ( void )
         case APP_IDLE:
         {
 
-#ifdef STEPPER_DRIVER_TMC5160
+#ifdef HAS_TMC5160_AXIS
             // Rate-limited TMC5160 DRVSTATUS diagnostic poll (~10Hz)
             // Uses CoreTimer tick difference to avoid blocking motion
             static uint32_t tmc_last_poll = 0;

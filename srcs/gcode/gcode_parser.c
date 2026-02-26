@@ -28,6 +28,9 @@
 #include "settings.h"
 #include "data_structures.h"
 #include "utils/uart_utils.h"
+#ifdef HAS_TMC5160_AXIS
+#include "motion/tmc5160.h"   // For TMC5160_ApplySettings()
+#endif
 #include "../config/default/peripheral/uart/plib_uart3.h"
 #include <xc.h>  // For RSWRST, SYSKEY, and processor registers
 #include "definitions.h"                  // For T4CON/_T4CON_ON_MASK (hardware state)
@@ -1178,6 +1181,17 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     if (param <= 5) {
                         STEPPER_ReloadSettings();
                     }
+
+#ifdef HAS_TMC5160_AXIS
+                    // Re-apply TMC5160 configuration when motor driver params change ($200-$253)
+                    // Parameter layout: $2X0 = axis X, $2X1 = axis Y, $2X2 = Z, $2X3 = A
+                    if (param >= 200 && param <= 253) {
+                        uint32_t axis_idx = (uint32_t)param % 10;
+                        if (axis_idx < (uint32_t)NUM_AXIS) {
+                            TMC5160_ApplySettings((E_AXIS)axis_idx, s);
+                        }
+                    }
+#endif
                     
                     handled = true;
                 } else {

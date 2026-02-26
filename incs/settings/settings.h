@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "common.h"   // For HAS_TMC5160_AXIS, NUM_AXIS
 
 // CNC Controller Settings Structure
 typedef struct {
@@ -62,13 +63,24 @@ typedef struct {
     float g92_offset[3];           // G92 coordinate offset [X, Y, Z]
     float tool_length_offset;      // Tool length offset (TLO)
     
+#ifdef HAS_TMC5160_AXIS
+    // TMC5160 runtime tuning ($200-$253) — one slot per axis (0=X,1=Y,2=Z,3=A)
+    // DRV8825 axes have slots but values are unused / not sent to driver
+    uint8_t  tmc_mode[4];        // $200-$203: 1=StealthChop 2=SpreadCycle 3=Mixed 4=CoolStep
+    uint8_t  tmc_irun[4];        // $210-$213: run current 0-31
+    uint8_t  tmc_ihold[4];       // $220-$223: hold current 0-31
+    uint8_t  tmc_mres[4];        // $230-$233: microstep resolution (TMC5160_MRES_xxx)
+    uint32_t tmc_tpwm_thrs[4];   // $240-$243: Mixed mode StealthChop→SpreadCycle velocity threshold
+    uint32_t tmc_tcoolthrs[4];   // $250-$253: CoolStep lower velocity threshold
+#endif
+
     // CRC32 checksum (for validation)
     uint32_t checksum;
 } CNC_Settings;
 
 // Default settings
 #define SETTINGS_SIGNATURE 0x47524231  // "GRB1"
-#define SETTINGS_VERSION   2           // Incremented when structure changes (was 1)
+#define SETTINGS_VERSION   3           // Incremented when structure changes (was 2, added TMC5160 fields)
 
 // ✅ CRITICAL: Safe NVM storage location based on MikroE bootloader
 // PIC32MZ2048EFH100 Program Flash with MikroE Bootloader:
