@@ -54,6 +54,41 @@
 APP_DATA appData;
 
 // *****************************************************************************
+// E-Stop Callback — fired by CHANGE_NOTICE_F_InterruptHandler at IPL7
+// RF4 pulled LOW (falling edge) when E-Stop button pressed
+// *****************************************************************************
+static void ESTOP_Callback(GPIO_PIN pin, uintptr_t context)
+{
+    (void)pin;
+    (void)context;
+
+    // Debounce: ignore if pin bounced back HIGH
+    if (ESTOP_Get() != 0U) {
+        return;
+    }
+
+    // 1. Kill all steppers immediately (hardware level)
+    STEPPER_DisableAll();
+
+    // 2. Stop step timer
+    TMR4_Stop();
+
+    // 3. Kill spindle PWM
+    OCMP8_Disable();
+
+    // 4. Flush motion queue
+    appData.motionQueueCount = 0;
+    appData.motionQueueHead  = 0;
+    appData.motionQueueTail  = 0;
+    appData.currentSegment   = NULL;
+
+    // 5. Signal application state machine
+    appData.eStopTriggered = true;
+    appData.alarmCode      = 10;   // GRBL ALARM:10 = E-Stop
+    appData.state          = APP_ALARM;
+}
+
+// *****************************************************************************
 // *****************************************************************************
 // Section: Application Callback Functions
 // *****************************************************************************
@@ -189,7 +224,12 @@ void APP_Tasks ( void )
 #ifdef HAS_TMC5160_AXIS
             TMC5160_Initialize();                          // Configure TMC5160 drivers via SPI2
 #endif
-            
+
+            // Register E-Stop callback on RF4 (CN-F, IPL7)
+            // Button pressed → RF4 pulled LOW → falling edge fires CHANGE_NOTICE_F_Handler
+            GPIO_PinInterruptCallbackRegister(ESTOP_PIN, ESTOP_Callback, (uintptr_t)NULL);
+            ESTOP_InterruptEnable();
+
             appData.state = APP_LOAD_SETTINGS;
             break;
         }
@@ -570,7 +610,14 @@ void APP_Tasks ( void )
                 DEBUG_PRINT_APP("[APP_ALARM] Hard limit suppression cleared - all limits released\r\n");
             }
             
-            // ✅ Check if alarm cleared by $X command
+            // ✅ Report E-Stop alarm once to host
+            if (appData.eStopTriggered) {
+                UART_Printf("ALARM:10\r\n");  // E-Stop asserted
+                appData.eStopTriggered = false;
+                // Recovery: host must send Ctrl+X (soft reset) to clear
+            }
+
+            // ✅ Check if alarm cleared by $X command (hard limit)
             if (!g_hard_limit_alarm && appData.alarmCode == 1) {
                 // Hard limit alarm cleared - return to IDLE
                 DEBUG_PRINT_APP("[APP] Hard limit alarm cleared, returning to IDLE\r\n");

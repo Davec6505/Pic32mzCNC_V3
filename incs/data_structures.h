@@ -188,7 +188,8 @@ typedef struct {
     uint8_t modalPlane;       // G17=0 (XY), G18=1 (XZ), G19=2 (YZ)
     
     // Alarm state (GRBL safety)
-    uint8_t alarmCode;        // 0=no alarm, 1=hard limit, 2=soft limit, 3=abort, etc.
+    uint8_t alarmCode;        // 0=no alarm, 1=hard limit, 2=soft limit, 3=abort, 10=E-Stop
+    volatile bool eStopTriggered;  // Set by E-Stop ISR (RF4/CN-F IPL7)
     
     // ✅ Motion phase system (priority-based scheduling)
     volatile MotionPhase motionPhase;  // Current phase (set by ISR, read by main)

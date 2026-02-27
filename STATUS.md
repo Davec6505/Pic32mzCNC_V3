@@ -3,9 +3,28 @@
 **Branch**: `tmc5160`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: February 26, 2026
+**Last Updated**: February 27, 2026
 
 ---
+
+## ✅ E-Stop Hardware Interrupt — February 27, 2026
+
+E-Stop button on **RF4** (Change Notice Port F, IPL7) — highest priority ISR, beats OC1 at IPL5.
+
+**MCC Configuration**:
+- RF4 = digital input, internal pullup enabled, CN-F interrupt, IPL7SRS
+- SPI2 = IPL1 (lowest — only used at startup/idle, never during motion)
+- Interrupt vector: `CHANGE_NOTICE_F_Handler` → `CHANGE_NOTICE_F_InterruptHandler()` → `ESTOP_Callback()`
+
+**Changes**:
+- `incs/data_structures.h:191` — `alarmCode` comment updated; added `volatile bool eStopTriggered`
+- `srcs/app.c:57` — Added `ESTOP_Callback()` static function: disables steppers, stops TMR4, flushes motion queue, sets `alarmCode=10`, transitions to `APP_ALARM`
+- `srcs/app.c` (APP_CONFIG) — Registered `GPIO_PinInterruptCallbackRegister(ESTOP_PIN, ESTOP_Callback, NULL)` + `ESTOP_InterruptEnable()`
+- `srcs/app.c` (APP_ALARM) — Reports `ALARM:10\r\n` once on E-Stop; recovery via Ctrl+X soft reset from host
+
+**Recovery sequence**: Button released → host sends `Ctrl+X` → soft reset → `APP_IDLE`
+
+
 
 ## 🔧 UART3 TX Buffer Restored — February 26, 2026
 
