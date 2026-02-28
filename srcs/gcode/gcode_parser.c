@@ -158,6 +158,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     // Clear alarm but suppress hard limits until user moves off limit
     // This prevents immediate re-alarm after soft reset while on limit
     g_hard_limit_alarm = false;
+    g_estop_pending = false;        // Just in case ESTOP was pending when soft limit was hit.
     g_suppress_hard_limits = true;  // Will auto-clear in IDLE when limits released
     appData->alarmCode = 0;
     grblAlarm = false;
@@ -874,7 +875,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 if (grblAlarm) {
                     state = "Alarm";
                 } else if (feedHoldActive) {
-                    state = "Hold";
+                    state = "Hold:0";  // GRBL v1.1: Hold:0 = fully stopped, Hold:1 = decelerating
                 } else if (appData->arcGenState == ARC_GEN_ACTIVE) {
                     // Arc generator active → still processing arc segments
                     state = "Run";
@@ -902,7 +903,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
                     feedrate_mm_min, (unsigned)spindle_rpm,
                     grblCheckMode ? "|Cm:1" : "",
-                    feedHoldActive ? "|FH:1" : "");
+                    "");  // Hold state reported via state string (Hold:0), not separate flag
                 UART3_Write(txBuffer, response_len);
                 
                 // ⚠️ Real-time commands NEVER trigger deferred ok checks
@@ -912,12 +913,16 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             case '~': /* Cycle start / resume */
                 if (feedHoldActive) {
                     feedHoldActive = false;
-                    /* Future: Re-enable motion pipeline if paused */
+                    STEPPER_ResumeMotion();  // Restart TMR4/OC1 from frozen Bresenham state
+                    DEBUG_PRINT_GCODE("[GCODE] Feed hold released — motion resuming\r\n");
                 }
                 break;
             case '!': /* Feed hold */
-                feedHoldActive = true;
-                STEPPER_DisableAll();
+                if (!feedHoldActive) {
+                    feedHoldActive = true;
+                    STEPPER_PauseMotion();   // Stop pulses, keep steppers ENERGISED
+                    DEBUG_PRINT_GCODE("[GCODE] Feed hold active\r\n");
+                }
                 break;
             case 0x18: /* Soft reset (Ctrl+X) */
             {

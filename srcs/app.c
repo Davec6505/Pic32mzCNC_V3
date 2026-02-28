@@ -54,10 +54,10 @@
 APP_DATA appData;
 
 // *****************************************************************************
-// E-Stop Callback — fired by CHANGE_NOTICE_F_InterruptHandler at IPL7
+// E-Stop Callback — fired by EXTERNAL_3_InterruptHandler at IPL7
 // RF4 pulled LOW (falling edge) when E-Stop button pressed
 // *****************************************************************************
-static void ESTOP_Callback(GPIO_PIN pin, uintptr_t context)
+static void ESTOP_Callback(EXTERNAL_INT_PIN pin, uintptr_t context)
 {
     (void)pin;
     (void)context;
@@ -225,10 +225,11 @@ void APP_Tasks ( void )
             TMC5160_Initialize();                          // Configure TMC5160 drivers via SPI2
 #endif
 
-            // Register E-Stop callback on RF4 (CN-F, IPL7)
-            // Button pressed → RF4 pulled LOW → falling edge fires CHANGE_NOTICE_F_Handler
-            GPIO_PinInterruptCallbackRegister(ESTOP_PIN, ESTOP_Callback, (uintptr_t)NULL);
-            ESTOP_InterruptEnable();
+            // Register E-Stop callback on INT3 (RF4 via PPS, IPL7)
+            // Button pressed → RF4 pulled LOW → falling edge fires EXTERNAL_3_Handler
+            EVIC_ExternalInterruptCallbackRegister(EXTERNAL_INT_3, ESTOP_Callback, (uintptr_t)NULL);
+            EVIC_SourceStatusClear(INT_SOURCE_EXTERNAL_3);  // Clear any flag set during boot
+            EVIC_ExternalInterruptEnable(EXTERNAL_INT_3);
 
             appData.state = APP_LOAD_SETTINGS;
             break;

@@ -192,6 +192,11 @@
 #define X_Min_GetLatch()          ((LATA >> 4) & 0x1U)
 #define X_Min_PIN                  GPIO_PIN_RA4
 
+/*** Macros for ESTOP pin ***/
+#define ESTOP_Get()               ((PORTF >> 4) & 0x1U)
+#define ESTOP_GetLatch()          ((LATF >> 4) & 0x1U)
+#define ESTOP_PIN                  GPIO_PIN_RF4
+
 /*** Macros for Y_Min pin ***/
 #define Y_Min_Set()               (LATDSET = (1U<<0))
 #define Y_Min_Clear()             (LATDCLR = (1U<<0))

@@ -67,6 +67,7 @@
 // *****************************************************************************
 // *****************************************************************************
 void OUTPUT_COMPARE_1_Handler (void);
+void EXTERNAL_3_Handler (void);
 void TIMER_5_Handler (void);
 void SPI2_RX_Handler (void);
 void SPI2_TX_Handler (void);
@@ -84,6 +85,11 @@ void FLASH_CONTROL_Handler (void);
 void __attribute__((used)) __ISR(_OUTPUT_COMPARE_1_VECTOR, ipl4SRS) OUTPUT_COMPARE_1_Handler (void)
 {
     OUTPUT_COMPARE_1_InterruptHandler();
+}
+
+void __attribute__((used)) __ISR(_EXTERNAL_3_VECTOR, ipl7SRS) EXTERNAL_3_Handler (void)
+{
+    EXTERNAL_3_InterruptHandler();
 }
 
 void __attribute__((used)) __ISR(_TIMER_5_VECTOR, ipl4SRS) TIMER_5_Handler (void)

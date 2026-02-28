@@ -57,6 +57,11 @@ To ensure proper build configuration and output paths, always execute `make` com
 
 ## Critical Build Rules
 
+### ⚠️ NEVER Run `make clean` — Ask the User Instead
+Running `make clean` in the terminal via tool calls causes the terminal to freeze and become unresponsive.
+- ❌ **DO NOT** call `run_in_terminal` with `make clean` or `make clean && make`
+- ✅ **DO**: Ask the user to run `make clean` themselves in their terminal, then wait for confirmation before proceeding with `make`
+
 ## ­ƒÜÇ Current Implementation Status (November 13, 2025)
 
 ### Always Run Make from Root Directory

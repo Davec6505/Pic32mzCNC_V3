@@ -3,7 +3,25 @@
 **Branch**: `tmc5160`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: February 27, 2026
+**Last Updated**: February 28, 2026
+
+---
+
+## 🔧 Linker Fix: `g_estop_pending` moved to stepper.c — February 28, 2026
+
+After `make clean`, the linker reported `undefined reference to 'g_estop_pending'` from
+`gcode_parser.c:161`. Root cause: `g_estop_pending` was defined in `app.c` but the linker
+(with `--gc-sections` + `-fdata-sections`) failed to resolve it across the `app.o` → `gcode_parser.o`
+dependency. Fixed by moving the definition to `stepper.c` to match the established pattern
+used by `g_hard_limit_alarm` and `g_suppress_hard_limits` (both defined in `stepper.c`,
+declared in `stepper.h`, which is directly included by all consumers).
+
+- `srcs/motion/stepper.c:63` — Added `volatile bool g_estop_pending = false;`
+- `incs/motion/stepper.h:26` — Added `extern volatile bool g_estop_pending;`
+- `srcs/app.c:59` — Removed definition (replaced with comment referencing stepper.c)
+- `incs/app.h:22` — Removed `extern volatile bool g_estop_pending;` (now in stepper.h)
+
+Build result: ✅ **BUILD COMPLETE** (`bins/CNC_V3.hex`)
 
 ---
 

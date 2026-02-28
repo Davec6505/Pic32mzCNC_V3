@@ -2,7 +2,7 @@
 
 **Firmware:** Pic32mzCNC_V3  
 **GRBL Version:** v1.1 Compatible  
-**Last Updated:** November 8, 2025
+**Last Updated:** February 26, 2026
 
 ---
 
@@ -20,6 +20,7 @@
 | `$N` | View startup blocks | `$N` |
 | `$H` | Run homing cycle | `$H` |
 | `$RST=$` | Restore default settings | `$RST=$` |
+| `$SAVE` | Explicitly save current settings to flash | `$SAVE` |
 | `?` | Status report | `?` |
 | `!` | Feed hold (pause) | `!` |
 | `~` | Cycle start/resume | `~` |
@@ -49,16 +50,16 @@
 
 ---
 
-### Arc Configuration ($12)
+### Arc Configuration ($12-$13)
 
 | Parameter | Description | Default | Units | Range |
 |-----------|-------------|---------|-------|-------|
-| `$12` | Arc segment length | `0.1` | mm | 0.001-10.0 |
+| `$12` | Arc segment length | `0.5` | mm | 0.001-10.0 |
+| `$13` | Arc radius tolerance | `0.002` | mm | 0.0001-1.0 |
 
 **Notes:**
-- Smaller values = smoother arcs but slower execution
-- Larger values = faster but more faceted
-- GRBL standard default: 0.1mm
+- `$12`: Smaller values = smoother arcs but slower execution; larger values = faster but more faceted
+- `$13`: Maximum allowed difference between start and end radius of an arc. If exceeded, controller triggers an alarm. GRBL v1.1 default is 0.002mm (2 microns). Increase slightly if CAM software produces arcs with minor radius mismatch.
 
 ---
 
@@ -183,6 +184,89 @@ steps_per_mm = (200 steps/rev × 8 microsteps) / 5mm
 
 ---
 
+### TMC5160 Driver Settings ($200-$253)
+
+> **Note:** These settings are only active when the firmware is built with `HAS_TMC5160_AXIS` defined (i.e. at least one axis uses a TMC5160 driver). Settings take effect immediately via SPI — no reboot required.
+
+#### Chopper Mode ($200-$203)
+
+| Parameter | Axis | Description | Default |
+|-----------|------|-------------|---------|
+| `$200` | X | Chopper mode | `1` (StealthChop) |
+| `$201` | Y | Chopper mode | `1` (StealthChop) |
+| `$202` | Z | Chopper mode | `1` (StealthChop) |
+| `$203` | A | Chopper mode | `1` (StealthChop) |
+
+| Value | Mode | Description |
+|-------|------|-------------|
+| `1` | StealthChop | Silent, low-speed operation |
+| `2` | SpreadCycle | High-performance, higher noise |
+| `3` | Mixed | StealthChop below `$24x` threshold, SpreadCycle above |
+| `4` | CoolStep | Adaptive current scaling |
+
+#### Run Current ($210-$213)
+
+| Parameter | Axis | Description | Default | Range |
+|-----------|------|-------------|---------|-------|
+| `$210` | X | Run current (0–31 scale, ~0–100% of Vref) | `20` (~63%) | 0-31 |
+| `$211` | Y | Run current | `20` | 0-31 |
+| `$212` | Z | Run current | `20` | 0-31 |
+| `$213` | A | Run current | `20` | 0-31 |
+
+#### Hold Current ($220-$223)
+
+| Parameter | Axis | Description | Default | Range |
+|-----------|------|-------------|---------|-------|
+| `$220` | X | Hold current (motor idle) | `10` | 0-31 |
+| `$221` | Y | Hold current | `10` | 0-31 |
+| `$222` | Z | Hold current | `10` | 0-31 |
+| `$223` | A | Hold current | `10` | 0-31 |
+
+#### Microstep Resolution ($230-$233)
+
+| Parameter | Axis | Description | Default | Range |
+|-----------|------|-------------|---------|-------|
+| `$230` | X | MRES register value | `4` (16µ) | 0-8 |
+| `$231` | Y | MRES register value | `4` (16µ) | 0-8 |
+| `$232` | Z | MRES register value | `4` (16µ) | 0-8 |
+| `$233` | A | MRES register value | `4` (16µ) | 0-8 |
+
+| Value | Microsteps |
+|-------|------------|
+| `0` | 256 |
+| `1` | 128 |
+| `2` | 64 |
+| `3` | 32 |
+| `4` | 16 (default) |
+| `5` | 8 |
+| `6` | 4 |
+| `7` | 2 |
+| `8` | 1 (full step) |
+
+> **Important:** When changing `$230-$233`, also update `$100-$103` (steps/mm) to match the new microstep count.
+
+#### StealthChop→SpreadCycle Threshold ($240-$243)
+
+| Parameter | Axis | Description | Default |
+|-----------|------|-------------|---------|
+| `$240` | X | TPWMTHRS — velocity threshold for mode crossover (Mixed mode only) | `500` |
+| `$241` | Y | TPWMTHRS | `500` |
+| `$242` | Z | TPWMTHRS | `500` |
+| `$243` | A | TPWMTHRS | `500` |
+
+**Note:** Only active when chopper mode is `3` (Mixed). Higher value = switches to SpreadCycle earlier.
+
+#### CoolStep Lower Threshold ($250-$253)
+
+| Parameter | Axis | Description | Default |
+|-----------|------|-------------|---------|
+| `$250` | X | TCOOLTHRS — lower velocity threshold for CoolStep | `0` (disabled) |
+| `$251` | Y | TCOOLTHRS | `0` |
+| `$252` | Z | TCOOLTHRS | `0` |
+| `$253` | A | TCOOLTHRS | `0` |
+
+---
+
 ## Usage Examples
 
 ### View Current Settings
@@ -295,15 +379,21 @@ Shows all work coordinate systems (G54-G59) and G92 offset
 | Group | Parameters | Purpose |
 |-------|------------|---------|
 | Step Config | $0-$5 | Pulse timing and inversion |
-| Arc | $12 | Arc interpolation resolution |
+| Arc | $12-$13 | Arc interpolation resolution and radius tolerance |
 | Spindle | $30-$31 | RPM range |
 | Homing | $22-$27 | Homing cycle behavior |
 | Steps/mm | $100-$103 | Motion calibration |
 | Max Rates | $110-$113 | Speed limits |
 | Acceleration | $120-$123 | Motion dynamics |
 | Max Travel | $130-$132 | Soft limits |
+| TMC5160 Mode | $200-$203 | Chopper mode per axis |
+| TMC5160 Run I | $210-$213 | Run current per axis |
+| TMC5160 Hold I | $220-$223 | Hold current per axis |
+| TMC5160 MRES | $230-$233 | Microstep resolution per axis |
+| TMC5160 TPWM | $240-$243 | StealthChop crossover threshold per axis |
+| TMC5160 TCOOL | $250-$253 | CoolStep lower threshold per axis |
 
-**Total:** 29 configurable parameters
+**Total:** 31 core parameters + 24 TMC5160 parameters (when `HAS_TMC5160_AXIS` enabled)
 
 ---
 

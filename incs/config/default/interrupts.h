@@ -57,6 +57,7 @@
 // *****************************************************************************
 // *****************************************************************************
 void OUTPUT_COMPARE_1_InterruptHandler( void );
+void EXTERNAL_3_InterruptHandler( void );
 void TIMER_5_InterruptHandler( void );
 void SPI2_RX_InterruptHandler( void );
 void SPI2_TX_InterruptHandler( void );

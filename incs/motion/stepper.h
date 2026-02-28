@@ -24,6 +24,9 @@ extern volatile bool g_hard_limit_alarm;
 // Allows motion commands after soft reset even if on limit (operator can jog away from limit)
 extern volatile bool g_suppress_hard_limits;
 
+// ✅ E-STOP PENDING FLAG - Set by ESTOP_Callback ISR (app.c), cleared by soft reset / main loop
+extern volatile bool g_estop_pending;
+
 void STEPPER_Initialize(APP_DATA* appData);
 void STEPPER_LoadSegment(MotionSegment* segment);         // Load new segment for execution
 void STEPPER_SetStepRate(uint32_t rate_ticks);            // Update PR2 for velocity profiling
@@ -46,5 +49,13 @@ void STEPPER_ReloadSettings(void);
 
 /* Stop all motion and timers (for emergency stop, soft reset, etc.). */
 void STEPPER_StopMotion(void);
+
+/* Feed Hold: stop step pulses but keep steppers ENERGIZED (position preserved).
+   Call on '!' real-time command.  Bresenham state survives — resume is exact. */
+void STEPPER_PauseMotion(void);
+
+/* Feed Resume: restart TMR4/OC1 from the frozen Bresenham state.
+   Call on '~' real-time command after STEPPER_PauseMotion(). */
+void STEPPER_ResumeMotion(void);
 
 #endif /* STEPPER_H */

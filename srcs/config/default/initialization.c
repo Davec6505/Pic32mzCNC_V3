@@ -183,13 +183,15 @@ void SYS_Initialize ( void* data )
 
 
 	GPIO_Initialize();
-
-	UART3_Initialize();
-
-    CORETIMER_Initialize();
-    TMR6_Initialize();
+    LED1_Set();          /* DIAG: reached GPIO init OK */
 
     OCMP8_Initialize();
+
+    CORETIMER_Initialize();
+	UART3_Initialize();
+    LED2_Set();          /* DIAG: reached UART3 init OK */
+
+    TMR6_Initialize();
 
     TMR4_Initialize();
 
@@ -198,11 +200,13 @@ void SYS_Initialize ( void* data )
     OCMP1_Initialize();
 
 	SPI2_Initialize();
+    LED1_Clear();        /* DIAG: past SPI2 init */
 
     NVM_Initialize();
-
+    LED2_Clear();        /* DIAG: past NVM init */
 
     EVIC_Initialize();
+    LED1_Toggle();       /* DIAG: past EVIC init — both LEDs off if we get here */
 
 	/* Enable global interrupts */
     (void)__builtin_enable_interrupts();

@@ -62,6 +62,9 @@ volatile bool g_hard_limit_alarm = false;
 // Allows motion commands after soft reset even if on limit (operator can jog away)
 volatile bool g_suppress_hard_limits = false;
 
+// ✅ E-STOP PENDING FLAG - Set by ESTOP_Callback ISR (app.c), cleared by soft reset / main loop
+volatile bool g_estop_pending = false;
+
 // Position tracking (incremented/decremented by ISR based on direction)
 static StepperPosition stepper_pos = {
     .steps = {0, 0, 0, 0},                    // All axes start at zero
@@ -392,6 +395,59 @@ void STEPPER_StopMotion(void)
     OCMP1_Disable();
     
     DEBUG_PRINT_STEPPER("[STEPPER] Motion stopped (TMR4/OC1 disabled)\r\n");
+}
+
+// ============================================================================
+// Feed Hold / Resume (GRBL real-time '!' and '~')
+// ============================================================================
+
+void STEPPER_PauseMotion(void)
+{
+    // Stop pulse generation — TMR4 stop halts OC1 ISR completely.
+    // NOTE: Do NOT disable stepper drivers (keep EnXYZA active/low).
+    //       Keeping drivers energised holds motor position and lets resume
+    //       restart exactly from the frozen Bresenham state.
+    T4CONCLR  = _T4CON_ON_MASK;      // Stop TMR4 (step period timer)
+    T5CONCLR  = _T5CON_ON_MASK;      // Stop TMR5 (pulse-width clear timer)
+    OC1CONCLR = _OC1CON_ON_MASK;     // Disable OC1 (pulse output)
+
+    // Mark motion inactive in appData so '?' reports Hold state
+    if (app_data_ref != NULL) {
+        app_data_ref->motionActive = false;
+    }
+
+    DEBUG_PRINT_STEPPER("[STEPPER] Feed hold — pulses paused, steppers energised\r\n");
+}
+
+void STEPPER_ResumeMotion(void)
+{
+    // Guard: nothing to resume if no active segment
+    if (app_data_ref == NULL || app_data_ref->currentSegment == NULL) {
+        DEBUG_PRINT_STEPPER("[STEPPER] Resume called but no active segment — ignored\r\n");
+        return;
+    }
+
+    // Restore the step interval that was active when hold fired.
+    // currentStepInterval is updated every step by the velocity profiler,
+    // so it holds the exact rate at the moment of pause — perfect restart point.
+    uint16_t period = (uint16_t)app_data_ref->currentStepInterval;
+    const uint16_t MIN_PERIOD = 7;
+    if (period < MIN_PERIOD) period = MIN_PERIOD;
+
+    // Re-apply OC1 compare registers and period (same formula as STEPPER_LoadSegment)
+    TMR4_PeriodSet(period);
+    OCMP1_CompareValueSet(period - 5);           // OCxR: rising edge
+    OCMP1_CompareSecondaryValueSet(period - 3);  // OCxRS: falling edge ISR trigger
+
+    // Re-enable OC1 before starting TMR4 (per datasheet requirement)
+    OCMP1_Enable();
+
+    // Restart TMR4 — ISR fires again and continues Bresenham from frozen state
+    TMR4_Start();
+
+    app_data_ref->motionActive = true;
+
+    DEBUG_PRINT_STEPPER("[STEPPER] Feed resume — TMR4/OC1 restarted at interval=%u\r\n", period);
 }
 
 // ============================================================================
