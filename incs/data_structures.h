@@ -24,18 +24,6 @@ typedef enum {
 } E_AXIS;
 
 // ============================================================================
-// Motion Phase System (Priority-Based Task Scheduling)
-// ============================================================================
-
-typedef enum {
-    MOTION_PHASE_IDLE = 255,        // No motion active - safe for G-code processing
-    MOTION_PHASE_VELOCITY = 0,      // Highest priority - velocity conditioning
-    MOTION_PHASE_BRESENHAM = 1,     // Bresenham error accumulation
-    MOTION_PHASE_SCHEDULE = 2,      // OCx register scheduling
-    MOTION_PHASE_COMPLETE = 3       // Segment completion check
-} MotionPhase;
-
-// ============================================================================
 // Arc Generation State (Non-Blocking Incremental)
 // ============================================================================
 
@@ -195,10 +183,7 @@ typedef struct {
     uint8_t alarmCode;        // 0=no alarm, 1=hard limit, 2=soft limit, 3=abort, 10=E-Stop
     volatile bool eStopTriggered;  // Set by E-Stop ISR (RF4/CN-F IPL7)
     
-    // ✅ Motion phase system (priority-based scheduling)
-    volatile MotionPhase motionPhase;  // Current phase (set by ISR, read by main)
-    E_AXIS dominantAxis;               // Which axis is master for current segment
-    uint32_t currentStepInterval;      // Current interval (changes with velocity profile)
+    E_AXIS dominantAxis;               // Which axis drives the step clock for current segment
     MotionSegment* currentSegment;     // Pointer to active segment being executed
     
     // ✅ ARRAY-BASED: Bresenham state (for phase processing) [X, Y, Z, A]

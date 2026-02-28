@@ -38,7 +38,6 @@ extern volatile bool g_feed_hold_pending;
 
 void STEPPER_Initialize(APP_DATA* appData);
 void STEPPER_LoadSegment(MotionSegment* segment);         // Load new segment for execution
-void STEPPER_SetStepRate(uint32_t rate_ticks);            // Update PR2 for velocity profiling
 void STEPPER_SetDirection(E_AXIS axis, bool forward);     // Set direction for axis
 void STEPPER_DisableAll(void);                            // Emergency stop
 StepperPosition* STEPPER_GetPosition(void);               // Get current position (snapshot)

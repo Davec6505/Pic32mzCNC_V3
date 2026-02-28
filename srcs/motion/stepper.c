@@ -285,26 +285,6 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     }
 }
 
-// ============================================================================
-// Velocity Update (Called by Motion Module During Segment Execution)
-// ============================================================================
-
-void STEPPER_SetStepRate(uint32_t rate_ticks) {
-    // Enforce minimum rate to prevent TMR4 issues (16-bit mode)
-    const uint16_t MIN_RATE = 7;  // Minimum for pulse width requirements (5 + 2 ticks)
-    uint16_t period = (uint16_t)rate_ticks;
-    if (period < MIN_RATE) period = MIN_RATE;
-    if (period > 65535) period = 65535;  // Clamp to 16-bit max
-    
-    // Write ONLY the struct field. The ISR reads step_interval and programs
-    // PR4/OC1R/OC1RS itself every step — sole hardware writer is the ISR.
-    // Writing hardware registers here races with the ISR (PR4 may change
-    // between OC1R/OC1RS writes causing a datasheet violation and glitch).
-    if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
-        app_data_ref->currentSegment->step_interval = period;
-    }
-}
-
 bool STEPPER_IsEnabled(void)
 {
     return steppers_enabled;
@@ -600,7 +580,7 @@ void OCP1_ISR(uintptr_t context) {
         OCMP1_CompareValueSet(period - 5);                                  // Rising edge (pulse starts)
         OCMP1_CompareSecondaryValueSet(period - 3);                         // Falling edge (ISR trigger)
 
-        // Advance step counter (motionPhase left IDLE — MOTION_Tasks runs unconditionally)
+        // Advance step counter
         seg->steps_completed++;
     }
 }
