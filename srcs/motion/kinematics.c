@@ -281,7 +281,7 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     
     // Rate delta per step — accel phase
     if(accel_steps > 0) {
-        segment_buffer->rate_delta = (int32_t)((segment_buffer->initial_rate - segment_buffer->nominal_rate) / accel_steps);
+        segment_buffer->rate_delta = (segment_buffer->initial_rate - segment_buffer->nominal_rate) / accel_steps;
     } else {
         segment_buffer->rate_delta = 0;
     }
@@ -289,7 +289,7 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // Rate delta per step — decel phase (asymmetric: exit speed may differ from entry speed)
     uint32_t decel_steps_kin = (uint32_t)max_delta - segment_buffer->decelerate_after;
     if (decel_steps_kin > 0) {
-        segment_buffer->decel_rate_delta = (int32_t)((segment_buffer->final_rate - segment_buffer->nominal_rate) / decel_steps_kin);
+        segment_buffer->decel_rate_delta = (segment_buffer->final_rate - segment_buffer->nominal_rate) / decel_steps_kin;
     } else {
         segment_buffer->decel_rate_delta = 0;
     }

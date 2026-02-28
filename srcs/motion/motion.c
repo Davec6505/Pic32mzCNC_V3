@@ -153,7 +153,7 @@ static void MOTION_RecomputeExit(MotionSegment* seg, float new_exit_mms) {
     // Recompute decel_rate_delta for the updated decel phase
     uint32_t actual_decel = seg->steps_remaining - seg->decelerate_after;
     if (actual_decel > 0) {
-        seg->decel_rate_delta = (int32_t)((seg->final_rate - seg->nominal_rate) / actual_decel);
+        seg->decel_rate_delta = (seg->final_rate - seg->nominal_rate) / actual_decel;
     } else {
         seg->decel_rate_delta = 0;
     }

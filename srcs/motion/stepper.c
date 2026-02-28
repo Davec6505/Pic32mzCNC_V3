@@ -92,6 +92,8 @@ static volatile E_AXIS dominant_axis = AXIS_X;  // Pre-calculated dominant axis
 
 // ✅ ARRAY-BASED: Segment deltas (loaded when new segment starts)
 static volatile int32_t delta[NUM_AXIS] = {0, 0, 0, 0};
+// Pre-computed absolute values — eliminates abs() calls from ISR hot path
+static volatile uint32_t abs_delta[NUM_AXIS] = {0, 0, 0, 0};
 
 // Settings cache for ISR performance
 static uint8_t step_pulse_invert_mask = 0;
@@ -201,9 +203,10 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
         DEBUG_PRINT_STEPPER("[STEPPER_Load] Steppers already enabled\r\n");
     }
 
-    // ✅ ARRAY-BASED: Load deltas for Bresenham (single loop!)
+    // ✅ ARRAY-BASED: Load deltas for Bresenham (single loop!) + pre-compute abs values for ISR
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         delta[axis] = segment->delta[axis];
+        abs_delta[axis] = (uint32_t)(delta[axis] < 0 ? -delta[axis] : delta[axis]);
     }
     
     // Use pre-calculated dominant axis and delta from motion planning
@@ -521,8 +524,8 @@ void OCP1_ISR(uintptr_t context) {
         // Skip dominant axis and axes with zero delta
         if (axis == dominant_axis || delta[axis] == 0) continue;
         
-        // Bresenham error accumulation using direct array access
-        error[axis] += abs(delta[axis]);
+        // Bresenham error accumulation — abs_delta precomputed at segment load, zero call overhead
+        error[axis] += abs_delta[axis];
         if (error[axis] >= dominant_delta) {
             // Atomic GPIO step pulse - single instruction!
             AXIS_StepSet(axis);
@@ -539,9 +542,8 @@ void OCP1_ISR(uintptr_t context) {
     }
     
     // ===== START TMR5 FOR PULSE WIDTH =====
-    // TMR5 pre-configured to fire after 3µs (PR5=149, PBCLK3=50MHz, prescaler 1:1)
-    // TMR5 period is FIXED at 3µs - do NOT change it!
-    TMR5_Start();
+    // Direct SFR write — TMR5_Start() is a regular function call wrapping one register write
+    T5CONSET = _T5CON_ON_MASK;
     
     // ===== SCHEDULE NEXT STEP (CRITICAL!) =====
     // TMR4 rolls over at PR4, so we use RELATIVE compare values
@@ -554,31 +556,25 @@ void OCP1_ISR(uintptr_t context) {
         uint32_t sc = seg->steps_completed;
         if (sc < seg->accelerate_until) {
             // ACCEL: decrease interval (increase speed), floor at nominal_rate
-            uint32_t delta = (uint32_t)abs(seg->rate_delta);
-            seg->step_interval = (seg->step_interval > seg->nominal_rate + delta)
-                               ? seg->step_interval - delta
+            // rate_delta is uint32_t — no abs() needed, always positive
+            seg->step_interval = (seg->step_interval > seg->nominal_rate + seg->rate_delta)
+                               ? seg->step_interval - seg->rate_delta
                                : seg->nominal_rate;
         } else if (sc >= seg->decelerate_after) {
             // DECEL: increase interval (decrease speed), ceiling at final_rate
-            uint32_t next_iv = seg->step_interval + (uint32_t)seg->decel_rate_delta;
+            // decel_rate_delta is uint32_t — no abs() needed, always positive
+            uint32_t next_iv = seg->step_interval + seg->decel_rate_delta;
             seg->step_interval = (next_iv < seg->final_rate) ? next_iv : seg->final_rate;
         }
         // CRUISE: step_interval unchanged (already at nominal_rate)
 
-        uint32_t step_interval = seg->step_interval;  // Freshly updated for this step
-
-        // ✅ CRITICAL: Ensure period is large enough for pulse width requirements
-        const uint16_t MIN_PERIOD_FOR_PULSE = 7;  // 5 for rising edge offset + 2 for pulse width
-        uint16_t period = (uint16_t)step_interval;
-        if (period < MIN_PERIOD_FOR_PULSE) period = MIN_PERIOD_FOR_PULSE;
-        
-        // ✅ CRITICAL: Set TMR4 period AND OC1 compare values for continuous pulses
-        // Per datasheet 16.3.2.5: PR4 must be ≥ OC1RS > OC1R
-        // OC1R fires first (rising edge), OC1RS fires second (falling edge + ISR)
-        // Pulse width: 2.5µs = 2 ticks @ 781.25kHz (1:64 prescaler)
-        TMR4_PeriodSet(period);                                             // Timer period (controls step rate)
-        OCMP1_CompareValueSet(period - 5);                                  // Rising edge (pulse starts)
-        OCMP1_CompareSecondaryValueSet(period - 3);                         // Falling edge (ISR trigger)
+        // Direct SFR writes — eliminates 3 PLIB function calls (jal+prologue+epilogue each)
+        // PR4 must be >= OC1RS > OC1R per datasheet 16.3.2.5
+        uint16_t period = (uint16_t)seg->step_interval;
+        if (period < 7U) period = 7U;  // Minimum: 5 (rising offset) + 2 (pulse width)
+        PR4   = period;        // Step rate (TMR4 rolls over here)
+        OC1R  = period - 5U;   // Rising edge: pulse starts
+        OC1RS = period - 3U;   // Falling edge: ISR trigger (pulse width = 2 ticks = 2.5µs)
 
         // Advance step counter
         seg->steps_completed++;
