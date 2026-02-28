@@ -617,13 +617,69 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
             appData->motionQueueCount++;
 
-            // LOOK-AHEAD: retroactively patch N-1's exit to the junction speed just computed.
-            // When N arrives, we finally know what speed the N-1→N boundary must support.
-            // N-1 is in the queue but NOT yet executing — safe to rewrite its decel profile.
-            // Guard: skip if N-1 IS the currently-executing segment (motionQueueTail).
-            if (has_prev_patch && look_prev_index != appData->motionQueueTail) {
-                MOTION_RecomputeExit(&appData->motionQueue[look_prev_index], junction_speed);
-                DEBUG_PRINT_MOTION("[LOOKAHEAD] Patched N-1 exit to %.1f mm/s\r\n", junction_speed);
+            // ===== FULL BACKWARD PASS (Look-Ahead Planner) =====
+            // Now that segment N is queued, walk backward from N-1 toward the executing
+            // segment (motionQueueTail) and propagate speed constraints.
+            //
+            // Logic per step:
+            //   seg[i] can exit at v_exit only if it can decelerate from its entry_speed
+            //   to v_exit within its available steps:
+            //       v_achievable = sqrt(entry² + 2*a*dist)
+            //   If v_achievable <= required exit → this segment is already fine, stop.
+            //   If v_achievable >  required exit → clamp its exit and continue backward.
+            //
+            // The "required exit" for seg[i] is seg[i+1]->entry_speed_mms, because that
+            // is the speed the NEXT segment was built to start at.
+            //
+            // Guards:
+            //   - Never patch motionQueueTail (currently executing, ISR owns it)
+            //   - Never patch speed_locked segments (arc cruise is fixed)
+            //   - Stop as soon as no change is needed (speeds are already consistent)
+            if (has_prev_patch) {
+                // Required exit for N-1 is the entry we just computed for N
+                float required_exit = entry_velocity;   // == junction_speed for N-1→N
+                uint32_t i    = look_prev_index;
+                uint32_t tail = appData->motionQueueTail;
+
+                while (i != tail) {
+                    MotionSegment* seg = &appData->motionQueue[i];
+
+                    if (seg->speed_locked) {
+                        // Arc segment — its cruise speed is what the next segment must
+                        // match, but we cannot modify it. The required_exit for the
+                        // segment before this arc is the arc's own entry speed.
+                        required_exit = seg->entry_speed_mms;
+                        i = (i - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+                        continue;
+                    }
+
+                    // Maximum exit speed this segment can achieve given its entry speed
+                    // and the distance it has to decelerate.
+                    float dist_mm = (float)seg->steps_remaining
+                                    / *g_axis_settings[seg->dominant_axis].steps_per_mm;
+                    float v_achievable = sqrtf(seg->entry_speed_mms * seg->entry_speed_mms
+                                               + 2.0f * seg->acceleration * dist_mm);
+
+                    if (v_achievable <= required_exit) {
+                        // This segment is already decelerating enough — all earlier
+                        // segments must also be fine (speeds only decrease going back).
+                        break;
+                    }
+
+                    // Clamp exit to what the forward segment actually needs
+                    float new_exit = (v_achievable < seg->exit_speed_mms)
+                                     ? v_achievable : seg->exit_speed_mms;
+                    if (new_exit > required_exit) new_exit = required_exit;
+
+                    MOTION_RecomputeExit(seg, new_exit);
+                    DEBUG_PRINT_MOTION("[LOOKAHEAD] i=%lu exit patched to %.1f mm/s\r\n",
+                                      (unsigned long)i, new_exit);
+
+                    // The required exit for the segment before this one is this
+                    // segment's entry speed (unchanged — we never modify entry here).
+                    required_exit = seg->entry_speed_mms;
+                    i = (i - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+                }
             }
 
             // ✅ ARRAY-BASED: Update current position
