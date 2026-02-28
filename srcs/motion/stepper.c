@@ -296,22 +296,13 @@ void STEPPER_SetStepRate(uint32_t rate_ticks) {
     if (period < MIN_RATE) period = MIN_RATE;
     if (period > 65535) period = 65535;  // Clamp to 16-bit max
     
-    // ✅ CRITICAL: Update segment's step_interval so ISR uses new rate
+    // Write ONLY the struct field. The ISR reads step_interval and programs
+    // PR4/OC1R/OC1RS itself every step — sole hardware writer is the ISR.
+    // Writing hardware registers here races with the ISR (PR4 may change
+    // between OC1R/OC1RS writes causing a datasheet violation and glitch).
     if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
         app_data_ref->currentSegment->step_interval = period;
     }
-    
-    // Update PR4 - this changes the OC1 period
-    TMR4_PeriodSet(period);
-    
-    // ✅ CRITICAL: Update OC1R/OC1RS to maintain valid compare relationship
-    // OCxR near end of period, OCxRS = OCxR + pulse_width
-    // This ensures OCxRS < PR4 so compare fires before TMR4 rollover
-    // Pulse width: 2.5µs = 2 ticks @ 781.25kHz (1:64 prescaler)
-    // Period is guaranteed ≥ 7 ticks, so these values are always valid
-    
-    OCMP1_CompareValueSet(period - 5);                             // OCxR: Rising edge
-    OCMP1_CompareSecondaryValueSet(period - 3);                   // OCxRS: falling edge
 }
 
 bool STEPPER_IsEnabled(void)

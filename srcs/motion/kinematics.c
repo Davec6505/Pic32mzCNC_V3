@@ -255,9 +255,13 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     }
     
     // Junction-aware velocity planning
-    // ✅ FIX: Use actual feedrate as minimum, not arbitrary slow value
-    // This prevents starting segments at half speed unnecessarily
-    float min_steps_per_sec = steps_per_sec;  // Use target speed as minimum
+    // GRBL safe-start: maximum speed achievable from rest in a single step
+    // Formula: v = sqrt(2 * a * step_size) where step_size = 1/steps_per_mm
+    // This is the highest speed a motor can start/stop at without losing steps
+    float safe_start = sqrtf(2.0f * acceleration_mm_sec2 / steps_per_mm_dominant);
+    if (safe_start < 1.0f) safe_start = 1.0f;                  // Never below 1 step/sec
+    if (safe_start > feedrate_mm_sec) safe_start = feedrate_mm_sec;  // Cap at cruise
+    float min_steps_per_sec = safe_start * steps_per_mm_dominant;
     
     // Calculate entry and exit step rates from junction velocities
     float entry_steps_per_sec = fmaxf(entry_velocity * steps_per_mm_dominant, min_steps_per_sec);
@@ -291,9 +295,9 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // Motion state initialization
     segment_buffer->steps_remaining = max_delta;
     segment_buffer->steps_completed = 0;
-    // ⚠️ TEMPORARY: Use nominal_rate (cruise speed) until velocity profiling is connected
-    // TODO: Implement proper acceleration by updating step_interval in MOTION_PHASE_VELOCITY
-    segment_buffer->step_interval = segment_buffer->nominal_rate;
+    // Start at initial_rate (safe-start speed). ISR reads step_interval each tick.
+    // Main loop velocity profiler updates step_interval to ramp toward nominal_rate.
+    segment_buffer->step_interval = segment_buffer->initial_rate;
     
     // Pulse width from settings (reuse existing calculation from stepper.c)
     segment_buffer->pulse_width = (uint32_t)(settings->step_pulse_time * 12.5f);  // µs to timer ticks

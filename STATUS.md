@@ -7,6 +7,19 @@
 
 ---
 
+## ✅ Velocity Profiling Restored — February 28, 2026
+
+Restores the GRBL-style trapezoidal acceleration that was disabled in commit `07939e8`.
+All three fixes applied simultaneously to avoid race conditions.
+
+- `srcs/motion/kinematics.c:258` — `KINEMATICS_LinearMove()` — Fix 1: `min_steps_per_sec` now computed as GRBL safe-start `sqrtf(2*a/steps_per_mm)` clamped to `[1, cruise]`. Replaces incorrect `= steps_per_sec` that forced `rate_delta=0`.
+- `srcs/motion/kinematics.c:299` — `KINEMATICS_LinearMove()` — Fix 2: `step_interval = initial_rate` (safe-start speed). Removes `⚠️ TEMPORARY` that hardwired cruise from step 1.
+- `srcs/motion/stepper.c:291` — `STEPPER_SetStepRate()` — Fix 3: Removed `TMR4_PeriodSet` / `OCMP1_CompareValueSet` / `OCMP1_CompareSecondaryValueSet` from main loop. ISR already writes these registers every step from `step_interval` — sole hardware writer is now the ISR, eliminating the race condition that caused X/Y noise in prior attempts.
+
+**Tag before changes**: `v1.1h-20260228-pre-accel`
+
+---
+
 ## ✅ Full GRBL Feed Hold / Resume (Graceful Drain) — February 28, 2026
 
 Full GRBL v1.1 compliant `!` (feed hold) / `~` (cycle start) with **two-flag graceful drain** —
