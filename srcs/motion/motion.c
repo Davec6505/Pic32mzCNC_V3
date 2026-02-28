@@ -218,57 +218,6 @@ void MOTION_Tasks(APP_DATA* appData) {
         return;  // Exit and let ISR start stepping
     }
     
-    // ===== 2. VELOCITY PROFILING (DURING MOTION) =====
-    // Update step rate based on acceleration/cruise/decel
-    if(appData->currentSegment != NULL) {
-        MotionSegment* seg = appData->currentSegment;
-        
-        // ✅ TRAPEZOIDAL VELOCITY PROFILING
-        uint32_t new_rate;
-        
-        if(seg->steps_completed < seg->accelerate_until) {
-            // ✅ ACCELERATION PHASE
-            // Rate decreases (interval gets shorter, speed increases)
-            // Guard against underflow from multiplication overflow
-            int32_t rate_change = (int32_t)seg->steps_completed * abs(seg->rate_delta);
-            if (rate_change > (int32_t)seg->initial_rate) {
-                new_rate = seg->nominal_rate;  // Clamp to nominal if underflow would occur
-            } else {
-                new_rate = seg->initial_rate - rate_change;
-                
-                // Clamp to nominal rate (don't overshoot)
-                if(new_rate < seg->nominal_rate) {
-                    new_rate = seg->nominal_rate;
-                }
-            }
-            
-        } else if(seg->steps_completed > seg->decelerate_after) {
-            // ✅ DECELERATION PHASE
-            // Rate increases (interval gets longer, speed decreases)
-            // Uses decel_rate_delta (separate from accel) to handle asymmetric entry/exit speeds
-            uint32_t decel_steps = seg->steps_completed - seg->decelerate_after;
-            int32_t rate_change = (int32_t)decel_steps * abs(seg->decel_rate_delta);
-
-            new_rate = seg->nominal_rate + rate_change;
-
-            // Clamp to final rate (don't slow below minimum)
-            if(new_rate > seg->final_rate) {
-                new_rate = seg->final_rate;
-            }
-            
-        } else {
-            // ✅ CRUISE PHASE (constant velocity)
-            new_rate = seg->nominal_rate;
-        }
-        
-        // Update PR2 if rate changed (non-blocking, single register write)
-        if(new_rate != appData->currentStepInterval) {
-            STEPPER_SetStepRate(new_rate);
-            appData->currentStepInterval = new_rate;
-            
-        }
-    }
-    
     // ===== 3. SEGMENT COMPLETION CHECK =====
     // Check if current segment is done (ISR updates steps_completed)
     if(appData->currentSegment != NULL) {

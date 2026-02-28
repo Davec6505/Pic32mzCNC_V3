@@ -459,9 +459,9 @@ void STEPPER_ResumeMotion(void)
     }
 
     // Restore the step interval that was active when hold fired.
-    // currentStepInterval is updated every step by the velocity profiler,
+    // seg->step_interval is updated each ISR step by the velocity profiler,
     // so it holds the exact rate at the moment of pause — perfect restart point.
-    uint16_t period = (uint16_t)app_data_ref->currentStepInterval;
+    uint16_t period = (uint16_t)app_data_ref->currentSegment->step_interval;
     const uint16_t MIN_PERIOD = 7;
     if (period < MIN_PERIOD) period = MIN_PERIOD;
 
@@ -567,8 +567,26 @@ void OCP1_ISR(uintptr_t context) {
     // TMR4 rolls over at PR4, so we use RELATIVE compare values
     // This is what makes the motion continue - without this, only ONE step occurs!
     if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
-        uint32_t step_interval = app_data_ref->currentSegment->step_interval;  // Ticks between steps
-        
+        // ===== VELOCITY PROFILING (PER-STEP, INCREMENTAL) =====
+        // Executes inside ISR — M14K shadow register set means ZERO stack overhead.
+        // steps_completed is the pre-increment count (incremented at end of block).
+        MotionSegment* seg = app_data_ref->currentSegment;
+        uint32_t sc = seg->steps_completed;
+        if (sc < seg->accelerate_until) {
+            // ACCEL: decrease interval (increase speed), floor at nominal_rate
+            uint32_t delta = (uint32_t)abs(seg->rate_delta);
+            seg->step_interval = (seg->step_interval > seg->nominal_rate + delta)
+                               ? seg->step_interval - delta
+                               : seg->nominal_rate;
+        } else if (sc >= seg->decelerate_after) {
+            // DECEL: increase interval (decrease speed), ceiling at final_rate
+            uint32_t next_iv = seg->step_interval + (uint32_t)seg->decel_rate_delta;
+            seg->step_interval = (next_iv < seg->final_rate) ? next_iv : seg->final_rate;
+        }
+        // CRUISE: step_interval unchanged (already at nominal_rate)
+
+        uint32_t step_interval = seg->step_interval;  // Freshly updated for this step
+
         // ✅ CRITICAL: Ensure period is large enough for pulse width requirements
         const uint16_t MIN_PERIOD_FOR_PULSE = 7;  // 5 for rising edge offset + 2 for pulse width
         uint16_t period = (uint16_t)step_interval;
@@ -582,9 +600,8 @@ void OCP1_ISR(uintptr_t context) {
         OCMP1_CompareValueSet(period - 5);                                  // Rising edge (pulse starts)
         OCMP1_CompareSecondaryValueSet(period - 3);                         // Falling edge (ISR trigger)
 
-        // Update step counter and signal main loop for velocity updates
-        app_data_ref->currentSegment->steps_completed++;
-        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;
+        // Advance step counter (motionPhase left IDLE — MOTION_Tasks runs unconditionally)
+        seg->steps_completed++;
     }
 }
 
