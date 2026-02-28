@@ -3,8 +3,8 @@
 ## Overview
 Comprehensive architectural documentation for the Pic32mzCNC_V3 CNC motion control system.
 
-**Last Updated**: November 15, 2025  
-**Status**: Under Active Testing
+**Last Updated**: February 28, 2026  
+**Status**: Active Development
 
 ---
 
@@ -216,16 +216,25 @@ sw $t1, 0($t0)  ; Store to LATDSET register
 **Storage Layout**:
 ```c
 #define SETTINGS_NVM_ADDRESS 0xBD1F0000  // KSEG1 uncached
-#define SETTINGS_VERSION 2                // Structure version
+#define SETTINGS_VERSION 3                // Structure version (bumped when struct changes)
 
 typedef struct {
-    // 29 GRBL parameters
+    // 31 core GRBL parameters
     uint8_t pulse_microseconds;     // $0
     uint8_t stepper_idle_lock_time; // $1
-    // ... (27 more)
+    // ... (29 more)
     float arc_tolerance;            // $13
     // Work coordinate offsets
     CoordinatePoint work_offset[6]; // G54-G59
+#ifdef HAS_TMC5160_AXIS
+    // TMC5160 runtime settings — $200–$253 (24 parameters)
+    uint8_t tmc_chopper_mode[NUM_AXIS];  // $200–$203
+    uint8_t tmc_irun[NUM_AXIS];          // $210–$213
+    uint8_t tmc_ihold[NUM_AXIS];         // $220–$223
+    uint8_t tmc_mres[NUM_AXIS];          // $230–$233
+    uint32_t tmc_tpwmthrs[NUM_AXIS];     // $240–$243
+    uint32_t tmc_tcoolthrs[NUM_AXIS];    // $250–$253
+#endif
 } CNC_Settings;
 ```
 
@@ -318,17 +327,46 @@ UGS receives "ok" → Sends next command
 
 ## Safety Systems
 
-### Emergency Stop
+### E-Stop Hardware Interrupt (RF4, IPL7)
+Highest-priority ISR — beats OC1 step ISR (IPL5). Registered via Change Notice Port F in APP_CONFIG.
+```c
+// Callback fires on RF4 edge (E-Stop button)
+static void ESTOP_Callback(GPIO_PIN pin, uintptr_t context) {
+    STEPPER_DisableAll();
+    TMR4_Stop();
+    // flush motion queue, set alarmCode=10, transitions APP_ALARM
+}
+```
+Recovery: Button released → host sends `Ctrl+X` → soft reset → `APP_IDLE`.
+
+### Feed Hold / Resume (GRBL v1.1 compliant)
+Two-flag graceful drain — in-flight segments complete before hardware stops:
+
+| Flag | Set by | Cleared by | GRBL Status |
+|------|--------|------------|-------------|
+| `g_feed_hold_pending` | `!` (queue non-empty) | `STEPPER_FinalizeHold()` or `~` | `Hold:1` |
+| `g_feed_hold_active` | `STEPPER_FinalizeHold()` or `!` (queue empty) | `~` | `Hold:0` |
+
+```c
+// MOTION_Tasks — called by motion.c when queue drains to 0
+void STEPPER_FinalizeHold(void) {
+    g_feed_hold_pending = false;
+    g_feed_hold_active  = true;
+    TMR4_Stop(); OC1_Disable(); TMR5_Stop();
+}
+```
+
+### Hard Limits / Soft Reset
 ```c
 // Hardware limits trigger alarm
 if (MOTION_UTILS_CheckHardLimits()) {
     appData.state = APP_ALARM;
-    STEPPER_DisableAll();  // Stop all motion
+    STEPPER_DisableAll();
 }
 
 // Soft reset (Ctrl+X)
 GCODE_HandleSoftReset(&appData, &cmdQueue);
-// Clears queues, resets state, prints banner
+// Clears queues, resets both feed-hold flags, prints GRBL banner
 ```
 
 ### Position Tracking
@@ -357,24 +395,29 @@ float wpos_mm = mpos_mm - work_offset[axis];
 - **G-Code Buffer**: 16 commands × ~64 bytes = 1KB
 - **Stack**: 131KB allocated
 
-### Build Configurations
-- **Release**: Optimized (-O1), no debug (264KB)
-- **Debug**: With symbols, debug output (~280KB)
-- **Compilation Time**: ~20 seconds clean build
+### Build
+- **Single output path**: `bins/CNC_V3.hex` (Debug/Release split removed February 26, 2026)
+- **Debug output**: Controlled by `DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE ..."` at compile time — zero overhead in production builds
+- **Compilation time**: ~20 seconds clean build
 
 ---
 
 ## Testing & Validation
 
-### Validated Features (November 15, 2025)
+### Validated Features
 - ✅ Rectangle path (dual iteration)
 - ✅ Circle (20 segments, 0.025mm error)
 - ✅ Arc compensation (0.001mm tolerance)
 - ✅ Back-to-back file execution
 - ✅ UGS automatic completion
-- ✅ Soft reset recovery
+- ✅ Soft reset recovery (Ctrl+X)
 - ✅ Flow control synchronization
 - ✅ Array-based architecture
+- ✅ Feed hold (`!`) / resume (`~`) with graceful segment drain (Hold:1 → Hold:0)
+- ✅ E-Stop hardware interrupt (RF4, IPL7) with ALARM:10
+- ✅ Per-axis driver selection (TMC5160 / DRV8825 mixed)
+- ✅ TMC5160 SPI driver + runtime settings ($200–$253)
+- ⏳ G38.x probe — firmware complete, hardware testing pending
 
 ### Test Scripts
 ```powershell

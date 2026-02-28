@@ -214,25 +214,11 @@ All DRV8825:                all four = DRIVER_DRV8825  (previous STEPPER_DRIVER_
 - `Makefile:124` - `build_dir` target now forwards `DRY_RUN=$(DRY_RUN)` to inner make
 - `srcs/Makefile:380` - `SRC_DIRS` wildcard extended from 4 to 6 levels deep (covers `spi/spi_master/` nesting)
 
-### Next Steps for TMC5160
-
-- **TODO**: Confirm CS GPIO pin assignments from PCB/MCC pin manager
-- **TODO**: Create `srcs/motion/tmc5160.c` and `incs/motion/tmc5160.h`
-- **TODO**: Add CS wrappers to `srcs/utils/utils.c` following LED pattern
-- **TODO**: Call `TMC5160_Initialize()` from `APP_CONFIG` in `srcs/app.c`
-- **TODO**: Add rate-limited `TMC5160_CheckStatus()` call in `APP_IDLE` in `srcs/app.c`
-
-**Planning Document**: See `TMC5160 SPI Driver` section in `.github/copilot-instructions.md`
-
 ---
 
-## 📋 Current Development Session
+## ✅ LitePlacer GRBL Probe Implementation — February 10, 2026
 
-### LitePlacer GRBL Probe Implementation
-
-**Objective**: Implement GRBL v1.1 standard G38.x probe commands for LitePlacer pick-and-place machine integration
-
-**Planning Document**: [docs/readme/LITEPLACER_GRBL_IMPLEMENTATION.md](docs/readme/LITEPLACER_GRBL_IMPLEMENTATION.md)
+G38.2/3/4/5 probe commands. Planning: [LITEPLACER_GRBL_IMPLEMENTATION.md](docs/readme/LITEPLACER_GRBL_IMPLEMENTATION.md)
 
 ---
 
@@ -328,20 +314,7 @@ All DRV8825:                all four = DRIVER_DRV8825  (previous STEPPER_DRIVER_
 | Phase 4: Hardware Config | ✅ Complete | `PROBE_Get()` inline, Z-max as probe input, $6 invert |
 | Phase 5: Testing | ⬜ Pending | Flash to dev rig and verify [PRB:...] response |
 
-**Total Progress**: 80% (4/5 phases complete)
-
----
-
-## 🎯 Next Action
-
-**Phase 5 — Testing**: Flash `bins/CNC_V3.hex` to dev rig and verify G38.x probe behaviour.
-
-**Test sequence**:
-```gcode
-G38.2 Z-10 F100   ; probe toward — expect [PRB:x,y,z,a:1] on contact, ALARM:5 if no contact
-G38.3 Z-10 F100   ; probe toward no alarm — expect [PRB:x,y,z,a:0] on miss
-G38.4 Z10  F100   ; probe away — contact must break to succeed
-```
+**Total Progress**: 80% (4/5 phases complete — Phase 5 hardware test pending)
 
 ---
 

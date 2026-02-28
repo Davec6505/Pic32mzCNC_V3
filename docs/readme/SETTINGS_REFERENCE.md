@@ -307,7 +307,7 @@ These commands execute immediately without waiting for motion buffer:
 | Character | Action | Description |
 |-----------|--------|-------------|
 | `?` | Status Query | Machine state, position, feedrate |
-| `!` | Feed Hold | Pause motion (decelerate to stop) |
+| `!` | Feed Hold | Graceful drain: current segment completes (Hold:1), then hardware stops (Hold:0) |
 | `~` | Cycle Start | Resume from feed hold |
 | `Ctrl+X` (0x18) | Soft Reset | Emergency stop, reset controller |
 

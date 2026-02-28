@@ -8,7 +8,7 @@ GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, tar
 
 **Branch**: `tmc5160` (active development mainline)
 **Firmware**: `bins/CNC_V3.hex`
-**Last build**: February 26, 2026
+**Last build**: February 28, 2026
 
 | Feature | Status |
 |---------|--------|
@@ -21,6 +21,8 @@ GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, tar
 | NVM flash settings persistence | ✅ Complete |
 | Flow control — deferred "ok" | ✅ Complete |
 | Soft reset recovery (Ctrl+X) | ✅ Complete |
+| Feed Hold (`!`) / Resume (`~`) — graceful drain | ✅ Complete |
+| E-Stop hardware interrupt (RF4 IPL7, Hold:1→Hold:0) | ✅ Complete |
 | G38.2/3/4/5 probe commands | ✅ Implemented — testing pending |
 | Per-axis driver selection (TMC5160 / DRV8825) | ✅ Complete |
 | TMC5160 SPI driver + runtime settings ($200–$253) | ✅ Complete |
@@ -116,10 +118,11 @@ main.c
         └── APP_ALARM       → stepper.c (emergency stop, STEPPER_DisableAll)
 
 ISR (asynchronous)
-  ├── OCP1_ISR  — Bresenham step pulses (stepper.c)
+  ├── OCP1_ISR  — Bresenham step pulses (stepper.c, IPL5)
   ├── TMR5_Callback — pulse width timing (stepper.c)
   ├── OC8 / TMR6 — spindle PWM (spindle.c)
-  └── UART3_ISR — ring buffer RX/TX
+  ├── UART3_ISR — ring buffer RX/TX
+  └── CN-F_ISR  — E-Stop button RF4 (stepper.c, IPL7 — highest priority)
 ```
 
 ### Priority Phase System
@@ -176,8 +179,8 @@ Segment completes → motionSegmentCompleted flag
 | Char | Action |
 |------|--------|
 | `?` | Status report (no "ok") |
-| `!` | Feed hold |
-| `~` | Resume |
+| `!` | Feed hold — current segment completes (Hold:1), then hardware stops (Hold:0) |
+| `~` | Resume from Hold:0 or cancel pending Hold:1 drain |
 | Ctrl+X | Soft reset + GRBL banner |
 
 ### System Commands
