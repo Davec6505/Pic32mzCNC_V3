@@ -66,7 +66,7 @@ GCODE_Data gcodeData = {
 static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
-static bool feedHoldActive = false;         /* '!' feed hold, '~' resume */
+// g_feed_hold_active is in stepper.h (defined in stepper.c) — global, gated in app.c APP_IDLE
 static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
 static bool unitsInches = false;            /* false=mm (G21), true=inches (G20) */
 
@@ -174,7 +174,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     /* 9. Reset G-code parser state */
     okPendingCount = 0;  // Clear all deferred ok responses
     grblCheckMode = false;
-    feedHoldActive = false;
+    g_feed_hold_active = false;  // Clear hold (defined in stepper.c / stepper.h)
     unitsInches = false;
     
 
@@ -206,7 +206,7 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
     unitsInches = false;
     grblCheckMode = false;
     grblAlarm = false;
-    feedHoldActive = false;
+    g_feed_hold_active = false;  // Clear hold (defined in stepper.c / stepper.h)
 
     // ✅ REMOVED: Startup deferral initialization (no longer used)
 }
@@ -874,7 +874,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 const char* state = "Idle";
                 if (grblAlarm) {
                     state = "Alarm";
-                } else if (feedHoldActive) {
+                } else if (g_feed_hold_active) {
                     state = "Hold:0";  // GRBL v1.1: Hold:0 = fully stopped, Hold:1 = decelerating
                 } else if (appData->arcGenState == ARC_GEN_ACTIVE) {
                     // Arc generator active → still processing arc segments
@@ -911,16 +911,14 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 break;
             }
             case '~': /* Cycle start / resume */
-                if (feedHoldActive) {
-                    feedHoldActive = false;
-                    STEPPER_ResumeMotion();  // Restart TMR4/OC1 from frozen Bresenham state
+                if (g_feed_hold_active) {
+                    STEPPER_ResumeMotion();  // Clears g_feed_hold_active + restarts TMR4/OC1
                     DEBUG_PRINT_GCODE("[GCODE] Feed hold released — motion resuming\r\n");
                 }
                 break;
             case '!': /* Feed hold */
-                if (!feedHoldActive) {
-                    feedHoldActive = true;
-                    STEPPER_PauseMotion();   // Stop pulses, keep steppers ENERGISED
+                if (!g_feed_hold_active) {
+                    STEPPER_PauseMotion();   // Sets g_feed_hold_active + stops pulses, keeps steppers ENERGISED
                     DEBUG_PRINT_GCODE("[GCODE] Feed hold active\r\n");
                 }
                 break;

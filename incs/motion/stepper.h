@@ -27,6 +27,10 @@ extern volatile bool g_suppress_hard_limits;
 // ✅ E-STOP PENDING FLAG - Set by ESTOP_Callback ISR (app.c), cleared by soft reset / main loop
 extern volatile bool g_estop_pending;
 
+// ✅ FEED HOLD FLAG - Set by STEPPER_PauseMotion ('!'), cleared by STEPPER_ResumeMotion ('~') or soft reset
+// When true: MOTION_Tasks, arc generation, and G-code event processing are gated in APP_IDLE
+extern volatile bool g_feed_hold_active;
+
 void STEPPER_Initialize(APP_DATA* appData);
 void STEPPER_LoadSegment(MotionSegment* segment);         // Load new segment for execution
 void STEPPER_SetStepRate(uint32_t rate_ticks);            // Update PR2 for velocity profiling

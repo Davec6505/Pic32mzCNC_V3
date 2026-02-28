@@ -65,6 +65,10 @@ volatile bool g_suppress_hard_limits = false;
 // ✅ E-STOP PENDING FLAG - Set by ESTOP_Callback ISR (app.c), cleared by soft reset / main loop
 volatile bool g_estop_pending = false;
 
+// ✅ FEED HOLD FLAG - Set by '!' real-time command, cleared by '~' resume or soft reset
+// When true: MOTION_Tasks, arc generation, and event processing are gated in APP_IDLE
+volatile bool g_feed_hold_active = false;
+
 // Position tracking (incremented/decremented by ISR based on direction)
 static StepperPosition stepper_pos = {
     .steps = {0, 0, 0, 0},                    // All axes start at zero
@@ -403,6 +407,9 @@ void STEPPER_StopMotion(void)
 
 void STEPPER_PauseMotion(void)
 {
+    // Set hold flag FIRST — so APP_IDLE gates MOTION_Tasks on the very next iteration
+    g_feed_hold_active = true;
+
     // Stop pulse generation — TMR4 stop halts OC1 ISR completely.
     // NOTE: Do NOT disable stepper drivers (keep EnXYZA active/low).
     //       Keeping drivers energised holds motor position and lets resume
@@ -421,9 +428,16 @@ void STEPPER_PauseMotion(void)
 
 void STEPPER_ResumeMotion(void)
 {
+    // Clear hold flag FIRST — APP_IDLE will un-gate MOTION_Tasks and arc generation
+    g_feed_hold_active = false;
+
     // Guard: nothing to resume if no active segment
+    // (Hold fired BETWEEN segments — MOTION_Tasks will pick up next queued segment naturally)
     if (app_data_ref == NULL || app_data_ref->currentSegment == NULL) {
-        DEBUG_PRINT_STEPPER("[STEPPER] Resume called but no active segment — ignored\r\n");
+        if (app_data_ref != NULL) {
+            app_data_ref->motionActive = (app_data_ref->motionQueueCount > 0);
+        }
+        DEBUG_PRINT_STEPPER("[STEPPER] Resume: no active segment — MOTION_Tasks will load next\r\n");
         return;
     }
 
