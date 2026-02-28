@@ -69,6 +69,12 @@ volatile bool g_estop_pending = false;
 // When true: MOTION_Tasks, arc generation, and event processing are gated in APP_IDLE
 volatile bool g_feed_hold_active = false;
 
+// ✅ FEED HOLD PENDING FLAG - Set by '!', cleared when motion queue drains to 0
+// While pending: MOTION_Tasks keeps running to drain current segment gracefully.
+// Arc generation and new event processing are gated to avoid adding segments.
+// Status reports Hold:1 (decelerating / draining) until queue empties, then Hold:0.
+volatile bool g_feed_hold_pending = false;
+
 // Position tracking (incremented/decremented by ISR based on direction)
 static StepperPosition stepper_pos = {
     .steps = {0, 0, 0, 0},                    // All axes start at zero
@@ -407,28 +413,48 @@ void STEPPER_StopMotion(void)
 
 void STEPPER_PauseMotion(void)
 {
-    // Set hold flag FIRST — so APP_IDLE gates MOTION_Tasks on the very next iteration
-    g_feed_hold_active = true;
-
-    // Stop pulse generation — TMR4 stop halts OC1 ISR completely.
-    // NOTE: Do NOT disable stepper drivers (keep EnXYZA active/low).
-    //       Keeping drivers energised holds motor position and lets resume
-    //       restart exactly from the frozen Bresenham state.
-    T4CONCLR  = _T4CON_ON_MASK;      // Stop TMR4 (step period timer)
-    T5CONCLR  = _T5CON_ON_MASK;      // Stop TMR5 (pulse-width clear timer)
-    OC1CONCLR = _OC1CON_ON_MASK;     // Disable OC1 (pulse output)
-
-    // Mark motion inactive in appData so '?' reports Hold state
-    if (app_data_ref != NULL) {
-        app_data_ref->motionActive = false;
+    // If motion queue is already empty — go straight to fully stopped (Hold:0)
+    if (app_data_ref == NULL || app_data_ref->motionQueueCount == 0) {
+        g_feed_hold_active  = true;
+        g_feed_hold_pending = false;
+        T4CONCLR  = _T4CON_ON_MASK;
+        T5CONCLR  = _T5CON_ON_MASK;
+        OC1CONCLR = _OC1CON_ON_MASK;
+        if (app_data_ref) app_data_ref->motionActive = false;
+        DEBUG_PRINT_STEPPER("[STEPPER] Feed hold — idle, immediate stop (Hold:0)\r\n");
+        return;
     }
 
-    DEBUG_PRINT_STEPPER("[STEPPER] Feed hold — pulses paused, steppers energised\r\n");
+    // Motion in progress — set pending flag only.
+    // MOTION_Tasks keeps running to drain the current segment, then calls
+    // STEPPER_FinalizeHold() when motionQueueCount reaches 0 (Hold:1 → Hold:0).
+    g_feed_hold_pending = true;
+    DEBUG_PRINT_STEPPER("[STEPPER] Feed hold pending — draining segments (Hold:1)\r\n");
+}
+
+// Called by MOTION_Tasks when motionQueueCount hits 0 while g_feed_hold_pending is set.
+// Transitions from Hold:1 (draining) to Hold:0 (fully stopped).
+void STEPPER_FinalizeHold(void)
+{
+    g_feed_hold_pending = false;
+    g_feed_hold_active  = true;
+    T4CONCLR  = _T4CON_ON_MASK;
+    T5CONCLR  = _T5CON_ON_MASK;
+    OC1CONCLR = _OC1CON_ON_MASK;
+    if (app_data_ref != NULL) app_data_ref->motionActive = false;
+    DEBUG_PRINT_STEPPER("[STEPPER] Feed hold finalized — queue drained, fully stopped (Hold:0)\r\n");
 }
 
 void STEPPER_ResumeMotion(void)
 {
-    // Clear hold flag FIRST — APP_IDLE will un-gate MOTION_Tasks and arc generation
+    // Cancel a pending hold (queue still running — just un-gate everything)
+    if (g_feed_hold_pending) {
+        g_feed_hold_pending = false;
+        DEBUG_PRINT_STEPPER("[STEPPER] Feed hold cancelled (was pending, motion continues)\r\n");
+        return;
+    }
+
+    // Full resume from parked state (Hold:0)
     g_feed_hold_active = false;
 
     // Guard: nothing to resume if no active segment

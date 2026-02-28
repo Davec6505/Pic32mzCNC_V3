@@ -174,7 +174,8 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     /* 9. Reset G-code parser state */
     okPendingCount = 0;  // Clear all deferred ok responses
     grblCheckMode = false;
-    g_feed_hold_active = false;  // Clear hold (defined in stepper.c / stepper.h)
+    g_feed_hold_active  = false;  // Clear hold (defined in stepper.c / stepper.h)
+    g_feed_hold_pending = false;  // Cancel any in-flight pending hold
     unitsInches = false;
     
 
@@ -206,7 +207,8 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
     unitsInches = false;
     grblCheckMode = false;
     grblAlarm = false;
-    g_feed_hold_active = false;  // Clear hold (defined in stepper.c / stepper.h)
+    g_feed_hold_active  = false;
+    g_feed_hold_pending = false;
 
     // ✅ REMOVED: Startup deferral initialization (no longer used)
 }
@@ -874,8 +876,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 const char* state = "Idle";
                 if (grblAlarm) {
                     state = "Alarm";
+                } else if (g_feed_hold_pending) {
+                    state = "Hold:1";  // GRBL v1.1: Hold:1 = draining / decelerating
                 } else if (g_feed_hold_active) {
-                    state = "Hold:0";  // GRBL v1.1: Hold:0 = fully stopped, Hold:1 = decelerating
+                    state = "Hold:0";  // GRBL v1.1: Hold:0 = fully stopped
                 } else if (appData->arcGenState == ARC_GEN_ACTIVE) {
                     // Arc generator active → still processing arc segments
                     state = "Run";
@@ -911,14 +915,14 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 break;
             }
             case '~': /* Cycle start / resume */
-                if (g_feed_hold_active) {
-                    STEPPER_ResumeMotion();  // Clears g_feed_hold_active + restarts TMR4/OC1
+                if (g_feed_hold_active || g_feed_hold_pending) {
+                    STEPPER_ResumeMotion();  // Cancels pending OR restarts from full stop
                     DEBUG_PRINT_GCODE("[GCODE] Feed hold released — motion resuming\r\n");
                 }
                 break;
             case '!': /* Feed hold */
-                if (!g_feed_hold_active) {
-                    STEPPER_PauseMotion();   // Sets g_feed_hold_active + stops pulses, keeps steppers ENERGISED
+                if (!g_feed_hold_active && !g_feed_hold_pending) {
+                    STEPPER_PauseMotion();   // Sets pending (drain) or immediate if queue empty
                     DEBUG_PRINT_GCODE("[GCODE] Feed hold active\r\n");
                 }
                 break;

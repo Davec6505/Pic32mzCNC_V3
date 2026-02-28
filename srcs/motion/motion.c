@@ -300,8 +300,13 @@ void MOTION_Tasks(APP_DATA* appData) {
             // TMR4 runs continuously across segments for smooth multi-segment motion
             // Only stop when the complete distance has been reached (no more segments)
             if(appData->motionQueueCount == 0) {
-                TMR4_Stop();
-                appData->motionActive = false;  // Mark motion fully stopped
+                // ✅ FEED HOLD: finalize hold if '!' was pending a segment drain
+                if (g_feed_hold_pending) {
+                    STEPPER_FinalizeHold();  // Hold:1 → Hold:0, stops TMR4/OC1
+                } else {
+                    TMR4_Stop();
+                    appData->motionActive = false;
+                }
             }
         }
     }

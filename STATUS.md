@@ -7,27 +7,31 @@
 
 ---
 
-## ✅ Full GRBL Feed Hold / Resume — February 28, 2026
+## ✅ Full GRBL Feed Hold / Resume (Graceful Drain) — February 28, 2026
 
-Full GRBL v1.1 compliant `!` (feed hold) and `~` (cycle start / resume).
+Full GRBL v1.1 compliant `!` (feed hold) / `~` (cycle start) with **two-flag graceful drain** —
+in-flight segments complete naturally before the hardware is stopped.
 
-**Architecture**: `g_feed_hold_active` global flag (defined in `stepper.c`, declared in `stepper.h`)
-gates motion in APP_IDLE — identical pattern to `g_hard_limit_alarm` / `g_suppress_hard_limits`.
+### Two-Flag Architecture (defined in `stepper.c`, declared in `stepper.h`)
 
-**`!` Feed Hold behaviour**:
-1. `STEPPER_PauseMotion()` sets `g_feed_hold_active = true` first, then stops TMR4/OC1/TMR5
-2. Stepper drivers stay **energised** (EnXYZA held low) — motor holds position
-3. Bresenham state is frozen in the ISR variables — resume is byte-exact
-4. `APP_IDLE` sees `g_feed_hold_active` → gates `MOTION_Tasks`, arc generation, and G-code event processing
-5. `GCODE_Tasks` still runs every iteration → `?`, `~`, Ctrl+X, and new G-code buffering work normally
-6. Status `?` returns `<Hold:0|...>` immediately (instant stop, no deceleration ramp)
+| Flag | Meaning | GRBL Status | Hardware |
+|------|---------|-------------|----------|
+| `g_feed_hold_pending` | `!` received, queue draining | `Hold:1` | TMR4/OC1 running |
+| `g_feed_hold_active` | queue empty, fully parked | `Hold:0` | TMR4/OC1 stopped |
 
-**`~` Cycle Start / Resume behaviour**:
-1. `STEPPER_ResumeMotion()` clears `g_feed_hold_active = false` first
-2. If active segment: restores `OCxR/OCxRS/PR4` and re-enables OC1 + TMR4 → continues from frozen Bresenham
-3. If NO active segment (hold fired between segments): just clears flag — `MOTION_Tasks` naturally loads next queued segment
-4. Arc generation un-gated → incremental arc streaming continues from next theta step
-5. Event processing un-gated → queued G-code events execute in order
+### Changed files
+
+- `srcs/motion/stepper.c:413` — `STEPPER_PauseMotion()` — if queue non-empty sets `g_feed_hold_pending` only (drain); if queue already 0 goes straight to `g_feed_hold_active` (immediate stop)
+- `srcs/motion/stepper.c:447` — `STEPPER_FinalizeHold()` — NEW: clears pending, sets active, stops TMR4/OC1/TMR5; called by `MOTION_Tasks` when `motionQueueCount` hits 0
+- `srcs/motion/stepper.c:461` — `STEPPER_ResumeMotion()` — cancels `g_feed_hold_pending` (motion continues) OR clears `g_feed_hold_active` and restarts TMR4/OC1
+- `incs/motion/stepper.h:30` — Added `extern volatile bool g_feed_hold_pending` and `void STEPPER_FinalizeHold(void)`
+- `srcs/motion/motion.c:300` — `MOTION_Tasks()` — at queue-drain (`motionQueueCount == 0`) calls `STEPPER_FinalizeHold()` if pending, else normal `TMR4_Stop()`
+- `srcs/gcode/gcode_parser.c:876` — status `?` returns `Hold:1` when pending, `Hold:0` when active
+- `srcs/gcode/gcode_parser.c:915` — `~` calls `STEPPER_ResumeMotion()` when either flag set
+- `srcs/gcode/gcode_parser.c:174` — soft reset clears both flags
+- `srcs/app.c:326` — `MOTION_Tasks` gated on `!g_feed_hold_active` only (runs during drain)
+- `srcs/app.c:344` — arc generation gated on `!g_feed_hold_pending` (inside the active gate)
+- `srcs/app.c:434` — event processing gated on `!g_feed_hold_active && !g_feed_hold_pending`
 
 **Soft reset (`Ctrl+X`)**: clears `g_feed_hold_active` without resuming motion (calls `STEPPER_StopMotion` separately)
 
