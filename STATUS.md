@@ -7,6 +7,12 @@
 
 ---
 
+## ✅ Arc Cruise Speed Fix — February 28, 2026
+
+- `srcs/motion/kinematics.c:500` — `KINEMATICS_LinearMoveSimple()` — Replaced hardcoded `8.33 mm/s` entry/exit velocity with computed triangle-peak cruise speed: `arc_cruise = min(feedrate, sqrt(min_accel_xy * chord_mm))`. Passes `arc_cruise` as feedrate AND entry/exit so `nominal=initial=final` — trapezoidal profiler is fully inactive for arc segments. Consecutive arc segments run back-to-back at constant speed with no inter-segment deceleration. Fixes circles running at ~11 mm/min instead of commanded feedrate.
+
+---
+
 ## ✅ Velocity Profiling Restored — February 28, 2026
 
 Restores the GRBL-style trapezoidal acceleration that was disabled in commit `07939e8`.

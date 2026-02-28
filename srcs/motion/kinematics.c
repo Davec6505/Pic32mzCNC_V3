@@ -496,10 +496,32 @@ float KINEMATICS_CalculateJunctionSpeed(CoordinatePoint prev_dir, CoordinatePoin
     return junction_speed;
 }
 
-// Backward compatibility wrapper for single segments (no junction planning)
-MotionSegment* KINEMATICS_LinearMoveSimple(CoordinatePoint start, CoordinatePoint end, float feedrate, 
+// Arc segment wrapper: computes achievable constant cruise speed for the chord length.
+// A short arc chord cannot reach feedrate from rest in a triangle profile — the actual
+// peak of that triangle is sqrt(accel * chord_mm). Clamping to this value and passing it
+// as the feedrate AND entry/exit velocity produces a flat (no-ramp) segment at arc_cruise,
+// which is the correct behaviour. Consecutive arc segments therefore run back-to-back at
+// the same rate with no inter-segment deceleration.
+MotionSegment* KINEMATICS_LinearMoveSimple(CoordinatePoint start, CoordinatePoint end, float feedrate,
                                           MotionSegment* segment_buffer) {
-    // Use minimum entry/exit velocities (traditional behavior - accelerate from stop, decelerate to stop)
-    float min_velocity = 8.33f;  // 500 mm/min minimum (matches min_steps_per_sec / steps_per_mm)
-    return KINEMATICS_LinearMove(start, end, feedrate, segment_buffer, min_velocity, min_velocity);
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+
+    // Chord length (XY plane — arcs are always XY in G17)
+    float dx = end.coordinate[AXIS_X] - start.coordinate[AXIS_X];
+    float dy = end.coordinate[AXIS_Y] - start.coordinate[AXIS_Y];
+    float dz = end.coordinate[AXIS_Z] - start.coordinate[AXIS_Z];
+    float chord_mm = sqrtf(dx*dx + dy*dy + dz*dz);
+    if (chord_mm < 0.0001f) chord_mm = 0.0001f;  // Avoid sqrt(0)
+
+    // Use conservative (lowest) XY acceleration
+    float arc_accel = fminf(settings->acceleration[AXIS_X], settings->acceleration[AXIS_Y]);
+    if (arc_accel < 1.0f) arc_accel = 1.0f;
+
+    // Triangle-peak speed: maximum speed achievable over chord_mm with full accel+decel
+    // v_peak = sqrt(accel * chord_mm)  [from v² = 2*a*(d/2) accel + same decel]
+    float arc_cruise = fminf(feedrate, sqrtf(arc_accel * chord_mm));
+
+    // Pass arc_cruise as feedrate AND entry/exit → nominal = initial = final → flat cruise,
+    // profiler does nothing, segments run seamlessly back-to-back.
+    return KINEMATICS_LinearMove(start, end, arc_cruise, segment_buffer, arc_cruise, arc_cruise);
 }
