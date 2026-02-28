@@ -98,15 +98,19 @@ typedef struct {
     uint32_t accelerate_until;   // Step count to end acceleration phase
     uint32_t decelerate_after;   // Step count to start deceleration phase
     
-    int32_t rate_delta;          // Interval change per step (signed, timer ticks)
-                                 // Negative = accelerating (interval decreasing)
-                                 // Positive = decelerating (interval increasing)
-    
+    int32_t rate_delta;          // Interval change per step — ACCEL phase (signed, timer ticks)
+    int32_t decel_rate_delta;    // Interval change per step — DECEL phase (separate: exit may != entry)
+
     // Physics parameters (calculated by kinematics for reference/debugging)
     float start_velocity;        // Starting velocity for this segment (mm/sec)
     float max_velocity;          // Maximum velocity for this segment (mm/sec)
     float end_velocity;          // Ending velocity for this segment (mm/sec)
     float acceleration;          // Acceleration/deceleration rate (mm/sec²)
+
+    // Look-ahead fields — set by kinematics, retroactively patched by MOTION_RecomputeExit()
+    float entry_speed_mms;       // Settled entry speed (mm/s) for backward-pass propagation
+    float exit_speed_mms;        // Settled exit speed (mm/s) — patched when next segment arrives
+    bool  speed_locked;          // true = arc segment — look-ahead must not modify speeds
 } MotionSegment;
 
 // ============================================================================

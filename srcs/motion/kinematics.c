@@ -279,13 +279,26 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         segment_buffer->final_rate = segment_buffer->nominal_rate;    // End at cruise speed
     }
     
-    // Rate delta per step (for integer ISR math)
+    // Rate delta per step — accel phase
     if(accel_steps > 0) {
         segment_buffer->rate_delta = (int32_t)((segment_buffer->initial_rate - segment_buffer->nominal_rate) / accel_steps);
     } else {
         segment_buffer->rate_delta = 0;
     }
-    
+
+    // Rate delta per step — decel phase (asymmetric: exit speed may differ from entry speed)
+    uint32_t decel_steps_kin = (uint32_t)max_delta - segment_buffer->decelerate_after;
+    if (decel_steps_kin > 0) {
+        segment_buffer->decel_rate_delta = (int32_t)((segment_buffer->final_rate - segment_buffer->nominal_rate) / decel_steps_kin);
+    } else {
+        segment_buffer->decel_rate_delta = 0;
+    }
+
+    // Look-ahead fields — initialised here, may be retroactively patched by planner
+    segment_buffer->entry_speed_mms = entry_velocity;
+    segment_buffer->exit_speed_mms  = exit_velocity;
+    segment_buffer->speed_locked    = false;
+
     // Physics parameters (for debugging/reference) - use actual junction velocities
     segment_buffer->start_velocity = entry_velocity;
     segment_buffer->max_velocity = feedrate_mm_sec;

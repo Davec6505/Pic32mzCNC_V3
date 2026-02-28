@@ -245,11 +245,12 @@ void MOTION_Tasks(APP_DATA* appData) {
         } else if(seg->steps_completed > seg->decelerate_after) {
             // ✅ DECELERATION PHASE
             // Rate increases (interval gets longer, speed decreases)
+            // Uses decel_rate_delta (separate from accel) to handle asymmetric entry/exit speeds
             uint32_t decel_steps = seg->steps_completed - seg->decelerate_after;
-            int32_t rate_change = (int32_t)decel_steps * abs(seg->rate_delta);
-            
+            int32_t rate_change = (int32_t)decel_steps * abs(seg->decel_rate_delta);
+
             new_rate = seg->nominal_rate + rate_change;
-            
+
             // Clamp to final rate (don't slow below minimum)
             if(new_rate > seg->final_rate) {
                 new_rate = seg->final_rate;
@@ -311,6 +312,57 @@ void MOTION_Tasks(APP_DATA* appData) {
         }
     }
 }
+
+// ============================================================================
+// Look-Ahead Helper: Recompute Exit Profile
+// ============================================================================
+// Called when the NEXT segment's entry speed (junction speed) is known.
+// Patches the exit side of a queued-but-not-executing segment so it decelerates
+// to the correct speed instead of always grinding down to safe-start (8.33 mm/s).
+// Updates: exit_speed_mms, final_rate, decelerate_after, decel_rate_delta.
+// Safe to call only on segments that are NOT currentSegment (motionQueueTail).
+// ============================================================================
+static void MOTION_RecomputeExit(MotionSegment* seg, float new_exit_mms) {
+    const float TIMER_FREQ = (float)TMR4_FrequencyGet();
+    float steps_per_mm = *g_axis_settings[seg->dominant_axis].steps_per_mm;
+    float accel        = seg->acceleration;
+
+    // Cruise speed in mm/s (nominal_rate is ticks — lower ticks = faster speed)
+    float nominal_mms = (TIMER_FREQ / (float)seg->nominal_rate) / steps_per_mm;
+
+    // Clamp: exit can't exceed cruise or go negative
+    if (new_exit_mms > nominal_mms) new_exit_mms = nominal_mms;
+    if (new_exit_mms < 0.0f)        new_exit_mms = 0.0f;
+    seg->exit_speed_mms = new_exit_mms;
+
+    // Recompute final_rate from new exit speed
+    float exit_steps_per_sec = new_exit_mms * steps_per_mm;
+    if (exit_steps_per_sec < 1.0f) exit_steps_per_sec = 1.0f;
+    uint32_t new_final = (uint32_t)(TIMER_FREQ / exit_steps_per_sec);
+    if (new_final < seg->nominal_rate) new_final = seg->nominal_rate;
+    seg->final_rate = new_final;
+
+    // Recompute decelerate_after:
+    // decel distance = (v_nominal² - v_exit²) / (2 * a)
+    float decel_dist_mm = (nominal_mms * nominal_mms - new_exit_mms * new_exit_mms) / (2.0f * accel);
+    if (decel_dist_mm < 0.0f) decel_dist_mm = 0.0f;
+    uint32_t decel_steps = (uint32_t)(decel_dist_mm * steps_per_mm);
+    if (decel_steps > seg->steps_remaining) decel_steps = seg->steps_remaining;
+
+    uint32_t new_decel_after = seg->steps_remaining - decel_steps;
+    // Decel start must be at or after the acceleration end
+    if (new_decel_after < seg->accelerate_until) new_decel_after = seg->accelerate_until;
+    seg->decelerate_after = new_decel_after;
+
+    // Recompute decel_rate_delta for the updated decel phase
+    uint32_t actual_decel = seg->steps_remaining - seg->decelerate_after;
+    if (actual_decel > 0) {
+        seg->decel_rate_delta = (int32_t)((seg->final_rate - seg->nominal_rate) / actual_decel);
+    } else {
+        seg->decel_rate_delta = 0;
+    }
+}
+
 void MOTION_Arc(APP_DATA* appData) {
 
     // Only generate if arc is active and motion queue has space
@@ -365,6 +417,7 @@ void MOTION_Arc(APP_DATA* appData) {
     
     // Use simple linear move for arc segments (no junction planning needed for smooth arcs)
     KINEMATICS_LinearMoveSimple(appData->arcCurrent, next, appData->arcFeedrate, segment);
+    segment->speed_locked = true;   // arc cruise is fixed — look-ahead must not modify this segment
 
     // Add to motion queue
     appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
@@ -493,26 +546,29 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // Get next queue slot
             MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
               
-            // ===== JUNCTION PLANNING: Calculate entry and exit velocities =====
-            float entry_velocity = 8.33f;  // Default: start from minimum speed (500 mm/min)
-            float exit_velocity = 8.33f;   // Default: decelerate to stop
-            
-            // Check if we can apply junction deviation with previous segment
+            // ===== LOOK-AHEAD JUNCTION PLANNING =====
+            // entry_velocity : speed this segment starts at  (from N-1→N junction angle)
+            // exit_velocity  : placeholder safe-start        (patched when segment N+1 arrives)
+            // junction_speed : saved so we can retroactively patch N-1's exit after queuing N
+            float entry_velocity     = 8.33f;
+            float exit_velocity      = 8.33f;
+            float junction_speed     = 8.33f;
+            uint32_t look_prev_index = 0;
+            bool     has_prev_patch  = false;
+
             if (appData->motionQueueCount > 0) {
-                // Get previous segment for junction analysis
-                uint32_t prev_index = (appData->motionQueueHead - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
-                MotionSegment* prev_segment = &appData->motionQueue[prev_index];
-                
-                // Calculate normalized direction vectors
-                if (prev_segment->dominant_delta > 0) {
-                    // ✅ ARRAY-BASED: Previous direction vector from segment deltas
+                look_prev_index = (appData->motionQueueHead - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+                MotionSegment* prev_seg = &appData->motionQueue[look_prev_index];
+
+                if (prev_seg->dominant_delta > 0) {
+                    // Previous direction vector (normalised from Bresenham deltas)
                     CoordinatePoint prev_dir;
                     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-                        SET_COORDINATE_AXIS(&prev_dir, axis, 
-                            (float)prev_segment->delta[axis] / (float)prev_segment->dominant_delta);
+                        SET_COORDINATE_AXIS(&prev_dir, axis,
+                            (float)prev_seg->delta[axis] / (float)prev_seg->dominant_delta);
                     }
-                    
-                    // We need current segment's direction, so do a preview calculation
+
+                    // Current direction vector preview
                     float delta_mm[NUM_AXIS];
                     float distance = 0.0f;
                     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
@@ -520,59 +576,61 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                         distance += delta_mm[axis] * delta_mm[axis];
                     }
                     distance = sqrtf(distance);
-                    
-                    if (distance > 0.001f) {  // Avoid division by zero
-                        // ✅ ARRAY-BASED: Current direction vector
+
+                    if (distance > 0.001f) {
                         CoordinatePoint curr_dir;
                         for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                             SET_COORDINATE_AXIS(&curr_dir, axis, delta_mm[axis] / distance);
                         }
-                        
-                        // Get settings for junction calculation
-                        CNC_Settings* settings = SETTINGS_GetCurrent();
-                        float junction_speed = KINEMATICS_CalculateJunctionSpeed(prev_dir, curr_dir, 
-                                                                                settings->junction_deviation,
-                                                                                *(g_axis_settings[AXIS_X].acceleration));  // Use X axis for junction accel
-                        
-                        // Limit junction speed to reasonable maximum (feedrate / 60)
-                        float max_junction = feedrate / 60.0f;  // Convert mm/min to mm/sec
-                        if (junction_speed > max_junction) {
-                            junction_speed = max_junction;
-                        }
-                        
-                        // Update previous segment's exit velocity for smoother transition
+
+                        CNC_Settings* jct_settings = SETTINGS_GetCurrent();
+                        junction_speed = KINEMATICS_CalculateJunctionSpeed(prev_dir, curr_dir,
+                                                                           jct_settings->junction_deviation,
+                                                                           *(g_axis_settings[AXIS_X].acceleration));
+
+                        float max_junction = feedrate / 60.0f;
+                        if (junction_speed > max_junction) junction_speed = max_junction;
+
                         entry_velocity = junction_speed;
-                        
-                        // DEBUG_PRINT_MOTION("[JUNCTION] Junction speed: %.1f mm/sec (entry to current segment)\r\n", 
-                        //                   junction_speed);
+
+                        // Flag N-1 for retroactive exit patch (skip if arc-locked)
+                        has_prev_patch = !prev_seg->speed_locked;
+
+                        DEBUG_PRINT_MOTION("[JUNCTION] junction=%.1f entry=%.1f mm/s\r\n",
+                                          junction_speed, entry_velocity);
                     }
                 }
             }
-            
-            // Convert to motion segment with junction velocities
+
+            // Build segment N with settled entry; exit is placeholder and will be patched
             KINEMATICS_LinearMove(start, end, feedrate, segment, entry_velocity, exit_velocity);
 
             // Guard: skip zero-length segments (no steps)
             if (segment->steps_remaining == 0) {
-                // DEBUG_PRINT_MOTION("[MOTION] Zero-length segment - skipping\r\n");
-                // ✅ ARRAY-BASED: Update current position and treat as no-op
                 for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                     appData->current[axis] = GET_COORDINATE_AXIS(&end, axis);
                 }
                 return true;
             }
 
-            // DEBUG_PRINT_MOTION("[MOTION] Adding segment to queue (count will be %d)\r\n", appData->motionQueueCount + 1);
-            
             // Add to motion queue
             appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
             appData->motionQueueCount++;
-            
-            // ✅ ARRAY-BASED: Update current position using coordinate utilities
+
+            // LOOK-AHEAD: retroactively patch N-1's exit to the junction speed just computed.
+            // When N arrives, we finally know what speed the N-1→N boundary must support.
+            // N-1 is in the queue but NOT yet executing — safe to rewrite its decel profile.
+            // Guard: skip if N-1 IS the currently-executing segment (motionQueueTail).
+            if (has_prev_patch && look_prev_index != appData->motionQueueTail) {
+                MOTION_RecomputeExit(&appData->motionQueue[look_prev_index], junction_speed);
+                DEBUG_PRINT_MOTION("[LOOKAHEAD] Patched N-1 exit to %.1f mm/s\r\n", junction_speed);
+            }
+
+            // ✅ ARRAY-BASED: Update current position
             for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                 appData->current[axis] = GET_COORDINATE_AXIS(&end, axis);
             }
-            
+
             return true;
         }
         
@@ -693,10 +751,29 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             } else {
                 appData->arcThetaIncrement = -fabsf(appData->arcThetaIncrement);
             }
-                      
+
+            // LOOK-AHEAD: patch the preceding G1 segment to decelerate to arc_cruise
+            // rather than safe-start, giving a smooth G1→arc entry.
+            // arc_cruise is the same triangle-peak formula used by KINEMATICS_LinearMoveSimple.
+            {
+                float arc_feedrate_mms = event->data.arcMove.feedrate / 60.0f;
+                float arc_accel = fminf(settings->acceleration[AXIS_X], settings->acceleration[AXIS_Y]);
+                if (arc_accel < 1.0f) arc_accel = 1.0f;
+                float arc_cruise = fminf(arc_feedrate_mms, sqrtf(arc_accel * settings->mm_per_arc_segment));
+
+                if (appData->motionQueueCount > 0) {
+                    uint32_t arc_prev = (appData->motionQueueHead - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+                    if (arc_prev != appData->motionQueueTail
+                        && !appData->motionQueue[arc_prev].speed_locked) {
+                        MOTION_RecomputeExit(&appData->motionQueue[arc_prev], arc_cruise);
+                        DEBUG_PRINT_MOTION("[LOOKAHEAD] Arc entry: patched preceding G1 exit to %.1f mm/s\r\n", arc_cruise);
+                    }
+                }
+            }
+
             return true;
         }
-        
+
         case GCODE_EVENT_SPINDLE_ON:
             appData->modalSpindleRPM = event->data.spindle.rpm;
             SPINDLE_SetSpeed(event->data.spindle.rpm);

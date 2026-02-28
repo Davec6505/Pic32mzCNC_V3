@@ -7,6 +7,28 @@
 
 ---
 
+## ✅ Look-Ahead Single-Step Retroactive Planner — February 28, 2026
+
+Implements single-step retroactive velocity planning across `data_structures.h`, `kinematics.c`, and `motion.c`.
+
+**Core change**: when segment N arrives, the planner retroactively patches segment N-1's exit profile to the computed junction speed instead of always decelerating to safe-start (8.33 mm/s).
+
+- `incs/data_structures.h` — `MotionSegment`: Added `decel_rate_delta` (separate accel/decel deltas), `entry_speed_mms`, `exit_speed_mms`, `speed_locked`
+- `srcs/motion/kinematics.c` — `KINEMATICS_LinearMove()`: Initialise all new fields; compute `decel_rate_delta = (final_rate - nominal_rate) / decel_steps` independently from `rate_delta`
+- `srcs/motion/motion.c` — Decel phase: use `seg->decel_rate_delta` instead of `abs(seg->rate_delta)` (correct for asymmetric entry/exit speeds)
+- `srcs/motion/motion.c` — Added `MOTION_RecomputeExit()`: patches `final_rate`, `decelerate_after`, `decel_rate_delta` from a new exit speed
+- `srcs/motion/motion.c` — `MOTION_ProcessGcodeEvent()` G1 handler: hoisted `junction_speed`; after queuing N, calls `MOTION_RecomputeExit(N-1, junction_speed)` — retroactive patch guarded by `motionQueueTail` and `speed_locked`
+- `srcs/motion/motion.c` — `MOTION_Arc()`: sets `segment->speed_locked = true` on every arc segment
+- `srcs/motion/motion.c` — `GCODE_EVENT_ARC_MOVE` handler: computes `arc_cruise = min(feedrate, sqrt(accel * mm_per_arc_segment))` and patches preceding G1 exit to `arc_cruise` for smooth G1→arc entry
+
+**Effect**:
+- Consecutive same-direction G1 moves glide through without decelerating
+- Corner G1 moves decelerate to the correct angle-computed junction speed
+- G1→arc: preceding G1 decelerates to arc cruise speed not to near-stop
+- Arc segments remain speed-locked, immune to further patching
+
+---
+
 ## ✅ Arc Cruise Speed Fix — February 28, 2026
 
 - `srcs/motion/kinematics.c:500` — `KINEMATICS_LinearMoveSimple()` — Replaced hardcoded `8.33 mm/s` entry/exit velocity with computed triangle-peak cruise speed: `arc_cruise = min(feedrate, sqrt(min_accel_xy * chord_mm))`. Passes `arc_cruise` as feedrate AND entry/exit so `nominal=initial=final` — trapezoidal profiler is fully inactive for arc segments. Consecutive arc segments run back-to-back at constant speed with no inter-segment deceleration. Fixes circles running at ~11 mm/min instead of commanded feedrate.
