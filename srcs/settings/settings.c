@@ -50,11 +50,15 @@ static const CNC_Settings default_settings = {
     .step_enable_invert = 0,       // false as uint8
     .limit_pins_invert = 0,        // false as uint8
     
-    // Steps per mm (typical for 1/8 microstepping, 200 steps/rev, 5mm pitch) - Array-based
-    .steps_per_mm = {156.0f, 156.0f, 156.0f, 156.0f},  // [X, Y, Z, A]
+    // Steps per mm — 16-microstep, 200 steps/rev:
+    //   X/Y: GT2 belt, 20-tooth pulley → 40mm/rev → 3200/40 = 80 steps/mm
+    //   Z:   M6 leadscrew, 1mm pitch  → 1mm/rev  → 3200/1  = 3200 steps/mm
+    //   A:   GT2 belt (same as X/Y)
+    .steps_per_mm = {80.0f, 80.0f, 3200.0f, 80.0f},    // [X, Y, Z, A]
     
     // Max rates (mm/min) - Array-based
-    .max_rate = {5000.0f, 5000.0f, 2000.0f, 5000.0f},  // [X, Y, Z, A]
+    // Z limited to 300mm/min (leadscrew — fast rapids risk missed steps)
+    .max_rate = {5000.0f, 5000.0f, 300.0f, 5000.0f},   // [X, Y, Z, A]
     
     // Acceleration (mm/sec^2) - Array-based
     .acceleration = {5000.0f, 5000.0f, 200.0f, 500.0f},  // [X, Y, Z, A]
