@@ -7,6 +7,75 @@
 
 ---
 
+## ✅ Bug Fix: G0 rapids running at modal feedrate instead of max_rate — March 1, 2026
+
+**Root cause**: `GCODE_EVENT_LINEAR_MOVE` had no `isRapid` flag. Both G0 and G1 produced
+the same event. In `motion.c`, when `feedrate == 0` (no F word on G0), the code substituted
+`modalFeedrate` (e.g. F500) instead of the per-axis `max_rate` settings. All G0 moves crawled
+at the last programmed feed rate, adding up to a perceived "30-second pause" after any G-code
+program containing rapids.
+
+**Fix**:
+- `incs/gcode/gcode_parser.h:61` — Added `bool isRapid` to `linearMove` event struct
+- `srcs/gcode/gcode_parser.c:479` — Set `ev->data.linearMove.isRapid = (gnum == 0)` in parser
+- `srcs/motion/motion.c:337` — When `isRapid`, compute vector feedrate from per-axis `max_rate`
+  using GRBL inverse-time approach: `feedrate = total_dist / max(delta[axis] / max_rate[axis])`.
+  G0 does **not** update `modalFeedrate` (G0 speed is not persistent).
+
+**Effect**: G0 rapids now run at up to 5000 mm/min (X/Y default max_rate) instead of F500.
+The "30-second" two-square test should now complete in ~15 seconds (10s G1 motion + fast G0s).
+
+---
+
+## ✅ Bug Fix: INT3R wrong PPS value — E-Stop ISR never fired — March 1, 2026
+
+**Root cause**: `INT3R = 3` in `srcs/config/default/peripheral/gpio/plib_gpio.c` mapped
+the INT3 external interrupt input to the wrong peripheral pin via PPS (Peripheral Pin Select).
+RF4 (E-Stop pin) requires `INT3R = 2`. With value 3, INT3 was connected to a different
+pin entirely so the ISR never fired regardless of button state.
+
+**Fix**: Changed by user in `srcs/config/default/peripheral/gpio/plib_gpio.c:103`:
+```c
+INT3R = 2;    /* INT3 → RPF4 (RF4) for E-Stop — must be 2, not 3 */
+```
+
+**Key lesson**: When an ISR never fires, **check PPS mapping first** (`INT3R`, `U3RXR` etc.)
+before looking at edge polarity, priority, or code logic. A wrong PPS value silently
+misroutes the interrupt source to a different pin.
+
+**Wrong analysis (reverted)**: `INTCONSET→INTCONCLR` change in `plib_evic.c` was
+incorrect and has been reverted — `INTCONSET = _INTCON_INT3EP_MASK` is correct for
+falling-edge on this device.
+
+---
+
+## ⚠️ Post-Mortem: Homing broken by unnecessary code changes — March 1, 2026 (REVERTED)
+
+**What happened**: User reported "Y won't home after Z" after a firmware flash. Rather than
+first verifying whether the issue was a settings/hardware problem, changes were made directly
+to production homing code based on analysis of a conversation summary that described
+*earlier-session* bugs (some of which had already been fixed in code). Specifically:
+
+- `HOMING_NextAxis()` in `srcs/motion/homing.c` was rewritten (adding `return true`, `break`,
+  `UTILS_HomingSetCurrentAxis`, `UTILS_HomingLimitReset`) — these changes introduced unexpected
+  timing behaviour and broke the working state machine
+- `HOMING_IsLimitActiveNow()` was added to `homing.c` + `homing.h` — the function already
+  existed as `HOMING_LimitTriggered()` and the stale summary had mislabelled the issue
+- `STATUS.md` was updated prematurely to record these as completed fixes
+
+**Root cause of the bad session**: The conversation summary described three "candidate bugs" from
+earlier analysis. At least one (the $22 mask issue) had already been fixed in committed code.
+Changes were applied without first reading the current file contents to confirm the bugs still
+existed, violating the workspace rule to always read before editing.
+
+**Resolution**: All changes reverted with `git restore`. The Y homing issue was resolved by
+the user correcting flash settings (steps/mm, rates). No code change was needed.
+
+**Lesson**: When homing reports a symptom after a settings change, **check settings first**
+(`$$`), build with `DEBUG_MOTION` to observe state transitions, before touching working code.
+
+---
+
 ## ✅ Bug Fix: LinearMoveSimple unit mismatch — homing crept at ~387 mm/min regardless of $24/$25 — March 1, 2026
 
 **Root cause**: `KINEMATICS_LinearMoveSimple()` compared `sqrtf(arc_accel * chord_mm)` (mm/s)

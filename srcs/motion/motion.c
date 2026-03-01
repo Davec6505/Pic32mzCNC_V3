@@ -332,15 +332,43 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             }
             */
             
-            // Use feedrate from event, or modal feedrate if not specified
+            // Use feedrate from event, or rapid/modal feedrate if not specified
             float feedrate = event->data.linearMove.feedrate;
-            if (feedrate == 0.0f) {
-                // If modal is also zero (e.g., after reset), apply a safe default (600 mm/min)
+            if (event->data.linearMove.isRapid) {
+                // ✅ G0 RAPID: compute vector feedrate from per-axis max_rate settings
+                // Finds the maximum feedrate that doesn't exceed any axis's max_rate.
+                // Algorithm: the slowest axis limits the move (GRBL inverse-time approach).
+                CNC_Settings* rsettings = SETTINGS_GetCurrent();
+                float delta_mm[NUM_AXIS];
+                float total_dist = 0.0f;
+                for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                    delta_mm[axis] = fabsf(GET_COORDINATE_AXIS(&end, axis) - GET_COORDINATE_AXIS(&start, axis));
+                    total_dist += delta_mm[axis] * delta_mm[axis];
+                }
+                total_dist = sqrtf(total_dist);
+                if (total_dist > 0.001f) {
+                    // Find smallest (max_rate[axis]/delta[axis]) ratio — that axis is the bottleneck
+                    float min_time_sec = 0.0f;
+                    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                        if (delta_mm[axis] > 0.001f) {
+                            float axis_time = delta_mm[axis] / (rsettings->max_rate[axis] / 60.0f);  // sec
+                            if (axis_time > min_time_sec) min_time_sec = axis_time;
+                        }
+                    }
+                    feedrate = (min_time_sec > 0.0f) ? (total_dist / min_time_sec * 60.0f) : rsettings->max_rate[AXIS_X];
+                } else {
+                    feedrate = rsettings->max_rate[AXIS_X];  // Zero-length rapid — doesn't matter
+                }
+                DEBUG_PRINT_MOTION("[RAPID] G0 feedrate=%.0f mm/min (from max_rate)\r\n", feedrate);
+                // G0 does NOT update modalFeedrate (G0 speed is not modal)
+            } else if (feedrate == 0.0f) {
+                // G1 with no F word: use modal feedrate
                 if (appData->modalFeedrate <= 0.0f) {
                     appData->modalFeedrate = 600.0f;
                 }
                 feedrate = appData->modalFeedrate;
             } else {
+                // G1 with explicit F word: update modal feedrate
                 appData->modalFeedrate = feedrate;
             }
             

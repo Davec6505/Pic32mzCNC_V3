@@ -100,7 +100,7 @@ void GPIO_Initialize ( void )
     /* PPS Input Remapping */
     U3RXR = 2;
     SDI2R = 1;
-    INT3R = 3;    /* INT3 → RPF4 (RF4) for E-Stop */
+    INT3R = 2;    /* INT3 → RPF4 (RF4) for E-Stop must be 2 not 3*/
 
     /* PPS Output Remapping */
     RPD5R = 12;
