@@ -556,12 +556,12 @@ void OCP1_ISR(uintptr_t context) {
     // The rest term carries the integer remainder for sub-tick precision.
     uint32_t sc = seg->steps_completed;
 
-    // Decel phase entry: snap to Taylor-effective decel speed and reset counters
+    // Decel phase entry: load symmetric starting index, reset rest, no speed snap.
+    // step_interval stays at cruise — rest accumulator builds sub-tick precision from step 1.
     if (sc == seg->decelerate_after && sc < seg->steps_remaining) {
-        seg->accel_count   = seg->accel_count_decel;  // = -n_min (capped for granularity)
-        seg->rest          = 0;
-        seg->step_interval = seg->decel_entry_rate;   // Snap to speed where Taylor gives >= 1 tick/step
-        seg->jerk_count    = 0;
+        seg->accel_count = seg->accel_count_decel;  // = -(n_entry + accel_steps)
+        seg->rest        = 0;
+        seg->jerk_count  = 0;
     }
 
     if (sc < seg->accelerate_until) {
@@ -602,23 +602,22 @@ void OCP1_ISR(uintptr_t context) {
             seg->step_interval = (uint32_t)new_iv;
         }
     } else if (sc >= seg->decelerate_after) {
-        // Deceleration: accel_count is negative (set to -n_min at decel entry), increments toward 0.
-        // n_min is chosen so that (4*n_min+1) is always large enough that the Taylor delta
-        // >= 1 tick — no more zero-increment silent stall.
-        // The speed gap from cruise to decel_entry_rate was handled at entry (one snap).
-        // When accel_count reaches 0, den = 1 → explode guard: snap to final_rate.
+        // Deceleration: symmetric mirror of accel.
+        // accel_count runs from -(n_entry+accel_steps) toward 0.
+        // abs_n = -accel_count is always positive (and shrinking), so den is always positive.
+        // Small delta at large abs_n is fine — rest accumulates sub-tick precision each step,
+        // giving a smooth ramp that naturally builds into stronger braking near the end.
         seg->accel_count++;
-        int32_t den = (seg->accel_count << 2) + 1;
-        if (den <= 0) {
-            // Safely negative — Taylor decel step
+        int32_t abs_n = -seg->accel_count;
+        if (abs_n > 0) {
+            int32_t den    = (abs_n << 2) + 1;                         // always positive
             int32_t num    = ((int32_t)seg->step_interval << 1) + seg->rest;
             seg->rest      = num % den;
-            int32_t new_iv = (int32_t)seg->step_interval - (num / den);
-            if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
-            if (new_iv > (int32_t)seg->final_rate)   new_iv = (int32_t)seg->final_rate;
+            int32_t new_iv = (int32_t)seg->step_interval + (num / den); // ADD: interval grows = slower
+            if (new_iv > (int32_t)seg->final_rate) new_iv = (int32_t)seg->final_rate;
             seg->step_interval = (uint32_t)new_iv;
         } else {
-            // den >= 1: accel_count crossed zero — snap to final_rate and hold
+            // accel_count reached 0 — hold at final_rate
             seg->rest          = 0;
             seg->step_interval = seg->final_rate;
         }

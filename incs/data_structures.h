@@ -95,7 +95,6 @@ typedef struct {
     uint8_t  jerk_steps_log2;    // log2(jerk_steps) — used for fast bit-shift division in ISR
     uint8_t  jerk_pad[3];        // Alignment padding
     int32_t  jerk_count;         // ISR running counter for S-curve ramp; reset to 0 at segment and decel start
-    uint32_t decel_entry_rate;   // step_interval to jump to at decel phase entry (Taylor-effective start speed)
 
     // Physics parameters (calculated by kinematics for reference/debugging)
     float start_velocity;        // Starting velocity for this segment (mm/sec)
