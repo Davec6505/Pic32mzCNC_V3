@@ -36,7 +36,7 @@ endif
 
 # RM command with dry run and logging support to remove files matching a pattern in a directory
 ifeq ($(OS),Windows_NT)
-	RM = powershell -NoProfile -ExecutionPolicy Bypass -Command \
+	RM = powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \
 	"\$$ConfirmPreference = 'None'; \
 	\$$dryRun = '$(DRY_RUN)' -eq '1'; \
 	\$$logPath = \$$env:LOG_PATH; \
@@ -46,7 +46,8 @@ ifeq ($(OS),Windows_NT)
 		Write-Host ('Would delete: ' + \$$item.FullName) -ForegroundColor Red; \
 		if (\$$logPath) { Add-Content -Path \$$logPath -Value ('Would delete: ' + \$$item.FullName) } \
 		} else { \
-		Remove-Item \$$item.FullName -Force -ErrorAction SilentlyContinue; \
+		Set-ItemProperty -Path \$$item.FullName -Name IsReadOnly -Value \$$false -ErrorAction SilentlyContinue; \
+		Microsoft.PowerShell.Management\Remove-Item \$$item.FullName -Force -Confirm:\$$false -ErrorAction SilentlyContinue; \
 		if (Test-Path \$$item.FullName) { \
 			Write-Host ('Warning: Could not delete ' + \$$item.FullName) -ForegroundColor Yellow; \
 			if (\$$logPath) { Add-Content -Path \$$logPath -Value ('Warning: Could not delete ' + \$$item.FullName) } \

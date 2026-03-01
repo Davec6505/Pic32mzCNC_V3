@@ -55,13 +55,6 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 
 To ensure proper build configuration and output paths, always execute `make` commands from the root directory of the Pic32mzCNC_V3 project. This guarantees that all relative paths and build settings are correctly applied. makefile incs target is dynamic, it knows the paths no need to add absolute file references, all paths are relative to the root directory.
 
-## Critical Build Rules
-
-### ⚠️ NEVER Run `make clean` — Ask the User Instead
-Running `make clean` in the terminal via tool calls causes the terminal to freeze and become unresponsive.
-- ❌ **DO NOT** call `run_in_terminal` with `make clean` or `make clean && make`
-- ✅ **DO**: Ask the user to run `make clean` themselves in their terminal, then wait for confirmation before proceeding with `make`
-
 ## ­ƒÜÇ Current Implementation Status (November 13, 2025)
 
 ### Always Run Make from Root Directory
