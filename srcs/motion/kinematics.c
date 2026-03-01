@@ -290,54 +290,94 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         segment_buffer->decelerate_after = (uint32_t)max_delta - decel_steps;
     }
     
-    // Minimum practical start/stop speed.
-    // Physics floor: sqrt(2*a/spm) — max speed a stepper can start from rest
-    // without losing steps given the configured acceleration.
-    // We multiply by 3 to make the first step feel snappy without exceeding
-    // motor torque capability (3x is empirically reasonable for most steppers).
-    // This is independent of feedrate, so slow moves can still run slowly.
-    float safe_start = sqrtf(2.0f * acceleration_mm_sec2 / steps_per_mm_dominant) * 3.0f;
-    if (safe_start < 1.0f)             safe_start = 1.0f;
-    if (safe_start > feedrate_mm_sec)  safe_start = feedrate_mm_sec;
-    float min_steps_per_sec = safe_start * steps_per_mm_dominant;
-
-    // Calculate entry and exit step rates from junction velocities
-    float entry_steps_per_sec = fmaxf(entry_velocity * steps_per_mm_dominant, min_steps_per_sec);
-    float exit_steps_per_sec  = fmaxf(exit_velocity  * steps_per_mm_dominant, min_steps_per_sec);
-    
-    segment_buffer->initial_rate = (uint32_t)(TIMER_FREQ / entry_steps_per_sec);
-    segment_buffer->final_rate = (uint32_t)(TIMER_FREQ / exit_steps_per_sec);
-
-    // ✅ FIX: Ensure rates don't go faster than nominal (LOWER rate = FASTER speed in timer ticks)
-    // nominal_rate is the FASTEST allowed speed (minimum ticks between steps)
-    if (segment_buffer->initial_rate < segment_buffer->nominal_rate) {
-        segment_buffer->initial_rate = segment_buffer->nominal_rate;  // Start at cruise speed
-    }
-    if (segment_buffer->final_rate < segment_buffer->nominal_rate) {
-        segment_buffer->final_rate = segment_buffer->nominal_rate;    // End at cruise speed
-    }
-    
-    // Taylor series (Austin/Aryzen) starting indices:
-    // Formula: n = 2·v²·spm/a − 1   (inverse of c_n ≈ c_0/sqrt(n+1))
+    // =========================================================================
+    // TAYLOR SERIES INITIAL CONDITIONS  (Austin/Aryzen algorithm)
+    // =========================================================================
+    // c₀ = TIMER_FREQ · √(2 / (a · spm))  — physics first-step interval from rest.
     //
-    // ACCEL: ISR starts at n_entry and counts UP — picks up mid-ramp at junction speed.
-    // DECEL: ISR starts at -(decel_steps + n_exit) and counts UP toward -n_exit.
-    //        abs_n = -accel_count shrinks from (decel_steps+n_exit) → n_exit,
-    //        giving a ramp that ends exactly at exit_v. Den always positive.
+    // Problem: raw c₀ can be thousands of ticks (< 200 Hz step rate).  At those
+    // rates most stepper motors/drivers won't produce enough torque to actually
+    // move, especially under load.  We therefore clamp c₀ to a minimum step
+    // frequency (maximum timer interval).
+    //
+    // Taylor index formula:   n = 2·v²·spm/a − 1
+    // KEY RULE: n_entry MUST be derived from the ACTUAL initial_rate used,
+    // not from a separate velocity.  Inconsistent (rate, n) pairs make the
+    // denominator (4n+1) wrong from step 1 → tiny deltas → frozen acceleration.
+    //
+    // Unified derivation (works for clamped and unclamped c₀):
+    //   effective_c  = actual timer interval to be used
+    //   v_effective  = TIMER_FREQ / (effective_c · spm)
+    //   n            = 2·v_effective²·spm/a − 1  (floor, min 0)
+    // When c₀ is NOT clamped this gives n=0 exactly (entry from true rest).
+    // When c₀ IS clamped this gives n>0 — correctly reflecting that the motor
+    // starts mid-ramp at the minimum practical speed.
+    //
+    // ACCEL: ISR starts at n_entry, counts UP → shrinking interval → faster.
+    // DECEL: ISR starts at -(decel_steps + n_exit), counts UP toward −n_exit.
+    //        abs_n shrinks → denominator shrinks → delta grows → strong braking.
+    // =========================================================================
 
-    // Use clamped velocities (safe_start floored) so n values match initial/final_rate
-    float entry_v_mms = entry_steps_per_sec / steps_per_mm_dominant;
-    float exit_v_mms  = exit_steps_per_sec  / steps_per_mm_dominant;
+    // Minimum step frequency: stepper motor won't reliably move below this.
+    // 200 Hz is conservative (most drivers work fine at 50+ Hz, but load,
+    // microstepping, and resonance can stall motors at very low rates).
+    // Increase this value if the motor hesitates on the first step.
+    const float MIN_STEP_HZ = 200.0f;
 
-    int32_t n_entry = (int32_t)(2.0f * entry_v_mms * entry_v_mms *
-                                steps_per_mm_dominant / acceleration_mm_sec2) - 1;
-    if (n_entry < 0) n_entry = 0;
-    segment_buffer->accel_count = n_entry;
-    segment_buffer->rest        = 0;
+    // Physics c₀ from rest, clamped to minimum practical step rate.
+    // c₀_max is the LONGEST tick interval still guaranteed to produce motion.
+    float c0 = TIMER_FREQ * sqrtf(2.0f / (acceleration_mm_sec2 * steps_per_mm_dominant));
+    float c0_max = TIMER_FREQ / MIN_STEP_HZ;   // e.g. 781250/200 = 3906 ticks
+    if (c0 > c0_max) c0 = c0_max;              // clamp: never slower than MIN_STEP_HZ
+    if (c0 < 1.0f)   c0 = 1.0f;               // safety: never overflow timer
 
-    int32_t n_exit = (int32_t)(2.0f * exit_v_mms * exit_v_mms *
-                               steps_per_mm_dominant / acceleration_mm_sec2) - 1;
-    if (n_exit < 0) n_exit = 0;
+    // --- ENTRY (accel start) ---
+    // Use c₀ (possibly clamped) for zero-velocity entry, or junction interval.
+    float entry_c;
+    if (entry_velocity <= 0.0f) {
+        entry_c = c0;
+    } else {
+        // Junction: timer interval from junction velocity.
+        // Junction velocity is always >> MIN_STEP_HZ/spm so no clamping needed here.
+        entry_c = TIMER_FREQ / (entry_velocity * steps_per_mm_dominant);
+    }
+    segment_buffer->initial_rate = (uint32_t)entry_c;
+    // Clamp: can't start faster than cruise.
+    if (segment_buffer->initial_rate < segment_buffer->nominal_rate)
+        segment_buffer->initial_rate = segment_buffer->nominal_rate;
+
+    // Derive n_entry CONSISTENTLY from the rate actually stored.
+    // This is the only correct approach — avoids the (rate,n) inconsistency bug.
+    {
+        float v_eff = TIMER_FREQ / ((float)segment_buffer->initial_rate * steps_per_mm_dominant);
+        int32_t n_entry = (int32_t)(2.0f * v_eff * v_eff * steps_per_mm_dominant
+                                    / acceleration_mm_sec2) - 1;
+        if (n_entry < 0) n_entry = 0;
+        segment_buffer->accel_count = n_entry;
+    }
+    segment_buffer->rest = 0;
+
+    // --- EXIT (decel end) ---
+    float exit_c;
+    if (exit_velocity <= 0.0f) {
+        exit_c = c0;   // decel mirrors accel: ends at same clamped c₀
+    } else {
+        exit_c = TIMER_FREQ / (exit_velocity * steps_per_mm_dominant);
+    }
+    segment_buffer->final_rate = (uint32_t)exit_c;
+    // Clamp: decel can't end faster than cruise.
+    if (segment_buffer->final_rate < segment_buffer->nominal_rate)
+        segment_buffer->final_rate = segment_buffer->nominal_rate;
+
+    // Derive n_exit consistently (same rule as n_entry).
+    int32_t n_exit;
+    {
+        float v_eff = TIMER_FREQ / ((float)segment_buffer->final_rate * steps_per_mm_dominant);
+        n_exit = (int32_t)(2.0f * v_eff * v_eff * steps_per_mm_dominant
+                           / acceleration_mm_sec2) - 1;
+        if (n_exit < 0) n_exit = 0;
+    }
+
     segment_buffer->accel_count_decel = -((int32_t)decel_steps + n_exit);
 
     // S-curve jerk disabled — perfecting junction-velocity trapezoidal profile first.

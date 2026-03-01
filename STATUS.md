@@ -1,9 +1,19 @@
 # Pic32mzCNC_V3 - Development Status Tracker
 
-**Branch**: `lookahead`  
+**Branch**: `tmc5160`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
 **Last Updated**: March 1, 2026
+
+---
+
+## ✅ Fix: Taylor series MIN_STEP_HZ clamp + consistent n derivation — March 1, 2026
+
+- `srcs/motion/kinematics.c` — Replaced previous `safe_start*3` block and `n_entry=0` approach:
+  - Added `MIN_STEP_HZ = 200.0f`: physics `c₀` clamped so motor never steps slower than 200 Hz — prevents stall on first step at low acceleration / high microstepping settings
+  - `n_entry` / `n_exit` now derived **from the actual `initial_rate`/`final_rate` stored** via `v_eff = TIMER_FREQ/(rate·spm)`, `n = 2·v_eff²·spm/a − 1` — eliminates the (rate, n) inconsistency that caused frozen/creeping acceleration
+  - When `c₀` is not clamped the formula gives `n=0` exactly (true from-rest start); when clamped it gives `n>0`, consistently reflecting the mid-ramp start speed
+  - Same symmetric fix applied to decel exit side (`n_exit`, `final_rate`)
 
 ---
 
