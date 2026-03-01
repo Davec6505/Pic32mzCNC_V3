@@ -35,6 +35,23 @@ For every code addition, modification, or correction:
 
 All sub README's are under docs/readme
 
+## 🔴 CRITICAL: README.md Must Stay Current
+
+**`README.md` is the authoritative public description of the system. It must be updated whenever code changes affect:**
+- Feature status table (any feature added, completed, or changed)
+- ISR architecture or step sequence
+- Hardware pin assignments or timer configuration
+- New GRBL settings ($-parameters)
+- New safety flags or global state variables
+- Motion pipeline or call hierarchy
+- Build commands or file structure
+
+For every code change session:
+- ✅ **DO**: Update the relevant README.md section(s) to match the new code
+- ✅ **DO**: Update STATUS.md AND README.md when both are affected
+- ❌ **DO NOT**: Leave README.md describing old/removed behaviour (e.g. a phase system that no longer exists)
+- ❌ **DO NOT**: Commit code changes without checking whether README.md needs a corresponding update
+
 ## Project Overview
 
 CNC motion control system for PIC32MZ microcontrollers with GRBL v1.1 protocol compliance, 4-axis coordinated motion, and hardware-optimized stepper control.## Project Overview

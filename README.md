@@ -142,12 +142,28 @@ All Bresenham interpolation and velocity profiling execute **inside** `OCP1_ISR`
    - Decel: `step_interval += decel_rate_delta` (ceil at `final_rate`)
 7. `PR4 = period`, `OC1R = period-5`, `OC1RS = period-3` — direct SFR writes. Timer/OC silicon never changes board-to-board so no Harmony abstraction is needed here.
 8. `seg->steps_completed++`
+9. **Segment completion check** — if `steps_completed >= steps_remaining`: write `T4CONCLR = _T4CON_ON_MASK` directly (stops TMR4 in silicon *inside the ISR*, before returning) → set `motionSegmentCompleted = true` → `return`. This eliminates phantom ISR calls that would otherwise occur on the next TMR4 rollover after the final step.
 
 **TMR5 callback** (pulse width ~2.56 µs later): `T5CONCLR` stops timer; four unrolled Harmony macros `StepX_Clear()…StepA_Clear()` cleared unconditionally.
 
 **GPIO vs Timer/OC split:**
 - **GPIO** (board-specific, MCC-managed): Harmony `#define` macros (`StepX_Set()` etc.) — MCC pin renames propagate automatically.
 - **Timer/OC** (silicon, never board-specific): direct SFR registers (`PR4`, `OC1R`, `OC1RS`, `T5CONSET`, `T5CONCLR`).
+
+### Dwell (G4)
+
+Dwell segments (`SEGMENT_TYPE_DWELL`) bypass the TMR4/OC1 hardware entirely. `STEPPER_LoadSegment()` records a CoreTimer start value and duration (CoreTimer runs at 100 MHz = CPU/2), then returns immediately. The segment is held in `currentSegment` until `STEPPER_IsDwellComplete()` confirms the elapsed CoreTimer ticks exceed `dwell_duration`. No step pulses are generated; the motion queue does not advance until the dwell expires.
+
+### Safety Flags
+
+Three volatile flags gate motion and new command processing at runtime:
+
+| Flag | Set by | Cleared by | Effect |
+|------|--------|------------|--------|
+| `g_feed_hold_active` | `!` real-time char | `~` resume or soft reset | Gates new event processing and arc generation; current segment drains completely |
+| `g_feed_hold_pending` | `!` real-time char | motion queue drains to 0 | Status reports `Hold:1` (decelerating); transitions to `Hold:0` when queue empty |
+| `g_suppress_hard_limits` | soft reset (Ctrl+X) | all limit pins physically release | Allows jogging off a triggered limit after reset without ALARM |
+| `g_estop_pending` | `ESTOP_Callback` ISR (RF4 IPL7) | soft reset / main loop | Triggers immediate `STEPPER_DisableAll()` and `APP_ALARM` state |
 
 ### Look-Ahead Planner
 
@@ -162,7 +178,7 @@ Command received
   motionQueueCount > 0? → defer "ok" (okPending = true)
   motionQueueCount == 0? → send "ok" immediately
 
-Segment completes → motionSegmentCompleted flag
+Segment completes (motionSegmentCompleted flag set in ISR)
   → CheckDeferredOk(): if okPending && count==0 → send "ok"
 ```
 
