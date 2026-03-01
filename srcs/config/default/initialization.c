@@ -182,13 +182,14 @@ void SYS_Initialize ( void* data )
 
 
 
-	GPIO_Initialize();
+	  GPIO_Initialize();
     LED1_Set();          /* DIAG: reached GPIO init OK */
 
     OCMP8_Initialize();
 
     CORETIMER_Initialize();
-	UART3_Initialize();
+
+	  UART3_Initialize();
     LED2_Set();          /* DIAG: reached UART3 init OK */
 
     TMR6_Initialize();
@@ -199,7 +200,7 @@ void SYS_Initialize ( void* data )
 
     OCMP1_Initialize();
 
-	SPI2_Initialize();
+	  SPI2_Initialize();
     LED1_Clear();        /* DIAG: past SPI2 init */
 
     NVM_Initialize();

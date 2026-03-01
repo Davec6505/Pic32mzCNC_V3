@@ -7,6 +7,18 @@
 
 ---
 
+## ✅ Fix: Remove [CHECK] debug flood in motion.c — March 1, 2026
+
+- `srcs/motion/motion.c:68` — `MOTION_Tasks()` — Removed the throttled `[CHECK] steps_completed/steps_remaining` debug print. Even throttled at 5000 iterations, at 200MHz the main loop fires it roughly once per step (~800 prints per 10mm move at F100), saturating UART during motion. Serial test confirmed motion works correctly (800/800 steps complete). The `[SEGMENT] Complete` print at segment end is retained.
+
+---
+
+## ✅ Fix: Zero-step early-exit in KINEMATICS_LinearMove — March 1, 2026
+
+- `srcs/motion/kinematics.c:197` — `KINEMATICS_LinearMove()` — Added early-exit guard immediately after `max_delta` is computed: when all axes produce 0 steps, set `steps_remaining = 0` and return without running the Taylor/trapezoid physics (avoids wasted computation and spurious `[KIN]` debug lines for bare `G0` / feedrate-only `G1 Fxxx` commands). Caller in `motion.c` already has a `steps_remaining == 0` check that discards the segment and updates position correctly.
+
+---
+
 ## ✅ Fix: Taylor series MIN_STEP_HZ clamp + consistent n derivation — March 1, 2026
 
 - `srcs/motion/kinematics.c` — Replaced previous `safe_start*3` block and `n_entry=0` approach:

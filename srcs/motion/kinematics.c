@@ -193,7 +193,20 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     
     // Store dominant delta (used by Bresenham in ISR)
     segment_buffer->dominant_delta = max_delta;
-    
+
+    // -------------------------------------------------------------------------
+    // ZERO-STEP GUARD — no movement, skip all physics calculations.
+    // The caller (motion.c) checks steps_remaining == 0 and handles the
+    // position update + ok response; returning here avoids wasted computation
+    // and spurious debug output for commands like bare "G0" or "G1 F500".
+    // -------------------------------------------------------------------------
+    if (max_delta == 0) {
+        DEBUG_PRINT_MOTION("[KIN] Zero-step move — skipping physics\r\n");
+        segment_buffer->steps_remaining = 0;
+        segment_buffer->steps_completed = 0;
+        return segment_buffer;
+    }
+
     // Convert feedrate from mm/min to mm/sec
     float feedrate_mm_sec = feedrate / 60.0f;
     // Guard: if no feed specified (0 or negative), fall back to a safe default
@@ -233,9 +246,9 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     }
     segment_buffer->nominal_rate = (uint32_t)(TIMER_FREQ / steps_per_sec);
     
-    // DEBUG_PRINT_MOTION("[KINEMATICS] F=%.1f mm/min, steps/mm=%.1f, steps/sec=%.1f, nominal_rate=%lu ticks (%.2fms)\\r\\n",
-    //     feedrate, steps_per_mm_dominant, steps_per_sec, 
-    //     segment_buffer->nominal_rate, (float)segment_buffer->nominal_rate / TIMER_FREQ * 1000.0f);
+    DEBUG_PRINT_MOTION("[KIN] F=%.0f mm/min, spm=%.1f, nominal=%lu ticks, a=%.1f mm/s2\r\n",
+        feedrate, steps_per_mm_dominant,
+        segment_buffer->nominal_rate, acceleration_mm_sec2);
     
     // =========================================================================
     // JUNCTION-AWARE TRAPEZOIDAL VELOCITY PROFILE
@@ -353,6 +366,10 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // initial_rate that breaks the Austin n_entry calculation.
     float max_entry_c = fminf(c0, MAX_START_RATIO * (float)segment_buffer->nominal_rate);
 
+    DEBUG_PRINT_MOTION("[KIN] c0=%.1f 4xnom=%.1f max_entry_c=%.1f entry_vel=%.3f mm/s\r\n",
+        c0, MAX_START_RATIO * (float)segment_buffer->nominal_rate,
+        max_entry_c, entry_velocity);
+
     float entry_c;
     if (entry_velocity <= 0.0f) {
         // From rest.
@@ -366,6 +383,10 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // Hard floor: can't start faster than cruise.
     if (segment_buffer->initial_rate < segment_buffer->nominal_rate)
         segment_buffer->initial_rate = segment_buffer->nominal_rate;
+
+    DEBUG_PRINT_MOTION("[KIN] initial_rate=%lu accel_count_pre=%ld\r\n",
+        segment_buffer->initial_rate,
+        AUSTIN_N((float)segment_buffer->initial_rate));
 
     segment_buffer->accel_count = AUSTIN_N((float)segment_buffer->initial_rate);
     segment_buffer->rest = 0;

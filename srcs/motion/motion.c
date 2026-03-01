@@ -70,14 +70,6 @@ void MOTION_Tasks(APP_DATA* appData) {
     if(appData->currentSegment != NULL) {
         MotionSegment* seg = appData->currentSegment;
         
-        // ✅ DEBUG: Periodic completion check
-        static uint32_t completion_check_counter = 0;
-        if (++completion_check_counter >= 5000) {
-            completion_check_counter = 0;
-            DEBUG_PRINT_MOTION("[CHECK] steps_completed=%lu, steps_remaining=%lu\r\n",
-                seg->steps_completed, seg->steps_remaining);
-        }
-        
         if(seg->steps_completed >= seg->steps_remaining) {
             // ===== DEBUG: Segment Completion =====
             DEBUG_PRINT_MOTION("[SEGMENT] Complete: %lu >= %lu steps\r\n", 
