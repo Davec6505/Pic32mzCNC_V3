@@ -57,7 +57,7 @@ static const CNC_Settings default_settings = {
     .max_rate = {5000.0f, 5000.0f, 2000.0f, 5000.0f},  // [X, Y, Z, A]
     
     // Acceleration (mm/sec^2) - Array-based
-    .acceleration = {500.0f, 500.0f, 200.0f, 500.0f},  // [X, Y, Z, A]
+    .acceleration = {5000.0f, 5000.0f, 200.0f, 500.0f},  // [X, Y, Z, A]
     
     // Max travel (mm) - Array-based
     .max_travel = {300.0f, 300.0f, 100.0f, 0.0f},      // [X, Y, Z, A] (A=0 for rotary)
