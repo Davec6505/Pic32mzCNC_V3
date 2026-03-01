@@ -539,7 +539,9 @@ MotionSegment* KINEMATICS_LinearMoveSimple(CoordinatePoint start, CoordinatePoin
 
     // Triangle-peak speed: maximum speed achievable over chord_mm with full accel+decel
     // v_peak = sqrt(accel * chord_mm)  [from v² = 2*a*(d/2) accel + same decel]
-    float arc_cruise = fminf(feedrate, sqrtf(arc_accel * chord_mm));
+    // arc_accel is mm/s², chord_mm is mm → v_peak is mm/s → convert to mm/min for comparison
+    float v_peak_mm_min = sqrtf(arc_accel * chord_mm) * 60.0f;
+    float arc_cruise = fminf(feedrate, v_peak_mm_min);
 
     // Pass arc_cruise as feedrate AND entry/exit → nominal = initial = final → flat cruise,
     // profiler does nothing, segments run seamlessly back-to-back.
