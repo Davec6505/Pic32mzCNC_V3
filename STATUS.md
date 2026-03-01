@@ -3,11 +3,31 @@
 **Branch**: `lookahead`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: March 2, 2026
+**Last Updated**: March 1, 2026
 
 ---
 
-## ✅ Bug Fix: rate_delta ceiling division — motor never reached cruise speed — March 2, 2026
+## ✅ Bug Fix: LinearMoveSimple unit mismatch — homing crept at ~387 mm/min regardless of $24/$25 — March 1, 2026
+
+**Root cause**: `KINEMATICS_LinearMoveSimple()` compared `sqrtf(arc_accel * chord_mm)` (mm/s)
+directly against `feedrate` (mm/min) in a `fminf()`. The sqrt result (~387 mm/s for typical
+accel/distance) is always much smaller than the feedrate (e.g. 20000 mm/min), so `fminf` always
+selected the sqrt value and passed it to `KINEMATICS_LinearMove` which then treated it as mm/min.
+Result: homing ran at ~387 mm/min no matter what $24/$25 were set to.
+
+**Fix**: `srcs/motion/kinematics.c:536` — `KINEMATICS_LinearMoveSimple()` — Multiply v_peak by
+`60.0f` to convert mm/s → mm/min before the `fminf` comparison:
+```c
+float v_peak_mm_min = sqrtf(arc_accel * chord_mm) * 60.0f;
+float arc_cruise = fminf(feedrate, v_peak_mm_min);
+```
+Homing now runs at the full $25 seek rate and $24 feed rate as commanded.
+
+**Commit**: `5db7318`
+
+---
+
+## ✅ Bug Fix: rate_delta ceiling division — motor never reached cruise speed — March 1, 2026
 
 **Root cause**: `KINEMATICS_LinearMove()` computed `rate_delta` using floor (integer) division:
 ```c
