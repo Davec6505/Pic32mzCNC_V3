@@ -489,96 +489,81 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 // ============================================================================
 
 void OCP1_ISR(uintptr_t context) {
-    // ✅ GUARD: No active segment - skip step generation but keep timer running
-    if (app_data_ref == NULL || app_data_ref->currentSegment == NULL) {
-        return;  // Main loop will load next segment or stop timer
+    // ✅ GUARD: cache segment pointer once — eliminates repeated volatile double-dereference.
+    if (app_data_ref == NULL) return;
+    MotionSegment* seg = app_data_ref->currentSegment;
+    if (seg == NULL) return;
+
+    // ===== DOMINANT AXIS STEP =====
+    // switch → compiler emits jump table; each case is the Harmony #define macro which
+    // expands to a single LATxSET register write. No function call, no pointer indirection.
+    // GPIO pin assignments live in plib_gpio.h (MCC-managed) — change pins in MCC only.
+    switch (dominant_axis) {
+        case AXIS_X: StepX_Set(); break;
+        case AXIS_Y: StepY_Set(); break;
+        case AXIS_Z: StepZ_Set(); break;
+        default:     StepA_Set(); break;  // AXIS_A
     }
-    
-    // ===== DOMINANT AXIS STEP (ALWAYS) =====
-    // Use pre-calculated dominant_axis (set during STEPPER_LoadSegment)
-    // Eliminates 4 abs() calls + 3 comparisons per ISR (significant overhead reduction!)
-    
-    // Atomic GPIO step pulse - single instruction, zero overhead!
-    AXIS_StepSet(dominant_axis);
-    
-    // ✅ CRITICAL DEBUG: Read back GPIO state immediately after Set
-    // This confirms if AXIS_StepSet actually toggles the pin
+
     DEBUG_EXEC_STEPPER({
         static uint32_t debug_counter = 0;
-        if (++debug_counter >= 100) {  // Print every 100th step to avoid UART flood
-            debug_counter = 0;
-        }
+        if (++debug_counter >= 100) debug_counter = 0;
     });
-    
-    // Update step counter based on direction (inline, zero overhead)
-    if (direction_bits & (1 << dominant_axis)) {
+
+    // Update position counter (always_inline, address never taken — genuinely inlines at -O1)
+    if (direction_bits & (1U << dominant_axis)) {
         AXIS_IncrementSteps(dominant_axis);
     } else {
         AXIS_DecrementSteps(dominant_axis);
     }
-    
-    // ===== BRESENHAM FOR SUBORDINATE AXES =====
-    // ✅ ARRAY-BASED: Direct array access - ZERO pointer overhead!
-    
+
+    // ===== BRESENHAM SUBORDINATE AXES =====
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        // Skip dominant axis and axes with zero delta
         if (axis == dominant_axis || delta[axis] == 0) continue;
-        
-        // Bresenham error accumulation — abs_delta precomputed at segment load, zero call overhead
+
         error[axis] += abs_delta[axis];
         if (error[axis] >= dominant_delta) {
-            // Atomic GPIO step pulse - single instruction!
-            AXIS_StepSet(axis);
-            
-            // Update step counter (inline, zero overhead)
-            if (direction_bits & (1 << axis)) {
+            // Same switch pattern: Harmony macro → single LATxSET, no call overhead.
+            switch (axis) {
+                case AXIS_X: StepX_Set(); break;
+                case AXIS_Y: StepY_Set(); break;
+                case AXIS_Z: StepZ_Set(); break;
+                default:     StepA_Set(); break;
+            }
+            if (direction_bits & (1U << axis)) {
                 AXIS_IncrementSteps(axis);
             } else {
                 AXIS_DecrementSteps(axis);
             }
-            
             error[axis] -= dominant_delta;
         }
     }
-    
-    // ===== START TMR5 FOR PULSE WIDTH =====
-    // Direct SFR write — TMR5_Start() is a regular function call wrapping one register write
+
+    // ===== PULSE WIDTH TIMER =====
+    // Direct SFR — OC/TMR configuration never changes board-to-board.
     T5CONSET = _T5CON_ON_MASK;
-    
-    // ===== SCHEDULE NEXT STEP (CRITICAL!) =====
-    // TMR4 rolls over at PR4, so we use RELATIVE compare values
-    // This is what makes the motion continue - without this, only ONE step occurs!
-    if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
-        // ===== VELOCITY PROFILING (PER-STEP, INCREMENTAL) =====
-        // Executes inside ISR — M14K shadow register set means ZERO stack overhead.
-        // steps_completed is the pre-increment count (incremented at end of block).
-        MotionSegment* seg = app_data_ref->currentSegment;
-        uint32_t sc = seg->steps_completed;
-        if (sc < seg->accelerate_until) {
-            // ACCEL: decrease interval (increase speed), floor at nominal_rate
-            // rate_delta is uint32_t — no abs() needed, always positive
-            seg->step_interval = (seg->step_interval > seg->nominal_rate + seg->rate_delta)
-                               ? seg->step_interval - seg->rate_delta
-                               : seg->nominal_rate;
-        } else if (sc >= seg->decelerate_after) {
-            // DECEL: increase interval (decrease speed), ceiling at final_rate
-            // decel_rate_delta is uint32_t — no abs() needed, always positive
-            uint32_t next_iv = seg->step_interval + seg->decel_rate_delta;
-            seg->step_interval = (next_iv < seg->final_rate) ? next_iv : seg->final_rate;
-        }
-        // CRUISE: step_interval unchanged (already at nominal_rate)
 
-        // Direct SFR writes — eliminates 3 PLIB function calls (jal+prologue+epilogue each)
-        // PR4 must be >= OC1RS > OC1R per datasheet 16.3.2.5
-        uint16_t period = (uint16_t)seg->step_interval;
-        if (period < 7U) period = 7U;  // Minimum: 5 (rising offset) + 2 (pulse width)
-        PR4   = period;        // Step rate (TMR4 rolls over here)
-        OC1R  = period - 5U;   // Rising edge: pulse starts
-        OC1RS = period - 3U;   // Falling edge: ISR trigger (pulse width = 2 ticks = 2.5µs)
-
-        // Advance step counter
-        seg->steps_completed++;
+    // ===== VELOCITY PROFILING + SCHEDULE NEXT STEP =====
+    uint32_t sc = seg->steps_completed;
+    if (sc < seg->accelerate_until) {
+        seg->step_interval = (seg->step_interval > seg->nominal_rate + seg->rate_delta)
+                           ? seg->step_interval - seg->rate_delta
+                           : seg->nominal_rate;
+    } else if (sc >= seg->decelerate_after) {
+        uint32_t next_iv = seg->step_interval + seg->decel_rate_delta;
+        seg->step_interval = (next_iv < seg->final_rate) ? next_iv : seg->final_rate;
     }
+    // CRUISE: step_interval unchanged
+
+    // Direct SFR writes — OC1/TMR4 are fixed silicon, never need Harmony abstraction.
+    // PR4 >= OC1RS > OC1R (Output Compare datasheet 16.3.2.5)
+    uint16_t period = (uint16_t)seg->step_interval;
+    if (period < 7U) period = 7U;
+    PR4   = period;
+    OC1R  = period - 5U;
+    OC1RS = period - 3U;
+
+    seg->steps_completed++;
 }
 
 // ============================================================================
@@ -586,15 +571,15 @@ void OCP1_ISR(uintptr_t context) {
 // ============================================================================
 
 void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context) {
-    // LED2 removed - reserved for state indicator (homing/alarm only)
-    
-    // Stop TMR5 (one-shot mode)
-    TMR5_Stop();
-    
-    // Clear all step pins using axis configuration (not hardcoded!)
-    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        AXIS_StepClear(axis);
-    }
+    // Stop TMR5 one-shot — direct SFR, OC/TMR silicon never changes board-to-board.
+    T5CONCLR = _T5CON_ON_MASK;
+
+    // Clear all step pins via Harmony macros — MCC-managed, change pins in MCC only.
+    // All four are always cleared (simpler and faster than a loop with a function pointer call).
+    StepX_Clear();
+    StepY_Clear();
+    StepZ_Clear();
+    StepA_Clear();
 }
 
 
