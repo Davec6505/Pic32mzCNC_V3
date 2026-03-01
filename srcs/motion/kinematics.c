@@ -291,17 +291,14 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     }
     
     // Minimum practical start/stop speed.
-    // Physics floor: sqrt(2*a/spm) — max speed a stepper can start from rest safely.
-    // Practical floor: cruise/8 — ensures the first visible steps aren't painfully slow.
-    // We take the MAX so the motor always starts at a responsive speed while staying
-    // within the physics limit for the given acceleration setting.
-    // n_entry/n_exit are then computed FROM this clamped speed, so Taylor picks up
-    // mid-ramp at exactly the right interval — no step-rate discontinuity.
-    float safe_start_phys = sqrtf(2.0f * acceleration_mm_sec2 / steps_per_mm_dominant);
-    float safe_start_prac = feedrate_mm_sec / 8.0f;   // 12.5% of cruise — feels responsive
-    float safe_start = (safe_start_phys > safe_start_prac) ? safe_start_phys : safe_start_prac;
-    if (safe_start < 1.0f)              safe_start = 1.0f;
-    if (safe_start > feedrate_mm_sec)   safe_start = feedrate_mm_sec;
+    // Physics floor: sqrt(2*a/spm) — max speed a stepper can start from rest
+    // without losing steps given the configured acceleration.
+    // We multiply by 3 to make the first step feel snappy without exceeding
+    // motor torque capability (3x is empirically reasonable for most steppers).
+    // This is independent of feedrate, so slow moves can still run slowly.
+    float safe_start = sqrtf(2.0f * acceleration_mm_sec2 / steps_per_mm_dominant) * 3.0f;
+    if (safe_start < 1.0f)             safe_start = 1.0f;
+    if (safe_start > feedrate_mm_sec)  safe_start = feedrate_mm_sec;
     float min_steps_per_sec = safe_start * steps_per_mm_dominant;
 
     // Calculate entry and exit step rates from junction velocities
