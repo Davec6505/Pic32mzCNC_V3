@@ -545,17 +545,55 @@ void OCP1_ISR(uintptr_t context) {
     // Direct SFR — OC/TMR configuration never changes board-to-board.
     T5CONSET = _T5CON_ON_MASK;
 
-    // ===== VELOCITY PROFILING + SCHEDULE NEXT STEP =====
+    // ===== VELOCITY PROFILING (Taylor series — Austin/Aryzen algorithm) =====
+    // Recurrence: c_n = c_{n-1} - (2·c_{n-1} + rest) / (4·n + 1)
+    // This is the exact discretisation of constant linear acceleration:
+    // unlike a fixed linear delta, it is physically correct in real distance,
+    // eliminating the "creep then jolt" artefact at start and end of moves.
+    //
+    // Decel uses the same formula with a negative accel_count:
+    //   (4·n + 1) becomes negative → delta is negative → step_interval INCREASES.
+    // The rest term carries the integer remainder for sub-tick precision.
     uint32_t sc = seg->steps_completed;
-    if (sc < seg->accelerate_until) {
-        seg->step_interval = (seg->step_interval > seg->nominal_rate + seg->rate_delta)
-                           ? seg->step_interval - seg->rate_delta
-                           : seg->nominal_rate;
-    } else if (sc >= seg->decelerate_after) {
-        uint32_t next_iv = seg->step_interval + seg->decel_rate_delta;
-        seg->step_interval = (next_iv < seg->final_rate) ? next_iv : seg->final_rate;
+
+    // Decel phase entry: reset Taylor counters so decel mirrors accel perfectly
+    if (sc == seg->decelerate_after && sc < seg->steps_remaining) {
+        seg->accel_count = seg->accel_count_decel;  // Set to precomputed negative value
+        seg->rest        = 0;
     }
-    // CRUISE: step_interval unchanged
+
+    if (sc < seg->accelerate_until) {
+        // Acceleration: accel_count counts up from entry-velocity-corrected index
+        seg->accel_count++;
+        int32_t num    = ((int32_t)seg->step_interval << 1) + seg->rest;
+        int32_t den    = (seg->accel_count << 2) + 1;
+        seg->rest      = num % den;
+        int32_t new_iv = (int32_t)seg->step_interval - (num / den);
+        if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
+        seg->step_interval = (uint32_t)new_iv;
+    } else if (sc >= seg->decelerate_after) {
+        // Deceleration: accel_count is negative (set to -n_cruise), increments toward 0.
+        // Negative denominator (4n+1) inverts delta sign → step_interval grows (slower).
+        // GUARD: if accel_count reaches 0, den=1 and delta = 2×step_interval → explodes.
+        // Clamp to final_rate and skip the formula on that step.
+        seg->accel_count++;
+        int32_t den = (seg->accel_count << 2) + 1;
+        if (den <= 0) {
+            // Still safely negative — normal Taylor decel step
+            int32_t num    = ((int32_t)seg->step_interval << 1) + seg->rest;
+            seg->rest      = num % den;
+            int32_t new_iv = (int32_t)seg->step_interval - (num / den);
+            // step_interval must stay between nominal (fastest) and final_rate (slowest)
+            if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
+            if (new_iv > (int32_t)seg->final_rate)   new_iv = (int32_t)seg->final_rate;
+            seg->step_interval = (uint32_t)new_iv;
+        } else {
+            // den ≥ 1: accel_count crossed zero — snap to final_rate and hold
+            seg->rest          = 0;
+            seg->step_interval = seg->final_rate;
+        }
+    }
+    // CRUISE (accelerate_until ≤ sc < decelerate_after): step_interval unchanged
 
     seg->steps_completed++;
 

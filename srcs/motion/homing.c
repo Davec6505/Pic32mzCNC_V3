@@ -125,12 +125,13 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
             break;
             
         case HOMING_STATE_PULLOFF:
-            // APP.C handles limit clearing and transitions to COMPLETE
-            // Here we just wait for motion to complete
-            if (!g_homing.motion_active && appData->motionQueueCount == 0) {
-                DEBUG_PRINT_GCODE("[HOMING] PULLOFF motion complete\r\n");
-                // APP.C should have already transitioned to COMPLETE if limit cleared
-                // If we're still here, keep waiting
+            // Pulloff complete when motion queue drains — advance to COMPLETE.
+            // motion_active flag is NOT reliable here (set true by StartPulloff, never cleared
+            // by the ISR path), so check motionQueueCount alone.
+            if (appData->motionQueueCount == 0 && !appData->motionActive) {
+                DEBUG_PRINT_GCODE("[HOMING] PULLOFF complete → COMPLETE\r\n");
+                g_homing.motion_active = false;
+                g_homing.state = HOMING_STATE_COMPLETE;
             }
             break;
             

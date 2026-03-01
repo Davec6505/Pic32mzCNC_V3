@@ -115,7 +115,7 @@ void MOTION_Tasks(APP_DATA* appData) {
 // Called when the NEXT segment's entry speed (junction speed) is known.
 // Patches the exit side of a queued-but-not-executing segment so it decelerates
 // to the correct speed instead of always grinding down to safe-start (8.33 mm/s).
-// Updates: exit_speed_mms, final_rate, decelerate_after, decel_rate_delta.
+// Updates: exit_speed_mms, final_rate, decelerate_after, accel_count_decel.
 // Safe to call only on segments that are NOT currentSegment (motionQueueTail).
 // ============================================================================
 static void MOTION_RecomputeExit(MotionSegment* seg, float new_exit_mms) {
@@ -150,16 +150,11 @@ static void MOTION_RecomputeExit(MotionSegment* seg, float new_exit_mms) {
     if (new_decel_after < seg->accelerate_until) new_decel_after = seg->accelerate_until;
     seg->decelerate_after = new_decel_after;
 
-    // Recompute decel_rate_delta for the updated decel phase
-    // Use ceiling division — same reason as in KINEMATICS_LinearMove: floor would
-    // leave the ISR unable to reach final_rate within the available decel steps.
-    uint32_t actual_decel = seg->steps_remaining - seg->decelerate_after;
-    if (actual_decel > 0) {
-        uint32_t decel_range = seg->final_rate - seg->nominal_rate;
-        seg->decel_rate_delta = (decel_range + actual_decel - 1) / actual_decel;
-    } else {
-        seg->decel_rate_delta = 0;
-    }
+    // Mirror old Pic32mzCNC: decel_val = -(accel_count at end of accel phase).
+    // seg->accel_count = n_entry (not yet modified — caller guarantees segment not executing).
+    // accel_count_decel is independent of exit speed; only decelerate_after + final_rate change.
+    seg->accel_count_decel = -(seg->accel_count + (int32_t)seg->accelerate_until);
+    if (seg->accel_count_decel >= 0) seg->accel_count_decel = -1;  // Safety: must start negative
 }
 
 void MOTION_Arc(APP_DATA* appData) {
@@ -384,9 +379,15 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // entry_velocity : speed this segment starts at  (from N-1→N junction angle)
             // exit_velocity  : placeholder safe-start        (patched when segment N+1 arrives)
             // junction_speed : saved so we can retroactively patch N-1's exit after queuing N
-            float entry_velocity     = 8.33f;
-            float exit_velocity      = 8.33f;
-            float junction_speed     = 8.33f;
+            //
+            // Use 0.0f so kinematics.c safe_start floor (sqrt(2*a/steps_per_mm)) applies.
+            // This is physically correct: the motor starts at the max speed it can achieve
+            // in a single step from rest, not an arbitrary hardcoded 500mm/min.
+            float feedrate_mm_sec_local = feedrate / 60.0f;
+            float entry_velocity     = 0.0f;
+            float exit_velocity      = 0.0f;
+            float junction_speed     = 0.0f;
+            (void)feedrate_mm_sec_local;
             uint32_t look_prev_index = 0;
             bool     has_prev_patch  = false;
 

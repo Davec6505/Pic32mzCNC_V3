@@ -477,7 +477,8 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
 
         if (gnum == 0 || gnum == 1) {
             ev->type = GCODE_EVENT_LINEAR_MOVE;
-            DEBUG_PRINT_GCODE("[PARSE] Linear move (G%d)\r\n", gnum);
+            ev->data.linearMove.isRapid = (gnum == 0);  // G0 = rapid, G1 = feed
+            DEBUG_PRINT_GCODE("[PARSE] Linear move (G%d)%s\r\n", gnum, (gnum == 0) ? " RAPID" : "");
         } else if (gnum == 2) {
             ev->type = GCODE_EVENT_ARC_MOVE;
             ev->data.arcMove.clockwise = true;
@@ -515,6 +516,7 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             ev->data.linearMove.z = !isnan(axis_values[AXIS_Z]) ? axis_values[AXIS_Z] * unit_scale : NAN;
             ev->data.linearMove.a = !isnan(axis_values[AXIS_A]) ? axis_values[AXIS_A] * unit_scale : NAN;
             ev->data.linearMove.feedrate = (f > 0.0f) ? (f * unit_scale) : 0.0f;
+            // For G0, isRapid was already set above; feedrate=0 means "use max_rate in motion.c"
             return true;
         } else if (ev->type == GCODE_EVENT_ARC_MOVE) {
             char* pI = find_char((char*)cmd, 'I');

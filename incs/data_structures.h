@@ -86,8 +86,9 @@ typedef struct {
     uint32_t accelerate_until;   // Step count to end acceleration phase
     uint32_t decelerate_after;   // Step count to start deceleration phase
     
-    uint32_t rate_delta;         // Interval change per step — ACCEL phase (always positive, timer ticks)
-    uint32_t decel_rate_delta;   // Interval change per step — DECEL phase (always positive, timer ticks)
+    int32_t  accel_count;        // Taylor series: step counter n, entry-velocity-corrected starting index
+    int32_t  accel_count_decel;  // Taylor series: starting n for decel phase (negative value, set by kinematics)
+    int32_t  rest;               // Taylor series: integer remainder — prevents float drift (0 at segment start)
 
     // Physics parameters (calculated by kinematics for reference/debugging)
     float start_velocity;        // Starting velocity for this segment (mm/sec)

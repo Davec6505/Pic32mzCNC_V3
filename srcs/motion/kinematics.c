@@ -279,27 +279,30 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         segment_buffer->final_rate = segment_buffer->nominal_rate;    // End at cruise speed
     }
     
-    // Rate delta per step — accel phase
-    // ⚠️ Use CEILING division so the snap-to-nominal condition in the ISR is
-    //    guaranteed to fire within accel_steps.  Floor division leaves the
-    //    step_interval above nominal_rate at the end of the accel phase, so the
-    //    motor never actually reaches cruise speed.
-    //    Ceiling: delta = ceil(range / steps) = (range + steps - 1) / steps
-    if(accel_steps > 0) {
-        uint32_t accel_range = segment_buffer->initial_rate - segment_buffer->nominal_rate;
-        segment_buffer->rate_delta = (accel_range + accel_steps - 1) / accel_steps;
-    } else {
-        segment_buffer->rate_delta = 0;
-    }
+    // Taylor series (Austin/Aryzen) starting index for accel phase:
+    // Derived from c_n ≈ c_0/sqrt(n+1):  n = 2·v²·spm/a − 1
+    // For entry_velocity=0 → n=-1 → clamp to 0 (first step from rest).
+    // For non-zero junction entry → n>0 → ISR picks up mid-ramp correctly,
+    // so no artificial "creep" at the start of junction-speed moves.
+    float entry_v_mms = entry_steps_per_sec / steps_per_mm_dominant;
+    int32_t n_entry = (int32_t)(2.0f * entry_v_mms * entry_v_mms *
+                                steps_per_mm_dominant / acceleration_mm_sec2) - 1;
+    if (n_entry < 0) n_entry = 0;
+    segment_buffer->accel_count = n_entry;
+    segment_buffer->rest        = 0;
 
-    // Rate delta per step — decel phase (asymmetric: exit speed may differ from entry speed)
-    uint32_t decel_steps_kin = (uint32_t)max_delta - segment_buffer->decelerate_after;
-    if (decel_steps_kin > 0) {
-        uint32_t decel_range = segment_buffer->final_rate - segment_buffer->nominal_rate;
-        segment_buffer->decel_rate_delta = (decel_range + decel_steps_kin - 1) / decel_steps_kin;
-    } else {
-        segment_buffer->decel_rate_delta = 0;
-    }
+    // Taylor series starting index for decel phase (negative — mirrors accel in reverse):
+    //   n_cruise = equivalent Taylor index at cruise speed
+    //   n_exit   = equivalent Taylor index at exit speed
+    //   decel counts from -(n_cruise − n_exit) upward toward −1 each ISR step.
+    //   Negative n makes the denominator (4n+1) negative → delta negative
+    //   → step_interval INCREASES each step → physically correct linear deceleration.
+    // accel_count_decel: mirrors the old Pic32mzCNC decel_val = -accel_count_at_end_of_accel.
+    // After the accel phase the Taylor counter will have advanced from n_entry by accel_steps,
+    // so the symmetric decel start is -(n_entry + accel_steps).
+    // This guarantees decel is the exact time-reverse of accel — the denominator stays
+    // safely negative throughout and zero-crossing is prevented by the ISR guard.
+    segment_buffer->accel_count_decel = -(n_entry + (int32_t)segment_buffer->accelerate_until);
 
     // Look-ahead fields — initialised here, may be retroactively patched by planner
     segment_buffer->entry_speed_mms = entry_velocity;
