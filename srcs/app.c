@@ -155,10 +155,7 @@ void APP_Initialize ( void )
     // ✅ Initialize alarm state
     appData.alarmCode = 0;             // No alarm
     
-    // ✅ Initialize motion phase system (priority-based task scheduler)
-    appData.motionPhase = MOTION_PHASE_IDLE;   // Safe for G-code processing
     appData.dominantAxis = AXIS_X;             // Default dominant axis
-    appData.currentStepInterval = 0;           // No active motion
     appData.currentSegment = NULL;             // No active segment
     
     // ✅ ARRAY-BASED: Initialize Bresenham errors for all axes
