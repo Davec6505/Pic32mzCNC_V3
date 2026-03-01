@@ -291,18 +291,35 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     segment_buffer->accel_count = n_entry;
     segment_buffer->rest        = 0;
 
-    // Taylor series starting index for decel phase (negative — mirrors accel in reverse):
-    //   n_cruise = equivalent Taylor index at cruise speed
-    //   n_exit   = equivalent Taylor index at exit speed
-    //   decel counts from -(n_cruise − n_exit) upward toward −1 each ISR step.
-    //   Negative n makes the denominator (4n+1) negative → delta negative
-    //   → step_interval INCREASES each step → physically correct linear deceleration.
-    // accel_count_decel: mirrors the old Pic32mzCNC decel_val = -accel_count_at_end_of_accel.
-    // After the accel phase the Taylor counter will have advanced from n_entry by accel_steps,
-    // so the symmetric decel start is -(n_entry + accel_steps).
-    // This guarantees decel is the exact time-reverse of accel — the denominator stays
-    // safely negative throughout and zero-crossing is prevented by the ISR guard.
-    segment_buffer->accel_count_decel = -(n_entry + (int32_t)segment_buffer->accelerate_until);
+    // Taylor series starting index for decel phase:
+    //   The naive value -(n_entry + accel_steps) is correct in theory, but at high cruise
+    //   speeds (small nominal_rate) the formula gives 2*nominal_rate/(4*n+1) < 1, which
+    //   integer-truncates to 0 → step_interval never changes → sudden-stop bug.
+    //
+    //   Fix: cap |accel_count_decel| at n_min, the MINIMUM |n| that produces >= 1 tick delta:
+    //     2 * nominal_rate / (4*n_min + 1) >= 1  →  n_min <= (2*nominal_rate - 1) / 4
+    //   For the n_cruise − n_min "skipped" steps, precompute decel_entry_rate (see below).
+    //   The ISR snaps step_interval to decel_entry_rate at decel entry, then Taylor runs
+    //   correctly from step 1 — no zero-increment, no sudden stop.
+    int32_t n_cruise = n_entry + (int32_t)segment_buffer->accelerate_until;
+    int32_t n_min = ((int32_t)(2U * segment_buffer->nominal_rate) - 1) >> 2;
+    if (n_min < 1)        n_min = 1;
+    if (n_min > n_cruise) n_min = n_cruise;   // Short move: cap at cruise count
+    segment_buffer->accel_count_decel = -n_min;
+
+    // decel_entry_rate: step_interval that Taylor-at-(-n_min) corresponds to.
+    // Derived from Austin/Aryzen: c_n ≈ c_cruise * sqrt((n_cruise+0.5)/(n+0.5))
+    // → larger interval (slower) than cruise by sqrt(n_cruise/n_min).
+    // For short moves where n_min == n_cruise: ratio = 1 → decel_entry_rate = nominal_rate.
+    {
+        float decel_ratio = (n_min < n_cruise)
+                            ? sqrtf(((float)n_cruise + 0.5f) / ((float)n_min + 0.5f))
+                            : 1.0f;
+        uint32_t dentry = (uint32_t)((float)segment_buffer->nominal_rate * decel_ratio);
+        if (dentry < segment_buffer->nominal_rate) dentry = segment_buffer->nominal_rate;
+        if (dentry > segment_buffer->final_rate)   dentry = segment_buffer->final_rate;
+        segment_buffer->decel_entry_rate = dentry;
+    }
 
     // =========================================================================
     // S-CURVE JERK CONTROL
