@@ -24,13 +24,6 @@ extern GPIO_SetFunc axis_step_set[];
 extern GPIO_ClearFunc axis_step_clear[];
 extern GPIO_SetFunc axis_dir_set[];
 extern GPIO_ClearFunc axis_dir_clear[];
-
-// ISR-direct step GPIO: LAT register pointers + masks.
-// Use these in ISR hot paths — avoids jalr overhead that persists even with
-// always_inline when function addresses are stored in pointer arrays.
-extern volatile uint32_t* const axis_step_set_reg[NUM_AXIS];
-extern volatile uint32_t* const axis_step_clr_reg[NUM_AXIS];
-extern const uint32_t axis_step_mask[NUM_AXIS];
 // Single shared EN pin (EnXYZA) — no per-axis enable arrays.
 
 // Limit switch function pointer arrays

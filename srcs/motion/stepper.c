@@ -498,10 +498,8 @@ void OCP1_ISR(uintptr_t context) {
     // Use pre-calculated dominant_axis (set during STEPPER_LoadSegment)
     // Eliminates 4 abs() calls + 3 comparisons per ISR (significant overhead reduction!)
     
-    // Direct LAT SFR write — 2 loads + 1 store, zero function call overhead.
-    // (AXIS_StepSet goes through a function pointer array; always_inline is ignored
-    //  when the function's address is taken, so the compiler emits a real jalr call.)
-    *axis_step_set_reg[dominant_axis] = axis_step_mask[dominant_axis];
+    // Atomic GPIO step pulse - single instruction, zero overhead!
+    AXIS_StepSet(dominant_axis);
     
     // ✅ CRITICAL DEBUG: Read back GPIO state immediately after Set
     // This confirms if AXIS_StepSet actually toggles the pin
@@ -529,8 +527,8 @@ void OCP1_ISR(uintptr_t context) {
         // Bresenham error accumulation — abs_delta precomputed at segment load, zero call overhead
         error[axis] += abs_delta[axis];
         if (error[axis] >= dominant_delta) {
-            // Direct LAT SFR write — same as dominant axis, no function call.
-            *axis_step_set_reg[axis] = axis_step_mask[axis];
+            // Atomic GPIO step pulse - single instruction!
+            AXIS_StepSet(axis);
             
             // Update step counter (inline, zero overhead)
             if (direction_bits & (1 << axis)) {
@@ -588,14 +586,15 @@ void OCP1_ISR(uintptr_t context) {
 // ============================================================================
 
 void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context) {
-    // Stop TMR5 (one-shot mode) — direct SFR, TMR5_Stop() is a function wrapping this.
-    T5CONCLR = _T5CON_ON_MASK;
-
-    // Clear all step pins — direct LAT SFR writes, no function pointer indirection.
-    *axis_step_clr_reg[AXIS_X] = axis_step_mask[AXIS_X];  // LATDCLR = (1<<4)
-    *axis_step_clr_reg[AXIS_Y] = axis_step_mask[AXIS_Y];  // LATFCLR = (1<<0)
-    *axis_step_clr_reg[AXIS_Z] = axis_step_mask[AXIS_Z];  // LATFCLR = (1<<1)
-    *axis_step_clr_reg[AXIS_A] = axis_step_mask[AXIS_A];  // LATGCLR = (1<<1)
+    // LED2 removed - reserved for state indicator (homing/alarm only)
+    
+    // Stop TMR5 (one-shot mode)
+    TMR5_Stop();
+    
+    // Clear all step pins using axis configuration (not hardcoded!)
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        AXIS_StepClear(axis);
+    }
 }
 
 
