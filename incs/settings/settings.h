@@ -30,7 +30,14 @@ typedef struct {
     float max_rate[4];             // $110-$113 - Max rate (mm/min) [X, Y, Z, A]
     float acceleration[4];         // $120-$123 - Acceleration (mm/sec^2) [X, Y, Z, A]
     float max_travel[4];           // $130-$133 - Max travel (mm) [X, Y, Z, A]
-    
+
+    // Jerk control — limits how fast acceleration can change ($140-$143)
+    // Units: mm/s/step (effective jerk aggressiveness; higher = shorter S-curve ramp)
+    // Formula: jerk_ramp_steps = acceleration * steps_per_mm / jerk
+    // Low value  → long S-curve ramp  → very smooth, slightly slower acceleration
+    // High value → short S-curve ramp → snappier, closer to pure trapezoidal
+    float jerk[4];                 // $140-$143 - Jerk [X, Y, Z, A]
+
     // Spindle configuration
     float spindle_max_rpm;         // $30 - Max spindle speed (RPM)
     float spindle_min_rpm;         // $31 - Min spindle speed (RPM)
@@ -86,9 +93,9 @@ typedef struct {
 // only when the struct actually changes — otherwise existing flash settings
 // (written as version 2 with DRV8825-only builds) remain valid.
 #ifdef HAS_TMC5160_AXIS
-#define SETTINGS_VERSION   3  // TMC5160 fields present → struct changed from v2
+#define SETTINGS_VERSION   4  // v4: jerk[4] added + TMC5160 fields present
 #else
-#define SETTINGS_VERSION   2  // DRV8825-only → struct identical to v2 → reads flash OK
+#define SETTINGS_VERSION   3  // v3: jerk[4] added (DRV8825-only build)
 #endif
 
 // ✅ CRITICAL: Safe NVM storage location based on MikroE bootloader

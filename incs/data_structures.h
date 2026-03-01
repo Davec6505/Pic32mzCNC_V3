@@ -90,6 +90,12 @@ typedef struct {
     int32_t  accel_count_decel;  // Taylor series: starting n for decel phase (negative value, set by kinematics)
     int32_t  rest;               // Taylor series: integer remainder — prevents float drift (0 at segment start)
 
+    // S-curve jerk control (set by kinematics from $140-$143 jerk setting)
+    uint32_t jerk_steps;         // Power-of-2 number of dominant-axis steps for S-curve ramp (0 = disabled)
+    uint8_t  jerk_steps_log2;    // log2(jerk_steps) — used for fast bit-shift division in ISR
+    uint8_t  jerk_pad[3];        // Alignment padding
+    int32_t  jerk_count;         // ISR running counter for S-curve ramp; reset to 0 at segment and decel start
+
     // Physics parameters (calculated by kinematics for reference/debugging)
     float start_velocity;        // Starting velocity for this segment (mm/sec)
     float max_velocity;          // Maximum velocity for this segment (mm/sec)

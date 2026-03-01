@@ -62,6 +62,12 @@ static const CNC_Settings default_settings = {
     // Max travel (mm) - Array-based
     .max_travel = {300.0f, 300.0f, 100.0f, 0.0f},      // [X, Y, Z, A] (A=0 for rotary)
     
+    // Jerk control ($140-$143)
+    // jerk_ramp_steps = acceleration * steps_per_mm / jerk
+    // Lower jerk value → more steps in S-curve ramp → smoother acceleration transitions
+    // Default: 500 for XY/A, 200 for Z (conservative, noticeably smooth)
+    .jerk = {500.0f, 500.0f, 200.0f, 500.0f},          // [X, Y, Z, A]
+
     // Spindle
     .spindle_max_rpm = 24000.0f,
     .spindle_min_rpm = 0.0f,
@@ -276,6 +282,12 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 131: settings->max_travel[AXIS_Y] = value; break;
         case 132: settings->max_travel[AXIS_Z] = value; break;
         
+        // Jerk ($140-$143) - S-curve ramp aggressiveness
+        case 140: settings->jerk[AXIS_X] = value; break;
+        case 141: settings->jerk[AXIS_Y] = value; break;
+        case 142: settings->jerk[AXIS_Z] = value; break;
+        case 143: settings->jerk[AXIS_A] = value; break;
+        
         // Spindle
         case 30: settings->spindle_max_rpm = value; break;
         case 31: settings->spindle_min_rpm = value; break;
@@ -385,6 +397,12 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         case 131: return settings->max_travel[AXIS_Y];
         case 132: return settings->max_travel[AXIS_Z];
         
+        // Jerk ($140-$143)
+        case 140: return settings->jerk[AXIS_X];
+        case 141: return settings->jerk[AXIS_Y];
+        case 142: return settings->jerk[AXIS_Z];
+        case 143: return settings->jerk[AXIS_A];
+
         case 30: return settings->spindle_max_rpm;
         case 31: return settings->spindle_min_rpm;
         
@@ -491,7 +509,12 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$130=%.3f\r\n", settings->max_travel[AXIS_X]);
     len += sprintf(&settings_buffer[len], "$131=%.3f\r\n", settings->max_travel[AXIS_Y]);
     len += sprintf(&settings_buffer[len], "$132=%.3f\r\n", settings->max_travel[AXIS_Z]);
-    
+
+    // Jerk ($140-$143) - S-curve ramp aggressiveness
+    len += sprintf(&settings_buffer[len], "$140=%.3f\r\n", settings->jerk[AXIS_X]);
+    len += sprintf(&settings_buffer[len], "$141=%.3f\r\n", settings->jerk[AXIS_Y]);
+    len += sprintf(&settings_buffer[len], "$142=%.3f\r\n", settings->jerk[AXIS_Z]);
+    len += sprintf(&settings_buffer[len], "$143=%.3f\r\n", settings->jerk[AXIS_A]);
 
 
 

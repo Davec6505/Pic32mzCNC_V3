@@ -7,6 +7,46 @@
 
 ---
 
+## ✅ Feature: S-curve jerk control — March 1, 2026
+
+**What was built**: In-ISR S-curve acceleration shaping using a linear ramp applied to the
+existing Taylor series. The Taylor recurrence still computes the exact constant-acceleration
+step delta each ISR call; a new jerk counter gates how much of that delta is applied.
+
+**Effect**: Acceleration builds from zero to A_max over `jerk_steps` dominant-axis steps
+(S-curve ramp-in), then A_max is maintained for the rest of the accel phase. Same S-curve
+applies at the start of the decel phase (ramp-in from cruise to full decel). Result: no
+instantaneous jump from zero to A_max at accel/decel phase boundaries — mechanically smooth.
+
+**Formula**: `jerk_steps = round_down_pow2( min( A_max * spm / jerk_setting , accel_steps/2 ) )`
+- Low jerk setting → more steps in S-curve ramp → very smooth, slightly slower ramp-up
+- High jerk setting → fewer steps → approaches pure trapezoidal (legacy behaviour)
+- `jerk_steps` forced power-of-2 so ISR division is a single arithmetic right-shift (zero cost)
+
+**Files changed**:
+- `incs/settings/settings.h:32` — Added `float jerk[4]` field after `max_travel[4]`, bumped `SETTINGS_VERSION` (DRV8825: 2→3, TMC5160: 3→4)
+- `srcs/settings/settings.c:65` — Added `.jerk = {500.0f, 500.0f, 200.0f, 500.0f}` to `default_settings`
+- `srcs/settings/settings.c:285` — `SETTINGS_ProcessParameter()` — added cases 140-143 (set)
+- `srcs/settings/settings.c:400` — `SETTINGS_GetParameter()` — added cases 140-143 (get)
+- `srcs/settings/settings.c:512` — `SETTINGS_PrintAll()` — added `$140`-`$143` output lines
+- `incs/data_structures.h:98` — `MotionSegment` struct: added `jerk_steps`, `jerk_steps_log2`, `jerk_count` fields
+- `srcs/motion/kinematics.c:300` — `KINEMATICS_LinearMove()` — compute and store `jerk_steps` / `jerk_steps_log2` / `jerk_count` from `settings->jerk[cfg_axis]`
+- `srcs/motion/stepper.c:565` — `OCP1_ISR` — reset `jerk_count = 0` at decel phase entry
+- `srcs/motion/stepper.c:578` — `OCP1_ISR` — accel phase: apply S-curve scaling via bit-shift
+- `srcs/motion/stepper.c:600` — `OCP1_ISR` — decel phase: apply S-curve scaling via bit-shift
+
+**ISR cost**: 1 comparison + 1 multiply + 1 bit-shift per step during jerk ramp only. Zero cost during cruise and after jerk ramp completes (condition `jerk_count >= jerk_steps` exits early).
+
+**New GRBL parameters**:
+- `$140` — X jerk (default 500.0)
+- `$141` — Y jerk (default 500.0)
+- `$142` — Z jerk (default 200.0)
+- `$143` — A jerk (default 500.0)
+
+**Build**: clean, no warnings.
+
+---
+
 ## ✅ Bug Fix: G0 rapids running at modal feedrate instead of max_rate — March 1, 2026
 
 **Root cause**: `GCODE_EVENT_LINEAR_MOVE` had no `isRapid` flag. Both G0 and G1 produced

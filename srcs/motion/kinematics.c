@@ -304,6 +304,51 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // safely negative throughout and zero-crossing is prevented by the ISR guard.
     segment_buffer->accel_count_decel = -(n_entry + (int32_t)segment_buffer->accelerate_until);
 
+    // =========================================================================
+    // S-CURVE JERK CONTROL
+    // =========================================================================
+    // jerk_steps: power-of-2 number of dominant-axis steps over which the
+    // Taylor acceleration delta is linearly ramped from 0 to full value.
+    // Effect: instead of jumping instantly to A_max, acceleration builds
+    // gradually over jerk_steps ISR calls → true S-curve within each segment.
+    //
+    // Formula: jerk_steps_raw = acceleration / jerk * steps_per_mm_dominant
+    //   acceleration [mm/s²], jerk [$140-$143, mm/s²/s = mm/s³],
+    //   steps_per_mm_dominant [steps/mm]
+    //   Result: steps during which accel ramps from 0 to A_max.
+    //
+    // Clamped to half of accelerate_until so the constant-accel phase always
+    // runs for at least half the accel distance.
+    // Rounded DOWN to nearest power-of-2 so ISR can divide with a single bit-shift.
+    {
+        float jerk_setting = fmaxf(settings->jerk[cfg_axis], 1.0f);  // mm/s³, guard /0
+        float jerk_steps_raw = (acceleration_mm_sec2 * steps_per_mm_dominant) / jerk_setting;
+
+        // Cap: never consume more than half the accel phase with jerk ramp
+        uint32_t half_accel = segment_buffer->accelerate_until >> 1;
+        if (half_accel < 4) half_accel = 4;
+        if (jerk_steps_raw > (float)half_accel) jerk_steps_raw = (float)half_accel;
+        if (jerk_steps_raw < 4.0f)              jerk_steps_raw = 4.0f;
+
+        // Round DOWN to largest power-of-2 ≤ jerk_steps_raw
+        uint32_t jsteps = 1U;
+        uint8_t  jlog2  = 0U;
+        while ((jsteps << 1U) <= (uint32_t)jerk_steps_raw && jlog2 < 15U) {
+            jsteps <<= 1U;
+            jlog2++;
+        }
+
+        // Disable S-curve if accel phase is trivially short (no room for jerk ramp)
+        if (segment_buffer->accelerate_until < 8U) {
+            jsteps = 0U;
+            jlog2  = 0U;
+        }
+
+        segment_buffer->jerk_steps      = jsteps;
+        segment_buffer->jerk_steps_log2 = jlog2;
+        segment_buffer->jerk_count      = 0;
+    }
+
     // Look-ahead fields — initialised here, may be retroactively patched by planner
     segment_buffer->entry_speed_mms = entry_velocity;
     segment_buffer->exit_speed_mms  = exit_velocity;

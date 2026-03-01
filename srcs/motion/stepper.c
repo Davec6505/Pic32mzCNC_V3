@@ -560,6 +560,7 @@ void OCP1_ISR(uintptr_t context) {
     if (sc == seg->decelerate_after && sc < seg->steps_remaining) {
         seg->accel_count = seg->accel_count_decel;  // Set to precomputed negative value
         seg->rest        = 0;
+        seg->jerk_count  = 0;  // Reset S-curve counter for decel ramp-in
     }
 
     if (sc < seg->accelerate_until) {
@@ -570,6 +571,16 @@ void OCP1_ISR(uintptr_t context) {
         seg->rest      = num % den;
         int32_t new_iv = (int32_t)seg->step_interval - (num / den);
         if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
+        // S-curve jerk: ramp the Taylor accel delta from 0 to full over jerk_steps.
+        // At jerk_count=0: no delta applied (smooth zero-jerk start).
+        // At jerk_count=jerk_steps: full Taylor delta applies (constant A_max phase).
+        // Division is a single arithmetic right-shift (jerk_steps is always a power-of-2).
+        if (seg->jerk_steps > 0U && seg->jerk_count < (int32_t)seg->jerk_steps) {
+            int32_t full_delta = (int32_t)seg->step_interval - new_iv;  // positive: interval shrinking
+            int32_t scaled     = (full_delta * seg->jerk_count) >> seg->jerk_steps_log2;
+            new_iv = (int32_t)seg->step_interval - scaled;
+            seg->jerk_count++;
+        }
         seg->step_interval = (uint32_t)new_iv;
     } else if (sc >= seg->decelerate_after) {
         // Deceleration: accel_count is negative (set to -n_cruise), increments toward 0.
@@ -583,6 +594,14 @@ void OCP1_ISR(uintptr_t context) {
             int32_t num    = ((int32_t)seg->step_interval << 1) + seg->rest;
             seg->rest      = num % den;
             int32_t new_iv = (int32_t)seg->step_interval - (num / den);
+            // S-curve jerk: ramp the Taylor decel delta from 0 to full over jerk_steps
+            // at the START of the decel phase (mirrors accel S-curve ramp-in).
+            if (seg->jerk_steps > 0U && seg->jerk_count < (int32_t)seg->jerk_steps) {
+                int32_t full_delta = new_iv - (int32_t)seg->step_interval;  // positive: interval growing
+                int32_t scaled     = (full_delta * seg->jerk_count) >> seg->jerk_steps_log2;
+                new_iv = (int32_t)seg->step_interval + scaled;
+                seg->jerk_count++;
+            }
             // step_interval must stay between nominal (fastest) and final_rate (slowest)
             if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
             if (new_iv > (int32_t)seg->final_rate)   new_iv = (int32_t)seg->final_rate;
