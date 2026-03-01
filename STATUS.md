@@ -7,6 +7,16 @@
 
 ---
 
+## ✅ Bug Fix: SETTINGS_VERSION conditional — March 1, 2026
+
+**Root cause**: SETTINGS_VERSION was bumped from 2 → 3 when TMC5160 fields were added to `CNC_Settings`. Since all axes are currently `DRIVER_DRV8825`, `HAS_TMC5160_AXIS` is NOT defined, so those fields do not exist in the struct — the binary layout is identical to version 2. However the hard-coded `#define SETTINGS_VERSION 3` caused the version check in `SETTINGS_LoadFromFlash` to fail, so the firmware silently fell back to defaults (`steps_per_mm=156, max_rate Z=2000`) instead of loading calibrated flash values. Symptom: correct acc/dec shape but wrong absolute speed.
+
+**Fix**: Made `SETTINGS_VERSION` conditional on `HAS_TMC5160_AXIS`:
+- `incs/settings/settings.h:88` — `#define SETTINGS_VERSION 2` when DRV8825-only (struct unchanged); `#define SETTINGS_VERSION 3` when `HAS_TMC5160_AXIS` (TMC fields present → struct differs from v2)
+
+**Rule going forward**: Only bump `SETTINGS_VERSION` when the `CNC_Settings` struct binary layout actually changes (i.e. when unconditional fields are added/reordered, not when `#ifdef`-guarded fields are added).
+
+---
 ## ✅ Documentation: UML + README Updated for lookahead Architecture — March 1, 2026
 
 Updated all architecture documentation to reflect current `lookahead` branch implementation. Removed all references to the deleted Priority Phase System and old TMR2/OC2/OC3/OC4 per-axis ISR architecture.

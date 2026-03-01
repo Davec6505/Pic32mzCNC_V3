@@ -80,7 +80,16 @@ typedef struct {
 
 // Default settings
 #define SETTINGS_SIGNATURE 0x47524231  // "GRB1"
-#define SETTINGS_VERSION   3           // Incremented when structure changes (was 2, added TMC5160 fields)
+// Version tracks the BINARY layout of CNC_Settings.
+// TMC5160 fields are guarded by #ifdef HAS_TMC5160_AXIS, so they only exist
+// in the struct when at least one TMC5160 axis is enabled.  Bump the version
+// only when the struct actually changes — otherwise existing flash settings
+// (written as version 2 with DRV8825-only builds) remain valid.
+#ifdef HAS_TMC5160_AXIS
+#define SETTINGS_VERSION   3  // TMC5160 fields present → struct changed from v2
+#else
+#define SETTINGS_VERSION   2  // DRV8825-only → struct identical to v2 → reads flash OK
+#endif
 
 // ✅ CRITICAL: Safe NVM storage location based on MikroE bootloader
 // PIC32MZ2048EFH100 Program Flash with MikroE Bootloader:
