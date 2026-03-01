@@ -249,6 +249,10 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     DEBUG_PRINT_STEPPER("[STEPPER_Load] TMR4_Freq=%luHz, initial_rate=%lu, period=%u (%.1fµs), steps=%ld\r\n",
         TMR4_FrequencyGet(), segment->initial_rate, period, 
         (float)period * 1000000.0f / TMR4_FrequencyGet(), segment->steps_remaining);
+    DEBUG_PRINT_STEPPER("[STEPPER_Load] accel_count=%ld, nominal=%lu, accel_until=%lu, decel_after=%lu, final=%lu, step_iv=%lu\r\n",
+        (long)segment->accel_count, segment->nominal_rate,
+        segment->accelerate_until, segment->decelerate_after,
+        segment->final_rate, segment->step_interval);
     
     // ✅ CRITICAL: Initialize OC1 compare registers for continuous pulse mode
     // OCxR = Rising edge (pulse starts)
