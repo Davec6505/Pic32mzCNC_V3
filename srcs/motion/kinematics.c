@@ -237,21 +237,57 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     //     feedrate, steps_per_mm_dominant, steps_per_sec, 
     //     segment_buffer->nominal_rate, (float)segment_buffer->nominal_rate / TIMER_FREQ * 1000.0f);
     
-    // Calculate acceleration profile (GRBL-style trapezoidal)
-    // Distance to accelerate: d = v² / (2*a)
-    float accel_distance_mm = (feedrate_mm_sec * feedrate_mm_sec) / (2.0f * acceleration_mm_sec2);
-    uint32_t accel_steps = (uint32_t)(accel_distance_mm * steps_per_mm_dominant);
-    
-    // Check if we have room for full accel + decel
-    if(accel_steps * 2 > (uint32_t)max_delta) {
-        // Triangle profile - can't reach full speed
-        accel_steps = max_delta / 2;
+    // =========================================================================
+    // JUNCTION-AWARE TRAPEZOIDAL VELOCITY PROFILE
+    // =========================================================================
+    // Accel ramp: entry_v  →  cruise   uses (v_cruise² - v_entry²) / (2a)
+    // Decel ramp: cruise   →  exit_v   uses (v_cruise² - v_exit²)  / (2a)
+    // These are independent — asymmetric ramps when entry_v ≠ exit_v.
+    float total_dist_mm = (float)max_delta / steps_per_mm_dominant;
+
+    float accel_dist_mm = (feedrate_mm_sec * feedrate_mm_sec - entry_velocity * entry_velocity)
+                          / (2.0f * acceleration_mm_sec2);
+    float decel_dist_mm = (feedrate_mm_sec * feedrate_mm_sec - exit_velocity  * exit_velocity)
+                          / (2.0f * acceleration_mm_sec2);
+    if (accel_dist_mm < 0.0f) accel_dist_mm = 0.0f;
+    if (decel_dist_mm < 0.0f) decel_dist_mm = 0.0f;
+
+    uint32_t accel_steps = (uint32_t)(accel_dist_mm * steps_per_mm_dominant);
+    uint32_t decel_steps = (uint32_t)(decel_dist_mm * steps_per_mm_dominant);
+
+    if (accel_steps + decel_steps > (uint32_t)max_delta) {
+        // Triangle: ramps exceed total steps — find peak speed where they just fit.
+        // v_peak² = a * total_dist + (v_entry² + v_exit²) / 2
+        float v_peak_sq = acceleration_mm_sec2 * total_dist_mm
+                          + 0.5f * (entry_velocity * entry_velocity
+                                    + exit_velocity  * exit_velocity);
+        if (v_peak_sq < 0.0f) v_peak_sq = 0.0f;
+        float v_peak = sqrtf(v_peak_sq);
+        if (v_peak > feedrate_mm_sec) v_peak = feedrate_mm_sec;
+
+        accel_dist_mm = (v_peak * v_peak - entry_velocity * entry_velocity)
+                        / (2.0f * acceleration_mm_sec2);
+        decel_dist_mm = (v_peak * v_peak - exit_velocity  * exit_velocity)
+                        / (2.0f * acceleration_mm_sec2);
+        if (accel_dist_mm < 0.0f) accel_dist_mm = 0.0f;
+        if (decel_dist_mm < 0.0f) decel_dist_mm = 0.0f;
+
+        accel_steps = (uint32_t)(accel_dist_mm * steps_per_mm_dominant);
+        decel_steps = (uint32_t)(decel_dist_mm * steps_per_mm_dominant);
+
+        // Hard clamp: floating-point rounding can push sum 1 step over
+        if (accel_steps + decel_steps > (uint32_t)max_delta) {
+            accel_steps = (uint32_t)max_delta / 2;
+            decel_steps = (uint32_t)max_delta - accel_steps;
+        }
+
+        // Triangle: decel starts immediately where accel ends
         segment_buffer->accelerate_until = accel_steps;
         segment_buffer->decelerate_after = accel_steps;
     } else {
-        // Trapezoid profile - accel, cruise, decel
+        // Trapezoid: independent accel and decel with cruise in between
         segment_buffer->accelerate_until = accel_steps;
-        segment_buffer->decelerate_after = max_delta - accel_steps;
+        segment_buffer->decelerate_after = (uint32_t)max_delta - decel_steps;
     }
     
     // Junction-aware velocity planning
@@ -279,70 +315,33 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         segment_buffer->final_rate = segment_buffer->nominal_rate;    // End at cruise speed
     }
     
-    // Taylor series (Austin/Aryzen) starting index for accel phase:
-    // Derived from c_n ≈ c_0/sqrt(n+1):  n = 2·v²·spm/a − 1
-    // For entry_velocity=0 → n=-1 → clamp to 0 (first step from rest).
-    // For non-zero junction entry → n>0 → ISR picks up mid-ramp correctly,
-    // so no artificial "creep" at the start of junction-speed moves.
+    // Taylor series (Austin/Aryzen) starting indices:
+    // Formula: n = 2·v²·spm/a − 1   (inverse of c_n ≈ c_0/sqrt(n+1))
+    //
+    // ACCEL: ISR starts at n_entry and counts UP — picks up mid-ramp at junction speed.
+    // DECEL: ISR starts at -(decel_steps + n_exit) and counts UP toward -n_exit.
+    //        abs_n = -accel_count shrinks from (decel_steps+n_exit) → n_exit,
+    //        giving a ramp that ends exactly at exit_v. Den always positive.
+
+    // Use clamped velocities (safe_start floored) so n values match initial/final_rate
     float entry_v_mms = entry_steps_per_sec / steps_per_mm_dominant;
+    float exit_v_mms  = exit_steps_per_sec  / steps_per_mm_dominant;
+
     int32_t n_entry = (int32_t)(2.0f * entry_v_mms * entry_v_mms *
                                 steps_per_mm_dominant / acceleration_mm_sec2) - 1;
     if (n_entry < 0) n_entry = 0;
     segment_buffer->accel_count = n_entry;
     segment_buffer->rest        = 0;
 
-    // Decel is the exact symmetric mirror of accel.
-    // accel_count_decel = -(n_entry + accel_steps): the ISR counts from this negative
-    // value back toward 0.  abs_n = -accel_count stays positive and shrinking, so
-    // den = (abs_n*4)+1 is always positive — no sign-flip trickery.
-    // At large abs_n the delta is 0 but rest accumulates sub-tick precision, giving a
-    // correct smooth ramp with NO speed snap and NO precomputed entry rate needed.
-    segment_buffer->accel_count_decel = -(n_entry + (int32_t)accel_steps);
+    int32_t n_exit = (int32_t)(2.0f * exit_v_mms * exit_v_mms *
+                               steps_per_mm_dominant / acceleration_mm_sec2) - 1;
+    if (n_exit < 0) n_exit = 0;
+    segment_buffer->accel_count_decel = -((int32_t)decel_steps + n_exit);
 
-    // =========================================================================
-    // S-CURVE JERK CONTROL
-    // =========================================================================
-    // jerk_steps: power-of-2 number of dominant-axis steps over which the
-    // Taylor acceleration delta is linearly ramped from 0 to full value.
-    // Effect: instead of jumping instantly to A_max, acceleration builds
-    // gradually over jerk_steps ISR calls → true S-curve within each segment.
-    //
-    // Formula: jerk_steps_raw = acceleration / jerk * steps_per_mm_dominant
-    //   acceleration [mm/s²], jerk [$140-$143, mm/s²/s = mm/s³],
-    //   steps_per_mm_dominant [steps/mm]
-    //   Result: steps during which accel ramps from 0 to A_max.
-    //
-    // Clamped to half of accelerate_until so the constant-accel phase always
-    // runs for at least half the accel distance.
-    // Rounded DOWN to nearest power-of-2 so ISR can divide with a single bit-shift.
-    {
-        float jerk_setting = fmaxf(settings->jerk[cfg_axis], 1.0f);  // mm/s³, guard /0
-        float jerk_steps_raw = (acceleration_mm_sec2 * steps_per_mm_dominant) / jerk_setting;
-
-        // Cap: never consume more than half the accel phase with jerk ramp
-        uint32_t half_accel = segment_buffer->accelerate_until >> 1;
-        if (half_accel < 4) half_accel = 4;
-        if (jerk_steps_raw > (float)half_accel) jerk_steps_raw = (float)half_accel;
-        if (jerk_steps_raw < 4.0f)              jerk_steps_raw = 4.0f;
-
-        // Round DOWN to largest power-of-2 ≤ jerk_steps_raw
-        uint32_t jsteps = 1U;
-        uint8_t  jlog2  = 0U;
-        while ((jsteps << 1U) <= (uint32_t)jerk_steps_raw && jlog2 < 15U) {
-            jsteps <<= 1U;
-            jlog2++;
-        }
-
-        // Disable S-curve if accel phase is trivially short (no room for jerk ramp)
-        if (segment_buffer->accelerate_until < 8U) {
-            jsteps = 0U;
-            jlog2  = 0U;
-        }
-
-        segment_buffer->jerk_steps      = jsteps;
-        segment_buffer->jerk_steps_log2 = jlog2;
-        segment_buffer->jerk_count      = 0;
-    }
+    // S-curve jerk disabled — perfecting junction-velocity trapezoidal profile first.
+    segment_buffer->jerk_steps      = 0;
+    segment_buffer->jerk_steps_log2 = 0;
+    segment_buffer->jerk_count      = 0;
 
     // Look-ahead fields — initialised here, may be retroactively patched by planner
     segment_buffer->entry_speed_mms = entry_velocity;
