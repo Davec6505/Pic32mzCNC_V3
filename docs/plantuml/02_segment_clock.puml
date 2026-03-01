@@ -1,112 +1,120 @@
 @startuml
-title Absolute Compare Mode - Dominant Axis Tracking with On-Demand Subordinate Scheduling
+title Period-Based OC1/TMR4 Step Engine — Single ISR, Bresenham + Velocity Inside ISR
+' Current architecture as of March 2026 (lookahead branch)
+' Replaces old: TMR2 free-running + OC1/OC2/OC3/OC4 per-axis ISRs + main-loop phase system
 
 scale 1.5
 
-participant "TMR2\n(Free-Running)" as TMR2
-participant "OC1 ISR\n(X - Dominant)" as OC1
-participant "OC2 ISR\n(Y - Subordinate)" as OC2
-participant "OC3 ISR\n(Z - Subordinate)" as OC3
-participant "OC4 ISR\n(A - Subordinate)" as OC4
+participant "TMR4\n(Period-Based\n781.25 kHz)" as TMR4
+participant "OC1\n(Dual Compare)" as OC1HW
+participant "OCP1_ISR\n(IPL5 Shadow Regs)" as ISR
+participant "TMR5\n(One-Shot\nPulse Width)" as TMR5
+participant "Step GPIO\n(Harmony Macros)" as GPIO
 
-== Segment Start ==
-note over TMR2
-  TMR2 = 1000 (current count)
-  Never stops or resets
+== Segment Load (main loop — MOTION_Tasks / STEPPER_LoadSegment) ==
+note over TMR4, GPIO
+  Runs once per segment in main loop BEFORE first step fires:
+    delta[], abs_delta[], dominant_axis, direction_bits, error[] loaded into ISR statics
+    Direction GPIO pins set here (DirX_Set/Clear etc.) — must be stable before first STEP
+    PR4   = initial_rate      (sets TMR4 rollover period = step interval)
+    OC1R  = period - 5        (rising edge: step pulse starts)
+    OC1RS = period - 3        (falling edge: ISR trigger, pulse width ~2.56 µs)
+    TMR4_Start() / OCMP1_Enable() if not already running
 end note
 
-note over OC1
-  OC1R = 1500 (absolute)
-  OC1RS = 1520 (absolute)
-  Tracks ahead of TMR2
+== Per-Step Cycle (repeats every step_interval ticks) ==
+
+TMR4 -> OC1HW : Counts up to OC1R\nOC1 output goes HIGH (step pulse rising edge)
+activate OC1HW
+OC1HW -> GPIO : Step pin HIGH — stepper driver latches on this rising edge
+deactivate OC1HW
+
+TMR4 -> OC1HW : Counts up to OC1RS\nOC1 output goes LOW — OCP1_ISR fires
+activate ISR
+note over ISR
+  M14K Shadow Register Set (IPL5):
+  Entire CPU register file swapped in hardware in 1 cycle.
+  Zero push/pop stack cost on ISR entry/exit.
 end note
 
-TMR2 -> OC1 : Match at TMR2=1500
-activate OC1
-OC1 -> OC1 : Generate X step pulse
-OC1 -> OC1 : Update Bresenham errors
+ISR -> ISR : Guard: cache seg = app_data_ref->currentSegment\n             return immediately if NULL
 
-alt Y needs step (error_y >= delta_x)
-    OC1 -> OC2 : Set OC2R = 1550 (absolute)
-    OC1 -> OC2 : Set OC2RS = 1570 (absolute)
-    note right of OC2
-      Y scheduled on-demand
-      Only when required by Bresenham
-    end note
+ISR -> GPIO : Dominant axis STEP HIGH\n              switch(dominant_axis) {\n                case AXIS_X: StepX_Set(); break;\n                case AXIS_Y: StepY_Set(); break;\n                case AXIS_Z: StepZ_Set(); break;\n                default:     StepA_Set(); break; }\n              Compiler: jump table + Harmony #define -> single LATxSET write.\n              No function call, no pointer indirection.
+
+ISR -> ISR : Position counter update\n             direction_bits & (1U << dominant_axis)\n             -> AXIS_IncrementSteps / AXIS_DecrementSteps\n             (always_inline — address never in pointer array -> genuinely inlines)
+
+loop Bresenham subordinate axes (max 3 iterations, bounded)
+    ISR -> ISR : error[axis] += abs_delta[axis]\n                 abs_delta[] precomputed at segment load — no abs() call in ISR
+    alt error[axis] >= dominant_delta (this axis needs a step this cycle)
+        ISR -> GPIO : switch(axis) -> StepY_Set() / StepZ_Set() / StepA_Set()\n                      Single LATxSET write, no call overhead
+        ISR -> ISR : AXIS_IncrementSteps / AXIS_DecrementSteps
+        ISR -> ISR : error[axis] -= dominant_delta
+    end
 end
 
-alt Z needs step (error_z >= delta_x)
-    OC1 -> OC3 : Set OC3R = 1580 (absolute)
-    OC1 -> OC3 : Set OC3RS = 1600 (absolute)
-end
-
-OC1 -> OC1 : Schedule next X pulse
-OC1 -> OC1 : Set OC1R = 2000 (absolute)
-OC1 -> OC1 : Set OC1RS = 2020 (absolute)
-note right of OC1
-  Dominant axis continuously
-  tracks ahead of TMR2
-  Next pulse at TMR2=2000
-end note
-deactivate OC1
-
-== TMR2 Continues Counting ==
-note over TMR2
-  TMR2 = 1550
+note right of ISR
+  Bresenham variation: 0-3 subordinate axes may step
+  per ISR call. Bounded worst-case — not unbounded.
+  Identical pattern to GRBL reference firmware.
 end note
 
-TMR2 -> OC2 : Match at TMR2=1550
-activate OC2
-OC2 -> OC2 : Generate Y step pulse
-deactivate OC2
+ISR -> TMR5 : T5CONSET = _T5CON_ON_MASK\n              Direct SFR — starts one-shot pulse-width timer
 
-note over TMR2
-  TMR2 = 1580
+ISR -> ISR : Velocity profiling (integer only — no float, no division)\n             sc = seg->steps_completed\n             ACCEL  (sc < accelerate_until): step_interval -= rate_delta\n             DECEL  (sc >= decelerate_after): step_interval += decel_rate_delta\n             CRUISE: step_interval unchanged
+
+ISR -> ISR : Schedule next step — direct SFR writes\n             period = (uint16_t)step_interval  (clamp: min 7 ticks)\n             PR4   = period       (TMR4 rolls over here, resets to 0)\n             OC1R  = period - 5U  (next rising edge)\n             OC1RS = period - 3U  (next falling edge / next ISR trigger)\n             Invariant: PR4 >= OC1RS > OC1R (OC datasheet 16.3.2.5)
+
+ISR -> ISR : seg->steps_completed++
+deactivate ISR
+
+TMR4 -> TMR4 : Rolls over at PR4, resets to 0\n                Next step cycle begins automatically
+
+== Pulse Width Expiry (~2.56 µs after STEP HIGH) ==
+
+TMR5 -> TMR5 : Period expires -> TMR5_PulseWidthCallback()
+activate TMR5
+TMR5 -> TMR5 : T5CONCLR = _T5CON_ON_MASK  (direct SFR — stop one-shot)
+TMR5 -> GPIO : StepX_Clear()\n               StepY_Clear()\n               StepZ_Clear()\n               StepA_Clear()\n               4 unrolled Harmony macros -> 4 LATxCLR writes\n               No loop, no function pointer, no call overhead
+note right of GPIO
+  All 4 axes cleared unconditionally every cycle.
+  DRV8825 min pulse: 1 µs
+  TMC5160 min pulse: 100 ns
+  2.56 µs satisfies both with margin.
+end note
+deactivate TMR5
+
+== Segment Completion (main loop — MOTION_Tasks) ==
+note over TMR4, GPIO
+  Main loop polls: seg->steps_completed >= seg->steps_remaining
+  On completion:
+    currentSegment = NULL   (ISR guard returns immediately on next fire)
+    motionQueueCount--
+    motionSegmentCompleted = true  (triggers deferred "ok" check)
+  If queue empty: TMR4_Stop(), motionActive = false
+  If more segments: STEPPER_LoadSegment() -> motion continues seamlessly
 end note
 
-TMR2 -> OC3 : Match at TMR2=1580
-activate OC3
-OC3 -> OC3 : Generate Z step pulse
-deactivate OC3
+== Design Decisions ==
+note over TMR4, GPIO
+  GPIO (board-specific, MCC-managed):
+    Step/Clear  -> switch + Harmony #define macros (plib_gpio.h)
+                   MCC pin renames propagate automatically
+    Direction   -> set once per segment in STEPPER_LoadSegment() (main loop)
+                   Stepper drivers require DIR stable BEFORE first STEP rising edge
 
-== Next Dominant Axis Pulse ==
-note over TMR2
-  TMR2 = 2000
-end note
+  Timer/OC (silicon — never changes board-to-board):
+    PR4, OC1R, OC1RS  -> direct SFR registers (no Harmony abstraction)
+    T5CONSET/T5CONCLR -> direct SFR registers
 
-TMR2 -> OC1 : Match at TMR2=2000
-activate OC1
-OC1 -> OC1 : Generate X step pulse
-OC1 -> OC1 : Update Bresenham errors
+  Shadow register set:
+    All motion state (delta[], abs_delta[], error[], direction_bits,
+    dominant_axis, dominant_delta) are module-static variables.
+    ISR reads/writes them with zero stack allocation.
 
-alt A needs step this cycle
-    OC1 -> OC4 : Set OC4R = 2050 (absolute)
-    OC1 -> OC4 : Set OC4RS = 2070 (absolute)
-end
-
-alt Y does NOT need step this cycle
-    OC1 -> OC2 : Set OC2R = OC2RS (equal values)
-    note right of OC2
-      Y not scheduled - DISABLED
-      OCxR = OCxRS stops pulse generation
-      Prevents spurious pulses
-      Critical for arc & Bresenham sanity
-    end note
-end
-
-OC1 -> OC1 : Set OC1R = 2500 (absolute)
-OC1 -> OC1 : Set OC1RS = 2520 (absolute)
-deactivate OC1
-
-== Key Principles ==
-note over TMR2, OC4
-  1. TMR2 runs continuously (never resets)
-  2. All OCxR/OCxRS values are ABSOLUTE timer counts
-  3. Dominant axis tracks continuously ahead of TMR2
-  4. Subordinate axes scheduled ON-DEMAND only
-  5. Dominant axis can swap by changing tracking
-  6. Set OCxR = OCxRS to DISABLE pulse generation
-     (prevents spurious pulses during arc/Bresenham)
+  Segment transition race window:
+    currentSegment assigned before STEPPER_LoadSegment() populates ISR statics.
+    One ISR fire in this window uses prior-segment statics — practically harmless.
+    Same pattern as GRBL reference firmware.
 end note
 
 @enduml

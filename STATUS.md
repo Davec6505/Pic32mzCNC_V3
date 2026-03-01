@@ -1,9 +1,26 @@
 # Pic32mzCNC_V3 - Development Status Tracker
 
-**Branch**: `tmc5160`  
+**Branch**: `lookahead`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: February 28, 2026
+**Last Updated**: March 1, 2026
+
+---
+
+## ✅ Documentation: UML + README Updated for lookahead Architecture — March 1, 2026
+
+Updated all architecture documentation to reflect current `lookahead` branch implementation. Removed all references to the deleted Priority Phase System and old TMR2/OC2/OC3/OC4 per-axis ISR architecture.
+
+- `docs/plantuml/02_segment_clock.puml` — **Complete rewrite**: Now documents period-based TMR4/OC1/TMR5 single-ISR architecture, M14K shadow register swap, switch/Harmony macro GPIO pattern, direct-SFR Timer/OC, Bresenham inside ISR, velocity profiling inside ISR, pulse-width TMR5 callback, race window note
+- `docs/plantuml/01_system_overview.puml` — **Complete rewrite**: Removed TMR2 free-running, OC2/OC3/OC4 per-axis ISRs, Priority Phase enum. Added `OCP1_ISR` single-ISR with shadow regs, look-ahead planner in kinematics, arc incremental generator
+- `docs/plantuml/03_arc_linear_interpolation.puml` — **Targeted fix**: Replaced `[Priority Phase\nSystem]` note with `[MOTION_Tasks Segment Queue]`. Replaced `[Hardware Timers OC1/OC2/OC3/OC4]` with `[OCP1_ISR TMR4/OC1/TMR5]`
+- `README.md:9` — Branch updated: `tmc5160` → `lookahead`
+- `README.md:11` — Last build date updated: February 28, 2026 → March 1, 2026
+- `README.md:19` — Feature table: Added "Look-ahead backward-pass planner (junction velocity) ✅ Complete"
+- `README.md:112` — Call hierarchy: "motion.c — motion queue, phase system" → "motion.c — segment queue, look-ahead planner"
+- `README.md:128–143` — **Deleted** "### Priority Phase System" section (5-phase enum no longer exists in codebase)
+- `README.md:128` — **Added** "### ISR Architecture" section: M14K shadow regs, switch/Harmony macro rationale, GPIO vs Timer/OC split, 8-step ISR sequence, TMR5 callback
+- `README.md` — **Added** "### Look-Ahead Planner" section: backward-pass junction velocity, pre-computed per-segment integer deltas
 
 ---
 

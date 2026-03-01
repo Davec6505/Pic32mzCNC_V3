@@ -6,15 +6,16 @@ GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, tar
 
 ## 🚀 Status
 
-**Branch**: `tmc5160` (active development mainline)
+**Branch**: `lookahead` (active development mainline)
 **Firmware**: `bins/CNC_V3.hex`
-**Last build**: February 28, 2026
+**Last build**: March 1, 2026
 
 | Feature | Status |
 |---------|--------|
 | GRBL v1.1 protocol | ✅ Complete |
 | 4-axis coordinated motion (XYZA) | ✅ Complete |
 | Trapezoidal velocity profiling | ✅ Complete |
+| Look-ahead backward-pass planner (junction velocity) | ✅ Complete |
 | Arc interpolation G2/G3 + radius compensation | ✅ Complete |
 | Homing ($H) — 4-phase cycle | ✅ Complete |
 | Spindle PWM (M3/M5 via OC8/TMR6) | ✅ Complete |
@@ -109,7 +110,7 @@ main.c
         ├── APP_LOAD_SETTINGS → settings.c (read flash after peripherals ready)
         ├── APP_CONFIG      → TMC5160_Initialize() [#ifdef HAS_TMC5160_AXIS]
         ├── APP_IDLE
-        │     ├── motion.c  — motion queue, phase system
+        │     ├── motion.c  — segment queue, look-ahead planner
         │     ├── gcode_parser.c — parse events, flow control
         │     ├── kinematics.c — generate motion segments
         │     ├── stepper.c — load segments to TMR4/OC1
@@ -125,17 +126,34 @@ ISR (asynchronous)
   └── CN-F_ISR  — E-Stop button RF4 (stepper.c, IPL7 — highest priority)
 ```
 
-### Priority Phase System
+### ISR Architecture
 
-The main loop processes motion phases in strict priority order so G-code parsing never blocks step timing:
+All Bresenham interpolation and velocity profiling execute **inside** `OCP1_ISR` — there is no separate main-loop phase system. The PIC32MZ M14K shadow register set at IPL5 swaps the entire CPU register file in 1 cycle on ISR entry/exit, giving zero push/pop stack cost.
 
-```c
-MOTION_PHASE_VELOCITY  = 0   // update step rate (accel/cruise/decel)
-MOTION_PHASE_BRESENHAM = 1   // accumulate error terms
-MOTION_PHASE_SCHEDULE  = 2   // write OCx registers
-MOTION_PHASE_COMPLETE  = 3   // check segment done, load next
-MOTION_PHASE_IDLE      = 255 // safe to process G-code / UART
-```
+**Per-step sequence inside `OCP1_ISR`:**
+
+1. Cache `seg = currentSegment` (NULL guard — immediate return if not loaded)
+2. **Dominant axis STEP HIGH** — `switch(dominant_axis)` → Harmony `#define` macro → single `LATxSET` write. Compiler emits a jump table; no function call, no pointer indirection.
+3. Position counter update (`AXIS_IncrementSteps` / `AXIS_DecrementSteps` — genuinely inlined; address never placed in a pointer array)
+4. **Bresenham loop** (0–3 subordinate axes, bounded worst-case): `error[axis] += abs_delta[axis]` → step if `error >= dominant_delta` → same `switch`/Harmony macro pattern
+5. `T5CONSET = _T5CON_ON_MASK` — start one-shot pulse-width timer (direct SFR)
+6. **Velocity profiling** — integer arithmetic only, no float, no division:
+   - Accel: `step_interval -= rate_delta` (floor at `nominal_rate`)
+   - Decel: `step_interval += decel_rate_delta` (ceil at `final_rate`)
+7. `PR4 = period`, `OC1R = period-5`, `OC1RS = period-3` — direct SFR writes. Timer/OC silicon never changes board-to-board so no Harmony abstraction is needed here.
+8. `seg->steps_completed++`
+
+**TMR5 callback** (pulse width ~2.56 µs later): `T5CONCLR` stops timer; four unrolled Harmony macros `StepX_Clear()…StepA_Clear()` cleared unconditionally.
+
+**GPIO vs Timer/OC split:**
+- **GPIO** (board-specific, MCC-managed): Harmony `#define` macros (`StepX_Set()` etc.) — MCC pin renames propagate automatically.
+- **Timer/OC** (silicon, never board-specific): direct SFR registers (`PR4`, `OC1R`, `OC1RS`, `T5CONSET`, `T5CONCLR`).
+
+### Look-Ahead Planner
+
+`KINEMATICS_PlanSegment()` runs a **backward-pass junction velocity** calculation across the queued segment chain before each new segment is admitted to the motion queue. This limits entry/exit velocity at direction changes based on the cosine of the junction angle, enabling smooth multi-segment motion without mid-move pauses.
+
+Pre-computed per segment: `rate_delta`, `decel_rate_delta`, `accelerate_until`, `decelerate_after`, `nominal_rate`, `final_rate`. The ISR reads these as integers with no division — all heavy planning math runs in the main loop.
 
 ### Flow Control
 
