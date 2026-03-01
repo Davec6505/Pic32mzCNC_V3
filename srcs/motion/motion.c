@@ -161,11 +161,16 @@ static void MOTION_RecomputeExit(MotionSegment* seg, float new_exit_mms) {
 
 void MOTION_Arc(APP_DATA* appData) {
 
-    // Only generate if arc is active and motion queue has space
-    if(appData->arcGenState != ARC_GEN_ACTIVE || appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+    // Only generate if arc is active
+    if(appData->arcGenState != ARC_GEN_ACTIVE) {
         return;
     }
-    
+
+    // ✅ FILL QUEUE: loop until queue is full or arc is complete.
+    // Generating one segment at a time caused stop/go jitter because the
+    // main loop could not refill faster than the ISR consumed segments.
+    while(appData->arcGenState == ARC_GEN_ACTIVE &&
+          appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
 
     CoordinatePoint next;
     bool is_last_segment = false;
@@ -232,6 +237,8 @@ void MOTION_Arc(APP_DATA* appData) {
     
     // Increment segment counter
     appData->arcSegmentCurrent++;
+
+    } // end while(arcGenState == ARC_GEN_ACTIVE && queue not full)
 }
 
 
