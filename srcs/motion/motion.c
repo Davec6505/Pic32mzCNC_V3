@@ -151,9 +151,12 @@ static void MOTION_RecomputeExit(MotionSegment* seg, float new_exit_mms) {
     seg->decelerate_after = new_decel_after;
 
     // Recompute decel_rate_delta for the updated decel phase
+    // Use ceiling division — same reason as in KINEMATICS_LinearMove: floor would
+    // leave the ISR unable to reach final_rate within the available decel steps.
     uint32_t actual_decel = seg->steps_remaining - seg->decelerate_after;
     if (actual_decel > 0) {
-        seg->decel_rate_delta = (seg->final_rate - seg->nominal_rate) / actual_decel;
+        uint32_t decel_range = seg->final_rate - seg->nominal_rate;
+        seg->decel_rate_delta = (decel_range + actual_decel - 1) / actual_decel;
     } else {
         seg->decel_rate_delta = 0;
     }

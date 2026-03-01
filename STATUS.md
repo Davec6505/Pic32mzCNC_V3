@@ -3,11 +3,50 @@
 **Branch**: `lookahead`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: March 1, 2026
+**Last Updated**: March 2, 2026
 
 ---
 
-## ✅ Bug Fix: SETTINGS_VERSION conditional — March 1, 2026
+## ✅ Bug Fix: rate_delta ceiling division — motor never reached cruise speed — March 2, 2026
+
+**Root cause**: `KINEMATICS_LinearMove()` computed `rate_delta` using floor (integer) division:
+```c
+rate_delta = (initial_rate - nominal_rate) / accel_steps;   // floor → too small
+```
+Because floor rounds down, `rate_delta × accel_steps < (initial_rate - nominal_rate)`.  
+The ISR's snap-to-nominal condition (`step_interval <= nominal_rate + rate_delta`) was never
+triggered within `accel_steps` iterations, so the motor exited the accel phase still above
+`nominal_rate` — permanently stuck at a lower-than-commanded cruise speed.
+
+**Example with defaults (F2000, steps/mm=156, accel=500)**:
+- `initial_rate=601`, `nominal_rate=150`, `accel_steps=173`
+- `rate_delta = 451/173 = 2` (floor)
+- After 173 steps: interval = `601 − 2×173 = 255` ticks → ~19 mm/s (not 33.3 mm/s)
+
+**Fix**: Ceiling division ensures `rate_delta × accel_steps ≥ range`, so the snap fires before accel ends:
+```c
+uint32_t accel_range = segment_buffer->initial_rate - segment_buffer->nominal_rate;
+segment_buffer->rate_delta = (accel_range + accel_steps - 1) / accel_steps;  // ceil
+```
+Same fix applied to `decel_rate_delta` and the copy in `MOTION_RecomputeExit()`.
+
+**Files changed**:
+- `srcs/motion/kinematics.c` — `KINEMATICS_LinearMove()`: ceiling for `rate_delta` and `decel_rate_delta`
+- `srcs/motion/motion.c` — `MOTION_RecomputeExit()`: ceiling for `decel_rate_delta`
+
+---
+
+## ✅ Bug Fix: MOTION_Arc stop/go jitter — March 2, 2026
+
+**Root cause**: `MOTION_Arc()` generated exactly one arc segment per main-loop call. The ISR consumed segments in microseconds; the main loop was too slow to refill → queue drained to 0 between arc segments → motor stopped and restarted on every segment.
+
+**Fix**: Changed to a `while(arcGenState == ARC_GEN_ACTIVE && motionQueueCount < MAX_MOTION_SEGMENTS)` loop that fills the entire 16-slot queue in one call.
+
+- `srcs/motion/motion.c:162` — `MOTION_Arc()`: one-segment per call → fill-queue loop
+
+---
+
+
 
 **Root cause**: SETTINGS_VERSION was bumped from 2 → 3 when TMC5160 fields were added to `CNC_Settings`. Since all axes are currently `DRIVER_DRV8825`, `HAS_TMC5160_AXIS` is NOT defined, so those fields do not exist in the struct — the binary layout is identical to version 2. However the hard-coded `#define SETTINGS_VERSION 3` caused the version check in `SETTINGS_LoadFromFlash` to fail, so the firmware silently fell back to defaults (`steps_per_mm=156, max_rate Z=2000`) instead of loading calibrated flash values. Symptom: correct acc/dec shape but wrong absolute speed.
 

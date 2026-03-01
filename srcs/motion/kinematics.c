@@ -280,8 +280,14 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     }
     
     // Rate delta per step — accel phase
+    // ⚠️ Use CEILING division so the snap-to-nominal condition in the ISR is
+    //    guaranteed to fire within accel_steps.  Floor division leaves the
+    //    step_interval above nominal_rate at the end of the accel phase, so the
+    //    motor never actually reaches cruise speed.
+    //    Ceiling: delta = ceil(range / steps) = (range + steps - 1) / steps
     if(accel_steps > 0) {
-        segment_buffer->rate_delta = (segment_buffer->initial_rate - segment_buffer->nominal_rate) / accel_steps;
+        uint32_t accel_range = segment_buffer->initial_rate - segment_buffer->nominal_rate;
+        segment_buffer->rate_delta = (accel_range + accel_steps - 1) / accel_steps;
     } else {
         segment_buffer->rate_delta = 0;
     }
@@ -289,7 +295,8 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // Rate delta per step — decel phase (asymmetric: exit speed may differ from entry speed)
     uint32_t decel_steps_kin = (uint32_t)max_delta - segment_buffer->decelerate_after;
     if (decel_steps_kin > 0) {
-        segment_buffer->decel_rate_delta = (segment_buffer->final_rate - segment_buffer->nominal_rate) / decel_steps_kin;
+        uint32_t decel_range = segment_buffer->final_rate - segment_buffer->nominal_rate;
+        segment_buffer->decel_rate_delta = (decel_range + decel_steps_kin - 1) / decel_steps_kin;
     } else {
         segment_buffer->decel_rate_delta = 0;
     }
