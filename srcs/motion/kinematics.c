@@ -318,65 +318,69 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     //        abs_n shrinks → denominator shrinks → delta grows → strong braking.
     // =========================================================================
 
-    // Minimum step frequency: stepper motor won't reliably move below this.
-    // 200 Hz is conservative (most drivers work fine at 50+ Hz, but load,
-    // microstepping, and resonance can stall motors at very low rates).
-    // Increase this value if the motor hesitates on the first step.
-    const float MIN_STEP_HZ = 200.0f;
-
-    // Physics c₀ from rest, clamped to minimum practical step rate.
-    // c₀_max is the LONGEST tick interval still guaranteed to produce motion.
+    // c₀ = TIMER_FREQ · √(2 / (a · spm))  — physics first-step interval from rest.
     float c0 = TIMER_FREQ * sqrtf(2.0f / (acceleration_mm_sec2 * steps_per_mm_dominant));
-    float c0_max = TIMER_FREQ / MIN_STEP_HZ;   // e.g. 781250/200 = 3906 ticks
-    if (c0 > c0_max) c0 = c0_max;              // clamp: never slower than MIN_STEP_HZ
-    if (c0 < 1.0f)   c0 = 1.0f;               // safety: never overflow timer
+    if (c0 < 1.0f) c0 = 1.0f;
+
+    // -------------------------------------------------------------------------
+    // FEEDRATE-RELATIVE START CLAMP
+    // -------------------------------------------------------------------------
+    // Problem: at high feedrates c0 >> nominal_rate.  Example at F2500 on X:
+    //   c0=5328 ticks (146Hz), nominal=219 ticks (3.6kHz) — ratio 24:1.
+    //   Taylor needs ~200 steps to converge → visible delay before axis moves.
+    //
+    // Fix: cap initial_rate at MAX_START_RATIO × nominal_rate.
+    //   - Ratio 4 means the axis always starts at ≥25% of cruise speed.
+    //   - Derive n_entry via Austin approximation so Taylor continues smoothly
+    //     from mid-ramp rather than from true zero (n=0 at a clamped rate would
+    //     give den=5 → violent 40% jump on first step).
+    //   - This is feedrate- and axis-aware: Z with tiny nominal gets a small
+    //     initial_rate (close to cruise), X at F500 is barely clamped.
+    // -------------------------------------------------------------------------
+    const float MAX_START_RATIO = 4.0f;   // start at most 4× slower than cruise
+
+    // Austin approximation: given c0 (rest) and actual start interval c_start,
+    // the mid-ramp Taylor index is  n ≈ (c0/c_start)² − 0.5  (floor, min 0).
+    // When c_start == c0 (no clamp) → n = 0.5 → floor 0.  Correct.
+    // When c_start < c0 (clamped)  → n > 0.   Correct: ISR starts mid-ramp.
+    #define AUSTIN_N(c_start) \
+        ((int32_t)fmaxf(0.0f, (c0 / (c_start)) * (c0 / (c_start)) - 0.5f))
 
     // --- ENTRY (accel start) ---
-    // Use c₀ (possibly clamped) for zero-velocity entry, or junction interval.
     float entry_c;
     if (entry_velocity <= 0.0f) {
-        entry_c = c0;
+        // From rest: use c0 clamped to MAX_START_RATIO × cruise.
+        float c0_clamped = fminf(c0, MAX_START_RATIO * (float)segment_buffer->nominal_rate);
+        entry_c = c0_clamped;
     } else {
-        // Junction: timer interval from junction velocity.
-        // Junction velocity is always >> MIN_STEP_HZ/spm so no clamping needed here.
+        // Junction velocity: convert to timer interval directly.
         entry_c = TIMER_FREQ / (entry_velocity * steps_per_mm_dominant);
     }
     segment_buffer->initial_rate = (uint32_t)entry_c;
-    // Clamp: can't start faster than cruise.
+    // Hard floor: can't start faster than cruise.
     if (segment_buffer->initial_rate < segment_buffer->nominal_rate)
         segment_buffer->initial_rate = segment_buffer->nominal_rate;
 
-    // Derive n_entry CONSISTENTLY from the rate actually stored.
-    // This is the only correct approach — avoids the (rate,n) inconsistency bug.
-    {
-        float v_eff = TIMER_FREQ / ((float)segment_buffer->initial_rate * steps_per_mm_dominant);
-        int32_t n_entry = (int32_t)(2.0f * v_eff * v_eff * steps_per_mm_dominant
-                                    / acceleration_mm_sec2) - 1;
-        if (n_entry < 0) n_entry = 0;
-        segment_buffer->accel_count = n_entry;
-    }
+    segment_buffer->accel_count = AUSTIN_N((float)segment_buffer->initial_rate);
     segment_buffer->rest = 0;
 
     // --- EXIT (decel end) ---
     float exit_c;
     if (exit_velocity <= 0.0f) {
-        exit_c = c0;   // decel mirrors accel: ends at same clamped c₀
+        // To rest: mirror of entry — same clamped c0.
+        float c0_clamped = fminf(c0, MAX_START_RATIO * (float)segment_buffer->nominal_rate);
+        exit_c = c0_clamped;
     } else {
         exit_c = TIMER_FREQ / (exit_velocity * steps_per_mm_dominant);
     }
     segment_buffer->final_rate = (uint32_t)exit_c;
-    // Clamp: decel can't end faster than cruise.
+    // Hard floor: decel can't end faster than cruise.
     if (segment_buffer->final_rate < segment_buffer->nominal_rate)
         segment_buffer->final_rate = segment_buffer->nominal_rate;
 
-    // Derive n_exit consistently (same rule as n_entry).
-    int32_t n_exit;
-    {
-        float v_eff = TIMER_FREQ / ((float)segment_buffer->final_rate * steps_per_mm_dominant);
-        n_exit = (int32_t)(2.0f * v_eff * v_eff * steps_per_mm_dominant
-                           / acceleration_mm_sec2) - 1;
-        if (n_exit < 0) n_exit = 0;
-    }
+    int32_t n_exit = AUSTIN_N((float)segment_buffer->final_rate);
+
+    #undef AUSTIN_N
 
     segment_buffer->accel_count_decel = -((int32_t)decel_steps + n_exit);
 
