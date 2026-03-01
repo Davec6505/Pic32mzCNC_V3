@@ -66,6 +66,31 @@ GPIO_ClearFunc axis_step_clear[NUM_AXIS] = {
     step_x_clear, step_y_clear, step_z_clear, step_a_clear
 };
 
+// ===== ISR-DIRECT STEP GPIO ARRAYS =====
+// Eliminates jalr+prologue+epilogue overhead from ISR hot path.
+// always_inline is silently ignored when a function's address is taken (stored
+// in a pointer array) — the compiler must emit a real function body.
+// Direct LAT register writes match exactly what the plib_gpio.h macros expand to.
+//   StepX: LATD bit 4 | StepY: LATF bit 0 | StepZ: LATF bit 1 | StepA: LATG bit 1
+volatile uint32_t* const axis_step_set_reg[NUM_AXIS] = {
+    (volatile uint32_t*)&LATDSET,  // X: RD4
+    (volatile uint32_t*)&LATFSET,  // Y: RF0
+    (volatile uint32_t*)&LATFSET,  // Z: RF1
+    (volatile uint32_t*)&LATGSET,  // A: RG1
+};
+volatile uint32_t* const axis_step_clr_reg[NUM_AXIS] = {
+    (volatile uint32_t*)&LATDCLR,  // X: RD4
+    (volatile uint32_t*)&LATFCLR,  // Y: RF0
+    (volatile uint32_t*)&LATFCLR,  // Z: RF1
+    (volatile uint32_t*)&LATGCLR,  // A: RG1
+};
+const uint32_t axis_step_mask[NUM_AXIS] = {
+    (1U << 4),  // X: RD4
+    (1U << 0),  // Y: RF0
+    (1U << 1),  // Z: RF1
+    (1U << 1),  // A: RG1
+};
+
 GPIO_SetFunc axis_dir_set[NUM_AXIS] = {
     dir_x_set, dir_y_set, dir_z_set, dir_a_set
 };
