@@ -565,51 +565,93 @@ void OCP1_ISR(uintptr_t context) {
 
     if (sc < seg->accelerate_until) {
         // Acceleration: accel_count counts up from entry-velocity-corrected index
-        seg->accel_count++;
-        int32_t num    = ((int32_t)seg->step_interval << 1) + seg->rest;
-        int32_t den    = (seg->accel_count << 2) + 1;
-        seg->rest      = num % den;
-        int32_t new_iv = (int32_t)seg->step_interval - (num / den);
-        if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
-        // S-curve jerk: ramp the Taylor accel delta from 0 to full over jerk_steps.
-        // At jerk_count=0: no delta applied (smooth zero-jerk start).
-        // At jerk_count=jerk_steps: full Taylor delta applies (constant A_max phase).
-        // Division is a single arithmetic right-shift (jerk_steps is always a power-of-2).
         if (seg->jerk_steps > 0U && seg->jerk_count < (int32_t)seg->jerk_steps) {
-            int32_t full_delta = (int32_t)seg->step_interval - new_iv;  // positive: interval shrinking
-            int32_t scaled     = (full_delta * seg->jerk_count) >> seg->jerk_steps_log2;
-            new_iv = (int32_t)seg->step_interval - scaled;
+            // =====================================================================
+            // S-CURVE JERK RAMP (accel entry)
+            // =====================================================================
+            // Linear interpolation from initial_rate toward (initial_rate - ref_delta)
+            // where ref_delta = what ONE full Taylor step from initial_rate would give.
+            //
+            // CRITICAL: accel_count and rest are NOT advanced here.
+            // Their values represent the correct Taylor starting index AFTER this ramp.
+            // When jerk ramp ends, Taylor picks up from the real step_interval with the
+            // correct accel_count → no divergence, no frozen-motor bug.
+            //
+            // ref_delta = 2*initial_rate / (4*(n_entry+1)+1)
+            //           = 2*initial_rate / (4*accel_count + 5)   [accel_count frozen = n_entry]
+            int32_t den_first = (seg->accel_count << 2) + 5;
+            if (den_first < 1) den_first = 1;
+            int32_t ref_delta = ((int32_t)seg->initial_rate << 1) / den_first;
+            // Linear scale: apply (jerk_count+1)/jerk_steps fraction each step
+            // Division by jerk_steps using pre-stored log2 bit-shift (zero extra cost)
+            int32_t applied   = (ref_delta * (seg->jerk_count + 1)) >> seg->jerk_steps_log2;
+            int32_t new_iv    = (int32_t)seg->initial_rate - applied;
+            if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
+            seg->step_interval = (uint32_t)new_iv;
             seg->jerk_count++;
+            // accel_count and rest intentionally NOT changed — Taylor continuity preserved
+        } else {
+            // Normal Taylor accel (also runs when jerk_steps=0 or after jerk ramp completes)
+            seg->accel_count++;
+            int32_t num    = ((int32_t)seg->step_interval << 1) + seg->rest;
+            int32_t den    = (seg->accel_count << 2) + 1;
+            seg->rest      = num % den;
+            int32_t new_iv = (int32_t)seg->step_interval - (num / den);
+            if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
+            seg->step_interval = (uint32_t)new_iv;
         }
-        seg->step_interval = (uint32_t)new_iv;
     } else if (sc >= seg->decelerate_after) {
         // Deceleration: accel_count is negative (set to -n_cruise), increments toward 0.
         // Negative denominator (4n+1) inverts delta sign → step_interval grows (slower).
         // GUARD: if accel_count reaches 0, den=1 and delta = 2×step_interval → explodes.
         // Clamp to final_rate and skip the formula on that step.
-        seg->accel_count++;
-        int32_t den = (seg->accel_count << 2) + 1;
-        if (den <= 0) {
-            // Still safely negative — normal Taylor decel step
-            int32_t num    = ((int32_t)seg->step_interval << 1) + seg->rest;
-            seg->rest      = num % den;
-            int32_t new_iv = (int32_t)seg->step_interval - (num / den);
-            // S-curve jerk: ramp the Taylor decel delta from 0 to full over jerk_steps
-            // at the START of the decel phase (mirrors accel S-curve ramp-in).
-            if (seg->jerk_steps > 0U && seg->jerk_count < (int32_t)seg->jerk_steps) {
-                int32_t full_delta = new_iv - (int32_t)seg->step_interval;  // positive: interval growing
-                int32_t scaled     = (full_delta * seg->jerk_count) >> seg->jerk_steps_log2;
-                new_iv = (int32_t)seg->step_interval + scaled;
-                seg->jerk_count++;
+        if (seg->jerk_steps > 0U && seg->jerk_count < (int32_t)seg->jerk_steps) {
+            // =====================================================================
+            // S-CURVE JERK RAMP (decel entry)
+            // =====================================================================
+            // Mirror of accel jerk: linear ramp from NO decel change to ref_delta change.
+            // ref_delta = 2*nominal_rate / |4*(accel_count_decel+1)+1|
+            //           = 2*nominal_rate / |4*accel_count + 5|  [accel_count frozen]
+            // If den ≥ 0 (zero-crossing), skip jerk ramp and jump straight to final_rate.
+            int32_t den_first = (seg->accel_count << 2) + 5;
+            if (den_first >= 0) {
+                // Granularity edge case: decel phase is trivially short or den crossed zero
+                seg->jerk_count = (int32_t)seg->jerk_steps;  // Force skip to normal Taylor
+                seg->rest        = 0;
+                seg->step_interval = seg->final_rate;
+            } else {
+                // Safely negative: compute reference delta (positive — interval grows during decel)
+                int32_t ref_delta = -(((int32_t)seg->step_interval << 1) / den_first);
+                if (ref_delta <= 0) {
+                    // Integer granularity: delta rounds to 0 at high cruise speed — skip jerk ramp
+                    seg->jerk_count = (int32_t)seg->jerk_steps;
+                } else {
+                    int32_t applied = (ref_delta * (seg->jerk_count + 1)) >> seg->jerk_steps_log2;
+                    int32_t new_iv  = (int32_t)seg->step_interval + applied;
+                    if (new_iv > (int32_t)seg->final_rate) new_iv = (int32_t)seg->final_rate;
+                    seg->step_interval = (uint32_t)new_iv;
+                    seg->jerk_count++;
+                }
             }
-            // step_interval must stay between nominal (fastest) and final_rate (slowest)
-            if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
-            if (new_iv > (int32_t)seg->final_rate)   new_iv = (int32_t)seg->final_rate;
-            seg->step_interval = (uint32_t)new_iv;
+            // accel_count and rest intentionally NOT changed during decel jerk ramp
         } else {
-            // den ≥ 1: accel_count crossed zero — snap to final_rate and hold
-            seg->rest          = 0;
-            seg->step_interval = seg->final_rate;
+            // Normal Taylor decel (also after jerk ramp or jerk_steps=0)
+            seg->accel_count++;
+            int32_t den = (seg->accel_count << 2) + 1;
+            if (den <= 0) {
+                // Still safely negative — normal Taylor decel step
+                int32_t num    = ((int32_t)seg->step_interval << 1) + seg->rest;
+                seg->rest      = num % den;
+                int32_t new_iv = (int32_t)seg->step_interval - (num / den);
+                // step_interval must stay between nominal (fastest) and final_rate (slowest)
+                if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
+                if (new_iv > (int32_t)seg->final_rate)   new_iv = (int32_t)seg->final_rate;
+                seg->step_interval = (uint32_t)new_iv;
+            } else {
+                // den ≥ 1: accel_count crossed zero — snap to final_rate and hold
+                seg->rest          = 0;
+                seg->step_interval = seg->final_rate;
+            }
         }
     }
     // CRUISE (accelerate_until ≤ sc < decelerate_after): step_interval unchanged
