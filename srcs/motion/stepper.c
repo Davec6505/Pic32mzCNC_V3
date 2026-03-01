@@ -502,7 +502,8 @@ void OCP1_ISR(uintptr_t context) {
         case AXIS_X: StepX_Set(); break;
         case AXIS_Y: StepY_Set(); break;
         case AXIS_Z: StepZ_Set(); break;
-        default:     StepA_Set(); break;  // AXIS_A
+        case AXIS_A: StepA_Set(); break;
+        default:     break;  // should never reach here
     }
 
     DEBUG_EXEC_STEPPER({
@@ -528,7 +529,8 @@ void OCP1_ISR(uintptr_t context) {
                 case AXIS_X: StepX_Set(); break;
                 case AXIS_Y: StepY_Set(); break;
                 case AXIS_Z: StepZ_Set(); break;
-                default:     StepA_Set(); break;
+                case AXIS_A: StepA_Set(); break;
+                default:     break;  // should never reach here
             }
             if (direction_bits & (1U << axis)) {
                 AXIS_IncrementSteps(axis);
@@ -555,6 +557,18 @@ void OCP1_ISR(uintptr_t context) {
     }
     // CRUISE: step_interval unchanged
 
+    seg->steps_completed++;
+
+    // ===== SEGMENT COMPLETION =====
+    // Detect completion here — stops TMR4 precisely after the final step.
+    // Prevents phantom ISR calls while main loop polls steps_completed.
+    // STEPPER_LoadSegment() restarts TMR4 when the next segment is ready.
+    if (seg->steps_completed >= seg->steps_remaining) {
+        T4CONCLR = _T4CON_ON_MASK;  // Stop TMR4 — direct SFR
+        app_data_ref->motionSegmentCompleted = true;
+        return;
+    }
+
     // Direct SFR writes — OC1/TMR4 are fixed silicon, never need Harmony abstraction.
     // PR4 >= OC1RS > OC1R (Output Compare datasheet 16.3.2.5)
     uint16_t period = (uint16_t)seg->step_interval;
@@ -562,8 +576,6 @@ void OCP1_ISR(uintptr_t context) {
     PR4   = period;
     OC1R  = period - 5U;
     OC1RS = period - 3U;
-
-    seg->steps_completed++;
 }
 
 // ============================================================================
