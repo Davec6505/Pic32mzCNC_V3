@@ -371,16 +371,22 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     segment_buffer->rest = 0;
 
     // --- EXIT (decel end) ---
-    // Same ceiling as entry — symmetric.
-    float max_exit_c = max_entry_c;
-
+    // Decel stop case: use c0 directly (full deceleration to physical rest).
+    //   Do NOT apply the 4× clamp here — that would truncate decel too early,
+    //   leaving the motor coasting at 4× cruise speed when it should be at rest.
+    // Junction exit case: convert to ticks; clamp only if near-zero junction
+    //   would produce a pathologically large exit_c (same issue as entry path).
+    //   The backward-pass planner (MOTION_RecomputeExit) will retroactively
+    //   correct final_rate once the next segment is known, so the initial value
+    //   just needs to be physically plausible.
     float exit_c;
     if (exit_velocity <= 0.0f) {
-        // To rest: mirror of entry.
-        exit_c = max_exit_c;
+        // To rest: full c0 — let Taylor decel all the way to near-zero speed.
+        exit_c = c0;
     } else {
+        // Junction: clamp pathological near-zero junction (same ceiling as entry).
         exit_c = TIMER_FREQ / (exit_velocity * steps_per_mm_dominant);
-        if (exit_c > max_exit_c) exit_c = max_exit_c;
+        if (exit_c > max_entry_c) exit_c = max_entry_c;
     }
     segment_buffer->final_rate = (uint32_t)exit_c;
     // Hard floor: decel can't end faster than cruise.
