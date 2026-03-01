@@ -290,18 +290,23 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         segment_buffer->decelerate_after = (uint32_t)max_delta - decel_steps;
     }
     
-    // Junction-aware velocity planning
-    // GRBL safe-start: maximum speed achievable from rest in a single step
-    // Formula: v = sqrt(2 * a * step_size) where step_size = 1/steps_per_mm
-    // This is the highest speed a motor can start/stop at without losing steps
-    float safe_start = sqrtf(2.0f * acceleration_mm_sec2 / steps_per_mm_dominant);
-    if (safe_start < 1.0f) safe_start = 1.0f;                  // Never below 1 step/sec
-    if (safe_start > feedrate_mm_sec) safe_start = feedrate_mm_sec;  // Cap at cruise
+    // Minimum practical start/stop speed.
+    // Physics floor: sqrt(2*a/spm) — max speed a stepper can start from rest safely.
+    // Practical floor: cruise/8 — ensures the first visible steps aren't painfully slow.
+    // We take the MAX so the motor always starts at a responsive speed while staying
+    // within the physics limit for the given acceleration setting.
+    // n_entry/n_exit are then computed FROM this clamped speed, so Taylor picks up
+    // mid-ramp at exactly the right interval — no step-rate discontinuity.
+    float safe_start_phys = sqrtf(2.0f * acceleration_mm_sec2 / steps_per_mm_dominant);
+    float safe_start_prac = feedrate_mm_sec / 8.0f;   // 12.5% of cruise — feels responsive
+    float safe_start = (safe_start_phys > safe_start_prac) ? safe_start_phys : safe_start_prac;
+    if (safe_start < 1.0f)              safe_start = 1.0f;
+    if (safe_start > feedrate_mm_sec)   safe_start = feedrate_mm_sec;
     float min_steps_per_sec = safe_start * steps_per_mm_dominant;
-    
+
     // Calculate entry and exit step rates from junction velocities
     float entry_steps_per_sec = fmaxf(entry_velocity * steps_per_mm_dominant, min_steps_per_sec);
-    float exit_steps_per_sec = fmaxf(exit_velocity * steps_per_mm_dominant, min_steps_per_sec);
+    float exit_steps_per_sec  = fmaxf(exit_velocity  * steps_per_mm_dominant, min_steps_per_sec);
     
     segment_buffer->initial_rate = (uint32_t)(TIMER_FREQ / entry_steps_per_sec);
     segment_buffer->final_rate = (uint32_t)(TIMER_FREQ / exit_steps_per_sec);
