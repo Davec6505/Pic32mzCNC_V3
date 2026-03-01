@@ -150,10 +150,13 @@ static void MOTION_RecomputeExit(MotionSegment* seg, float new_exit_mms) {
     if (new_decel_after < seg->accelerate_until) new_decel_after = seg->accelerate_until;
     seg->decelerate_after = new_decel_after;
 
-    // Mirror old Pic32mzCNC: decel_val = -(accel_count at end of accel phase).
-    // seg->accel_count = n_entry (not yet modified — caller guarantees segment not executing).
-    // accel_count_decel is independent of exit speed; only decelerate_after + final_rate change.
-    seg->accel_count_decel = -(seg->accel_count + (int32_t)seg->accelerate_until);
+    // accel_count_decel = -(decel_steps + n_exit)
+    // Mirrors the formula in KINEMATICS_LinearMove.
+    // n_exit = Taylor index corresponding to the exit speed — ISR ramps from -(decel_steps+n_exit)
+    // back toward -n_exit, landing exactly at exit_v.
+    int32_t n_exit_calc = (int32_t)(2.0f * new_exit_mms * new_exit_mms * steps_per_mm / accel) - 1;
+    if (n_exit_calc < 0) n_exit_calc = 0;
+    seg->accel_count_decel = -((int32_t)decel_steps + n_exit_calc);
     if (seg->accel_count_decel >= 0) seg->accel_count_decel = -1;  // Safety: must start negative
 }
 
