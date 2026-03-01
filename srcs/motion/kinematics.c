@@ -347,14 +347,20 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         ((int32_t)fmaxf(0.0f, (c0 / (c_start)) * (c0 / (c_start)) - 0.5f))
 
     // --- ENTRY (accel start) ---
+    // Ceiling: never start slower than max(c0, MAX_START_RATIO × cruise).
+    // Applied to BOTH rest-start and junction cases so that a near-zero
+    // junction velocity from the planner can't produce a pathologically large
+    // initial_rate that breaks the Austin n_entry calculation.
+    float max_entry_c = fminf(c0, MAX_START_RATIO * (float)segment_buffer->nominal_rate);
+
     float entry_c;
     if (entry_velocity <= 0.0f) {
-        // From rest: use c0 clamped to MAX_START_RATIO × cruise.
-        float c0_clamped = fminf(c0, MAX_START_RATIO * (float)segment_buffer->nominal_rate);
-        entry_c = c0_clamped;
+        // From rest.
+        entry_c = max_entry_c;
     } else {
-        // Junction velocity: convert to timer interval directly.
+        // Junction velocity: convert to timer interval, then clamp.
         entry_c = TIMER_FREQ / (entry_velocity * steps_per_mm_dominant);
+        if (entry_c > max_entry_c) entry_c = max_entry_c;
     }
     segment_buffer->initial_rate = (uint32_t)entry_c;
     // Hard floor: can't start faster than cruise.
@@ -365,13 +371,16 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     segment_buffer->rest = 0;
 
     // --- EXIT (decel end) ---
+    // Same ceiling as entry — symmetric.
+    float max_exit_c = max_entry_c;
+
     float exit_c;
     if (exit_velocity <= 0.0f) {
-        // To rest: mirror of entry — same clamped c0.
-        float c0_clamped = fminf(c0, MAX_START_RATIO * (float)segment_buffer->nominal_rate);
-        exit_c = c0_clamped;
+        // To rest: mirror of entry.
+        exit_c = max_exit_c;
     } else {
         exit_c = TIMER_FREQ / (exit_velocity * steps_per_mm_dominant);
+        if (exit_c > max_exit_c) exit_c = max_exit_c;
     }
     segment_buffer->final_rate = (uint32_t)exit_c;
     // Hard floor: decel can't end faster than cruise.
