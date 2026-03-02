@@ -8,10 +8,6 @@
 #include <stdlib.h>
 #include <math.h>
 
-// Timer configuration for step interval calculations
-// Timer frequency now queried dynamically (TMR4 in 16-bit mode)
-#define TIMER_TICKS_PER_SECOND_DYNAMIC() (TMR4_FrequencyGet())
-
 // Single instance of work coordinates managed by kinematics (physics module)
 static WorkCoordinateSystem work_coordinates;
 
@@ -229,9 +225,6 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         feedrate_mm_sec = max_rate_mm_sec;
     }
     
-    // Timer frequency — cached at init, g_timer_freq never changes at runtime
-    const float TIMER_FREQ = g_timer_freq;
-    
     // Array-based steps_per_mm lookup (replaces switch statement)
     float steps_per_mm_dominant = *g_axis_settings[segment_buffer->dominant_axis].steps_per_mm;
     
@@ -242,7 +235,7 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         // Ensure at least 1 step/sec to avoid INF/NaN conversions
         steps_per_sec = 1.0f;
     }
-    segment_buffer->nominal_rate = (uint32_t)(TIMER_FREQ / steps_per_sec);
+    segment_buffer->nominal_rate = (uint32_t)(g_timer_freq / steps_per_sec);
     
     DEBUG_PRINT_MOTION("[KIN] F=%.0f mm/min, spm=%.1f, nominal=%lu ticks, a=%.1f mm/s2\r\n",
         feedrate, steps_per_mm_dominant,
@@ -330,7 +323,7 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     // =========================================================================
 
     // c₀ = TIMER_FREQ · √(2 / (a · spm))  — physics first-step interval from rest.
-    float c0 = TIMER_FREQ * sqrtf(2.0f / (acceleration_mm_sec2 * steps_per_mm_dominant));
+    float c0 = g_timer_freq * sqrtf(2.0f / (acceleration_mm_sec2 * steps_per_mm_dominant));
     if (c0 < 1.0f) c0 = 1.0f;
 
     // -------------------------------------------------------------------------
@@ -374,7 +367,7 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         entry_c = max_entry_c;
     } else {
         // Junction velocity: convert to timer interval, then clamp.
-        entry_c = TIMER_FREQ / (entry_velocity * steps_per_mm_dominant);
+        entry_c = g_timer_freq / (entry_velocity * steps_per_mm_dominant);
         if (entry_c > max_entry_c) entry_c = max_entry_c;
     }
     segment_buffer->initial_rate = (uint32_t)entry_c;
@@ -404,7 +397,7 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         exit_c = c0;
     } else {
         // Junction: clamp pathological near-zero junction (same ceiling as entry).
-        exit_c = TIMER_FREQ / (exit_velocity * steps_per_mm_dominant);
+        exit_c = g_timer_freq / (exit_velocity * steps_per_mm_dominant);
         if (exit_c > max_entry_c) exit_c = max_entry_c;
     }
     segment_buffer->final_rate = (uint32_t)exit_c;

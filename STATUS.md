@@ -9,9 +9,10 @@
 
 ## ✅ Optimisation: Cache TMR4 frequency at init — March 2, 2026
 
+- `srcs/motion/kinematics.c:13` — Removed dead `TIMER_TICKS_PER_SECOND_DYNAMIC()` macro (no longer used).
 - `srcs/motion/kinematics.c:16` — Added `static float g_timer_freq` file-scope variable.
 - `srcs/motion/kinematics.c:20` — `KINEMATICS_Initialize()` — Added `g_timer_freq = (float)TMR4_FrequencyGet()` to cache the value once at startup. TMR4 prescaler is fixed by MCC configuration and never changes at runtime.
-- `srcs/motion/kinematics.c:225` — `KINEMATICS_LinearMove()` — Replaced `const float TIMER_FREQ = (float)TMR4_FrequencyGet()` with `const float TIMER_FREQ = g_timer_freq`. Eliminates a JAL + function-body overhead on every segment (called once per arc chord during G2/G3).
+- `srcs/motion/kinematics.c:225` — `KINEMATICS_LinearMove()` — Removed pointless `const float TIMER_FREQ = g_timer_freq` local alias; all four use-sites now reference `g_timer_freq` directly. Eliminates an unnecessary register copy on every call.
 
 ---
 
