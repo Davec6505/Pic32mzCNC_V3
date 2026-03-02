@@ -57,4 +57,13 @@ void KINEMATICS_SetAxisMachinePosition(E_AXIS axis, float position);
 float KINEMATICS_CalculateJunctionSpeed(CoordinatePoint prev_dir, CoordinatePoint curr_dir,
                                        float junction_deviation, float acceleration);
 
+// GRBL-exact planner helpers
+// Re-computes ISR timing fields (initial_rate, nominal_rate, final_rate,
+// accelerate_until, decelerate_after) for a segment given its planned entry/exit
+// speeds in mm/s.  Called by MOTION_PlannerRecalculate() after the reverse+forward pass.
+void KINEMATICS_RecalculateTrapezoid(MotionSegment *seg, float entry_mms, float exit_mms);
+
+// Reset the planner's previous-segment state (call at init and after soft reset).
+void KINEMATICS_ResetPlannerState(void);
+
 #endif /* KINEMATICS_H */

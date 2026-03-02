@@ -15,6 +15,62 @@ static WorkCoordinateSystem work_coordinates;
 // Avoids a JAL (function call) on every KINEMATICS_LinearMove() invocation.
 static float g_timer_freq = 0.0f;
 
+// ============================================================================
+// GRBL-exact planner state  (mirrors GRBL's planner_t struct fields)
+// Updated inside KINEMATICS_LinearMove, consumed by MOTION_PlannerRecalculate.
+// ============================================================================
+static float pl_previous_unit_vec[NUM_AXIS]; // Unit vector of previous planned segment
+static float pl_previous_nominal_speed;      // Nominal speed of previous segment (mm/s)
+
+// Normalise vec[n] to unit length in-place. Returns original magnitude (mm).
+// Equivalent to GRBL's convert_delta_vector_to_unit_vector().
+static float convert_to_unit_vector(float *vec, uint8_t n) {
+    double mag_sq = 0.0;
+    uint8_t i;
+    for (i = 0; i < n; i++) { mag_sq += (double)vec[i] * (double)vec[i]; }
+    if (mag_sq < 1e-18) { return 0.0f; }
+    float mag = (float)sqrt(mag_sq);
+    float inv = 1.0f / mag;
+    for (i = 0; i < n; i++) { vec[i] *= inv; }
+    return mag;
+}
+
+// Returns the maximum combined acceleration such that no single axis exceeds its
+// individual limit when moving along unit_vec.
+// Equivalent to GRBL's limit_value_by_axis_maximum(settings.acceleration, unit_vec).
+static float limit_acceleration_by_axis(const float *unit_vec) {
+    float limit = 1.0E18f;
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        float uv = fabsf(unit_vec[axis]);
+        if (uv > 0.0f) {
+            float a = *(g_axis_settings[axis].acceleration) / uv;
+            if (a < limit) limit = a;
+        }
+    }
+    return (limit >= 1.0E18f) ? 1.0f : limit;
+}
+
+// Returns the maximum combined feed rate such that no single axis exceeds its limit.
+// Equivalent to GRBL's limit_value_by_axis_maximum(settings.max_rate, unit_vec).
+static float limit_rate_by_axis(const float *unit_vec) {
+    float limit = 1.0E18f;
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        float uv = fabsf(unit_vec[axis]);
+        if (uv > 0.0f) {
+            float r = (*(g_axis_settings[axis].max_rate) / 60.0f) / uv; // mm/s
+            if (r < limit) limit = r;
+        }
+    }
+    return (limit >= 1.0E18f) ? 1.0f : limit;
+}
+
+void KINEMATICS_ResetPlannerState(void) {
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        pl_previous_unit_vec[axis] = 0.0f;
+    }
+    pl_previous_nominal_speed = 0.0f;
+}
+
 void KINEMATICS_Initialize(void) {
     // Cache timer frequency once — TMR4 prescaler is fixed by MCC configuration
     g_timer_freq = (float)TMR4_FrequencyGet();
@@ -23,6 +79,9 @@ void KINEMATICS_Initialize(void) {
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         SET_COORDINATE_AXIS(&work_coordinates.offset, axis, 0.0f);
     }
+
+    // Reset GRBL planner state
+    KINEMATICS_ResetPlannerState();
 }
 
 WorkCoordinateSystem* KINEMATICS_GetWorkCoordinates(void) {
@@ -201,32 +260,36 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         return segment_buffer;
     }
 
-    // Convert feedrate from mm/min to mm/sec
+    // =========================================================================
+    // GRBL-exact: unit vector, axis-limited acceleration and rate
+    // Mirrors plan_buffer_line() in GRBL's planner.c.
+    // =========================================================================
+    // Build unit vector from delta_mm (same signed values computed above).
+    // convert_to_unit_vector normalises in-place and returns distance in mm.
+    float local_unit_vec[NUM_AXIS];
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        local_unit_vec[axis] = delta_mm[axis];
+    }
+    float seg_millimeters = convert_to_unit_vector(local_unit_vec, NUM_AXIS);
+
+    // Axis-limited acceleration and rapid rate (GRBL exact).
+    // Scales the per-axis limits to the combined move direction so no single
+    // axis ever exceeds its maximum, regardless of move angle.
+    float acceleration_mm_sec2 = limit_acceleration_by_axis(local_unit_vec);
+    float max_rate_mm_sec      = limit_rate_by_axis(local_unit_vec);
+
+    // Feedrate: mm/min → mm/s, guard zero, clamp to axis-limited max
     float feedrate_mm_sec = feedrate / 60.0f;
-    // Guard: if no feed specified (0 or negative), fall back to a safe default
-    // This prevents divide-by-zero when computing nominal_rate and ensures motion proceeds after reset.
     if (feedrate_mm_sec <= 0.0f) {
-        // Use a conservative default of 600 mm/min (10 mm/sec)
-        feedrate_mm_sec = 600.0f / 60.0f;
+        feedrate_mm_sec = 600.0f / 60.0f;  // Fallback: 600 mm/min
     }
-    
-    // Get max_rate and acceleration for limiting axis using direct array access
-    E_AXIS cfg_axis = limiting_axis;
-    if (cfg_axis >= NUM_AXIS) {
-        cfg_axis = AXIS_X;  // Fallback to X axis if invalid
-    }
-    
-    float max_rate_mm_min = *(g_axis_settings[cfg_axis].max_rate);
-    float acceleration_mm_sec2 = *(g_axis_settings[cfg_axis].acceleration);
-    
-    // Clamp feedrate to max rate
-    float max_rate_mm_sec = max_rate_mm_min / 60.0f;
-    if(feedrate_mm_sec > max_rate_mm_sec) {
+    if (feedrate_mm_sec > max_rate_mm_sec) {
         feedrate_mm_sec = max_rate_mm_sec;
     }
-    
-    // Array-based steps_per_mm lookup (replaces switch statement)
+
+    // Array-based steps_per_mm lookup for dominant axis
     float steps_per_mm_dominant = *g_axis_settings[segment_buffer->dominant_axis].steps_per_mm;
+    (void)limiting_axis; // no longer used — limit_acceleration_by_axis handles this
     
     // Calculate nominal step interval (cruise speed)
     // steps_per_sec = feedrate_mm_sec * steps_per_mm
@@ -416,12 +479,76 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     segment_buffer->jerk_steps_log2 = 0;
     segment_buffer->jerk_count      = 0;
 
-    // Look-ahead fields — initialised here, may be retroactively patched by planner
-    segment_buffer->entry_speed_mms = entry_velocity;
-    segment_buffer->exit_speed_mms  = exit_velocity;
-    segment_buffer->speed_locked    = false;
+    segment_buffer->speed_locked = false;
 
-    // Physics parameters (for debugging/reference) - use actual junction velocities
+    // =========================================================================
+    // GRBL-exact planner fields
+    // Mirrors the planner state update at the end of plan_buffer_line().
+    // =========================================================================
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        segment_buffer->unit_vec[axis] = local_unit_vec[axis];
+    }
+    segment_buffer->millimeters = seg_millimeters;
+
+    // Max junction speed — GRBL centripetal approximation (no trig required).
+    // A circle of radius r = junction_deviation is inscribed at the corner;
+    // the max speed through the corner is constrained by centripetal accel.
+#define MINIMUM_JUNCTION_SPEED_SQR  0.0f
+#define SOME_LARGE_VALUE_SQR        1.0E18f
+    float max_junction_speed_sqr;
+    if (pl_previous_nominal_speed <= 0.0f) {
+        // First segment — no previous direction available, start from rest.
+        max_junction_speed_sqr = MINIMUM_JUNCTION_SPEED_SQR;
+    } else {
+        float junction_cos_theta = 0.0f;
+        float junction_unit_vec[NUM_AXIS];
+        for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+            junction_cos_theta -= pl_previous_unit_vec[axis] * local_unit_vec[axis];
+            junction_unit_vec[axis] = local_unit_vec[axis] - pl_previous_unit_vec[axis];
+        }
+        if (junction_cos_theta > 0.999999f) {
+            // Near 0° — sharp corner.
+            max_junction_speed_sqr = MINIMUM_JUNCTION_SPEED_SQR;
+        } else if (junction_cos_theta < -0.999999f) {
+            // 180° — straight-line continuation, no corner.
+            max_junction_speed_sqr = SOME_LARGE_VALUE_SQR;
+        } else {
+            convert_to_unit_vector(junction_unit_vec, NUM_AXIS);
+            float junction_accel = limit_acceleration_by_axis(junction_unit_vec);
+            float jd = settings->junction_deviation;
+            float sin_theta_d2 = sqrtf(0.5f * (1.0f - junction_cos_theta));
+            max_junction_speed_sqr = fmaxf(MINIMUM_JUNCTION_SPEED_SQR,
+                (junction_accel * jd * sin_theta_d2) / (1.0f - sin_theta_d2));
+        }
+    }
+    segment_buffer->max_junction_speed_sqr = max_junction_speed_sqr;
+
+    // max_entry_speed_sqr = min(junction limit, min of neighboring nominal speeds)
+    float nominal_speed_sqr      = feedrate_mm_sec * feedrate_mm_sec;
+    float prev_nominal_speed_sqr = pl_previous_nominal_speed * pl_previous_nominal_speed;
+    float max_entry_speed_sqr = (nominal_speed_sqr < prev_nominal_speed_sqr)
+                                 ? nominal_speed_sqr : prev_nominal_speed_sqr;
+    if (max_entry_speed_sqr > max_junction_speed_sqr) {
+        max_entry_speed_sqr = max_junction_speed_sqr;
+    }
+    segment_buffer->max_entry_speed_sqr = max_entry_speed_sqr;
+
+    // entry_speed_sqr: initial conservative estimate (max achievable from full stop).
+    // MOTION_PlannerRecalculate() will update this via the reverse+forward pass.
+    float stop_entry_sqr = 2.0f * acceleration_mm_sec2 * seg_millimeters;
+    segment_buffer->entry_speed_sqr = (max_entry_speed_sqr < stop_entry_sqr)
+                                       ? max_entry_speed_sqr : stop_entry_sqr;
+
+    // Update planner state for the NEXT segment's junction calculation.
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        pl_previous_unit_vec[axis] = local_unit_vec[axis];
+    }
+    pl_previous_nominal_speed = feedrate_mm_sec;
+
+#undef MINIMUM_JUNCTION_SPEED_SQR
+#undef SOME_LARGE_VALUE_SQR
+
+    // Physics parameters (for debugging/reference)
     segment_buffer->start_velocity = entry_velocity;
     segment_buffer->max_velocity = feedrate_mm_sec;
     segment_buffer->end_velocity = exit_velocity;
@@ -443,6 +570,83 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
     }
     
     return segment_buffer;
+}
+
+// ============================================================================
+// KINEMATICS_RecalculateTrapezoid
+//
+// Re-computes the ISR timing parameters (initial_rate, nominal_rate, final_rate,
+// accelerate_until, decelerate_after) for a segment given its planned
+// entry_mms and exit_mms speeds.
+//
+// Called by MOTION_PlannerRecalculate() after the reverse+forward pass has
+// determined the correct entry and exit speeds for every buffered segment.
+// Exact port of GRBL's calculate_trapezoid_for_block().
+// ============================================================================
+void KINEMATICS_RecalculateTrapezoid(MotionSegment *seg,
+                                     float entry_mms,
+                                     float exit_mms)
+{
+    if (!seg || seg->steps_remaining == 0) { return; }
+
+    float accel          = seg->acceleration;          // mm/s²
+    float nominal_mms    = seg->max_velocity;          // feedrate stored at plan time
+    float distance_mm    = seg->millimeters;
+
+    // Clamp to nominal so we never exceed programmed feedrate
+    if (entry_mms > nominal_mms) { entry_mms = nominal_mms; }
+    if (exit_mms  > nominal_mms) { exit_mms  = nominal_mms; }
+
+    // Total steps in this block
+    uint32_t total_steps  = seg->steps_remaining + seg->steps_completed; // full count
+    float    steps_per_mm = (distance_mm > 0.0f)
+                            ? ((float)total_steps / distance_mm)
+                            : 1.0f;
+
+    // Convert speeds to step rates (steps/s)
+    float entry_rate   = entry_mms   * steps_per_mm;
+    float nominal_rate = nominal_mms * steps_per_mm;
+    float exit_rate    = exit_mms    * steps_per_mm;
+    float accel_steps  = accel       * steps_per_mm; // steps/s²
+
+    // ---- Trapezoidal intersection point in step space (GRBL calc_trapezoid) ----
+    // Steps needed to accelerate from entry to nominal
+    float accel_steps_f   = (nominal_rate * nominal_rate - entry_rate * entry_rate)
+                             / (2.0f * accel_steps);
+    // Steps needed to decelerate from nominal to exit
+    float decel_steps_f   = (nominal_rate * nominal_rate - exit_rate  * exit_rate)
+                             / (2.0f * accel_steps);
+
+    int32_t accelerate_steps = (int32_t)ceilf(accel_steps_f);
+    int32_t decelerate_steps = (int32_t)floorf(decel_steps_f);
+
+    // Handle case where accel+decel exceeds available steps (no cruise plateau)
+    int32_t plateau = (int32_t)total_steps - accelerate_steps - decelerate_steps;
+    if (plateau < 0) {
+        // Solve for the intersection point: v_peak where ramp fits exactly
+        // v_peak² = (2*a*d + v_entry² + v_exit²) / 2   (both ramps same accel)
+        float intersect = (2.0f * accel_steps * (float)total_steps
+                           + entry_rate * entry_rate
+                           + exit_rate  * exit_rate) / (4.0f * accel_steps);
+        accelerate_steps = (int32_t)ceilf(
+            (intersect - entry_rate * entry_rate) / (2.0f * accel_steps));
+        accelerate_steps = (accelerate_steps < 0)           ? 0
+                         : (accelerate_steps > (int32_t)total_steps) ? (int32_t)total_steps
+                         : accelerate_steps;
+        decelerate_steps = (int32_t)total_steps - accelerate_steps;
+    }
+
+    // Store timing parameters consumed by the ISR / velocity profiler
+    seg->initial_rate     = (uint32_t)(entry_rate   > 0.0f ? entry_rate   : 1.0f);
+    seg->nominal_rate     = (uint32_t)(nominal_rate > 0.0f ? nominal_rate : 1.0f);
+    seg->final_rate       = (uint32_t)(exit_rate    > 0.0f ? exit_rate    : 1.0f);
+    seg->accelerate_until = (uint32_t)accelerate_steps;
+    seg->decelerate_after = (uint32_t)((int32_t)total_steps - decelerate_steps);
+
+    // Convert step rates back to timer intervals (ticks between steps)
+    if (seg->initial_rate > 0) {
+        seg->step_interval = (uint32_t)(g_timer_freq / (float)seg->initial_rate);
+    }
 }
 
 // Arc interpolation - generates a single linear segment for an arc

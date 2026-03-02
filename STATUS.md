@@ -3,7 +3,57 @@
 **Branch**: `lookahead`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: March 2, 2026
+**Last Updated**: March 3, 2026
+
+---
+
+## ✅ feat: GRBL-exact lookahead planner (reverse+forward pass + junction speed) — March 3, 2026
+
+Complete replacement of the custom look-ahead system with an exact port of GRBL v1.1's
+`plan_buffer_line()` / `planner_recalculate()` two-pass algorithm.
+
+### `incs/data_structures.h`
+- `MotionSegment` look-ahead section (was `entry_speed_mms`, `exit_speed_mms`, `speed_locked`):
+  - Replaced with GRBL-exact fields: `unit_vec[NUM_AXIS]`, `entry_speed_sqr`,
+    `max_entry_speed_sqr`, `max_junction_speed_sqr`, `millimeters`, `speed_locked`
+
+### `srcs/motion/kinematics.c`
+- Added `pl_previous_unit_vec[NUM_AXIS]` and `pl_previous_nominal_speed` static planner state.
+- Added `convert_to_unit_vector()` — normalises a vector in-place, returns magnitude (mm).
+  Equivalent to GRBL's `convert_delta_vector_to_unit_vector()`.
+- Added `limit_acceleration_by_axis()` — axis-limited combined acceleration.
+  Equivalent to GRBL's `limit_value_by_axis_maximum(settings.acceleration, unit_vec)`.
+- Added `limit_rate_by_axis()` — axis-limited combined feed rate (mm/s).
+  Equivalent to GRBL's `limit_value_by_axis_maximum(settings.max_rate, unit_vec)`.
+- Added `KINEMATICS_ResetPlannerState()` — zeroes planner static state; called at init and soft reset.
+- `KINEMATICS_Initialize()` — added `KINEMATICS_ResetPlannerState()` call at end.
+- `KINEMATICS_LinearMove()` — replaced `limiting_axis` approach with GRBL-exact unit-vector +
+  axis-limited accel/rate; writes `unit_vec`, `millimeters`, `max_junction_speed_sqr`,
+  `max_entry_speed_sqr`, `entry_speed_sqr` (conservative), and updates `pl_previous_*` state.
+  Junction speed uses GRBL centripetal approximation (dot-product, no trig).
+- Added `KINEMATICS_RecalculateTrapezoid(seg, entry_mms, exit_mms)` — exact port of GRBL's
+  `calculate_trapezoid_for_block()`. Writes `initial_rate`, `nominal_rate`, `final_rate`,
+  `accelerate_until`, `decelerate_after`, `step_interval` from planned entry/exit speeds.
+
+### `srcs/motion/motion.c`
+- **Removed** `MOTION_RecomputeExit()` static function (~55 lines) — superseded by planner.
+- `MOTION_ProcessGcodeEvent()` G0/G1 handler:
+  - **Removed** the entire junction-calc + `KINEMATICS_CalculateJunctionSpeed()` block (~70 lines).
+  - **Removed** the manual backward pass (`while (i != tail)`) block (~40 lines).
+  - Replaced with: `KINEMATICS_LinearMove(start, end, feedrate, segment, 0, 0)`
+    + enqueue + `MOTION_PlannerRecalculate(appData)`.
+- `MOTION_ProcessGcodeEvent()` arc handler:
+  - **Removed** the `MOTION_RecomputeExit` arc-entry patch block.
+  - GRBL junction calculation in `KINEMATICS_LinearMove` handles G1→arc entry automatically.
+- Added `MOTION_PlannerRecalculate(APP_DATA*)` — static function implementing GRBL's
+  `planner_recalculate()` three-pass algorithm:
+  1. **Reverse pass**: newest→oldest, propagate decel constraints backward.
+  2. **Forward pass**: oldest→newest, propagate accel constraints forward.
+  3. **Trapezoid pass**: calls `KINEMATICS_RecalculateTrapezoid` on every plannable segment.
+
+### `incs/motion/kinematics.h`
+- Added `KINEMATICS_RecalculateTrapezoid(MotionSegment*, float entry_mms, float exit_mms)` declaration.
+- Added `KINEMATICS_ResetPlannerState(void)` declaration.
 
 ---
 

@@ -102,54 +102,100 @@ void MOTION_Tasks(APP_DATA* appData) {
 }
 
 // ============================================================================
-// Look-Ahead Helper: Recompute Exit Profile
+// GRBL-exact Look-Ahead Planner
+// Mirrors planner_recalculate() in GRBL's planner.c.
+//
+// Three passes:
+//   1. Reverse  (newest → oldest): propagate deceleration constraints backward.
+//   2. Forward  (oldest → newest): propagate acceleration constraints forward.
+//   3. Trapezoid: re-compute ISR timing for every non-executing buffered segment.
+//
+// Called immediately after every new segment is added to the queue.
 // ============================================================================
-// Called when the NEXT segment's entry speed (junction speed) is known.
-// Patches the exit side of a queued-but-not-executing segment so it decelerates
-// to the correct speed instead of always grinding down to safe-start (8.33 mm/s).
-// Updates: exit_speed_mms, final_rate, decelerate_after, accel_count_decel.
-// Safe to call only on segments that are NOT currentSegment (motionQueueTail).
-// ============================================================================
-static void MOTION_RecomputeExit(MotionSegment* seg, float new_exit_mms) {
-    const float TIMER_FREQ = (float)TMR4_FrequencyGet();
-    float steps_per_mm = *g_axis_settings[seg->dominant_axis].steps_per_mm;
-    float accel        = seg->acceleration;
+static void MOTION_PlannerRecalculate(APP_DATA* appData) {
+    uint32_t tail  = appData->motionQueueTail;  // oldest (possibly executing)
+    uint32_t head  = appData->motionQueueHead;  // one past newest
+    uint32_t count = appData->motionQueueCount;
+    if (count == 0) { return; }
 
-    // Cruise speed in mm/s (nominal_rate is ticks — lower ticks = faster speed)
-    float nominal_mms = (TIMER_FREQ / (float)seg->nominal_rate) / steps_per_mm;
+    // Index helpers
+    // newest = block just queued
+    // oldest_plannable = tail+1 if tail is executing, else tail
+    uint32_t newest = (head - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+    uint32_t oldest = (appData->motionActive && count > 1)
+                      ? (tail + 1) % MAX_MOTION_SEGMENTS   // skip running block
+                      : tail;
+    if (oldest == head) { return; }  // nothing plannable
 
-    // Clamp: exit can't exceed cruise or go negative
-    if (new_exit_mms > nominal_mms) new_exit_mms = nominal_mms;
-    if (new_exit_mms < 0.0f)        new_exit_mms = 0.0f;
-    seg->exit_speed_mms = new_exit_mms;
+    // Newest block always decelerates to full stop (GRBL behaviour)
+    appData->motionQueue[newest].entry_speed_sqr =
+        appData->motionQueue[newest].max_entry_speed_sqr;
 
-    // Recompute final_rate from new exit speed
-    float exit_steps_per_sec = new_exit_mms * steps_per_mm;
-    if (exit_steps_per_sec < 1.0f) exit_steps_per_sec = 1.0f;
-    uint32_t new_final = (uint32_t)(TIMER_FREQ / exit_steps_per_sec);
-    if (new_final < seg->nominal_rate) new_final = seg->nominal_rate;
-    seg->final_rate = new_final;
+    // ---- REVERSE PASS ----
+    // Walk backward from (newest-1) to oldest, pushing decel constraints.
+    {
+        MotionSegment *next = &appData->motionQueue[newest];
+        uint32_t i = newest;
+        while (i != oldest) {
+            i = (i - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+            MotionSegment *seg = &appData->motionQueue[i];
+            if (seg->speed_locked) { next = seg; continue; }
 
-    // Recompute decelerate_after:
-    // decel distance = (v_nominal² - v_exit²) / (2 * a)
-    float decel_dist_mm = (nominal_mms * nominal_mms - new_exit_mms * new_exit_mms) / (2.0f * accel);
-    if (decel_dist_mm < 0.0f) decel_dist_mm = 0.0f;
-    uint32_t decel_steps = (uint32_t)(decel_dist_mm * steps_per_mm);
-    if (decel_steps > seg->steps_remaining) decel_steps = seg->steps_remaining;
+            // Maximum entry speed for seg given that it must be able to decel
+            // to next->entry_speed_sqr within next's distance.
+            float max_via_next = next->entry_speed_sqr
+                                 + 2.0f * seg->acceleration * next->millimeters;
+            if (seg->max_entry_speed_sqr > max_via_next) {
+                seg->entry_speed_sqr = max_via_next;
+            } else {
+                seg->entry_speed_sqr = seg->max_entry_speed_sqr;
+            }
+            next = seg;
+        }
+    }
 
-    uint32_t new_decel_after = seg->steps_remaining - decel_steps;
-    // Decel start must be at or after the acceleration end
-    if (new_decel_after < seg->accelerate_until) new_decel_after = seg->accelerate_until;
-    seg->decelerate_after = new_decel_after;
+    // ---- FORWARD PASS ----
+    // Walk forward from oldest to newest, pushing accel constraints.
+    {
+        MotionSegment *prev = &appData->motionQueue[oldest];
+        uint32_t i = oldest;
+        while (i != newest) {
+            i = (i + 1) % MAX_MOTION_SEGMENTS;
+            MotionSegment *seg = &appData->motionQueue[i];
+            if (seg->speed_locked) { prev = seg; continue; }
 
-    // accel_count_decel = -(decel_steps + n_exit)
-    // Mirrors the formula in KINEMATICS_LinearMove.
-    // n_exit = Taylor index corresponding to the exit speed — ISR ramps from -(decel_steps+n_exit)
-    // back toward -n_exit, landing exactly at exit_v.
-    int32_t n_exit_calc = (int32_t)(2.0f * new_exit_mms * new_exit_mms * steps_per_mm / accel) - 1;
-    if (n_exit_calc < 0) n_exit_calc = 0;
-    seg->accel_count_decel = -((int32_t)decel_steps + n_exit_calc);
-    if (seg->accel_count_decel >= 0) seg->accel_count_decel = -1;  // Safety: must start negative
+            // Maximum entry speed reachable by accelerating from prev's entry
+            float max_via_prev = prev->entry_speed_sqr
+                                 + 2.0f * prev->acceleration * prev->millimeters;
+            if (max_via_prev < seg->entry_speed_sqr) {
+                seg->entry_speed_sqr = max_via_prev;
+            }
+            prev = seg;
+        }
+    }
+
+    // ---- TRAPEZOID PASS ----
+    // Re-compute every plannable segment's ISR timing fields.
+    {
+        uint32_t i = oldest;
+        for (;;) {
+            uint32_t next_i = (i + 1) % MAX_MOTION_SEGMENTS;
+            MotionSegment *seg = &appData->motionQueue[i];
+
+            float entry_mms = sqrtf(seg->entry_speed_sqr);
+
+            // Exit speed: use next segment's entry (or zero if this is the newest)
+            float exit_mms = 0.0f;
+            if (i != newest && next_i != head) {
+                exit_mms = sqrtf(appData->motionQueue[next_i].entry_speed_sqr);
+            }
+
+            KINEMATICS_RecalculateTrapezoid(seg, entry_mms, exit_mms);
+
+            if (i == newest) { break; }
+            i = next_i;
+        }
+    }
 }
 
 void MOTION_Arc(APP_DATA* appData) {
@@ -370,70 +416,11 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // Get next queue slot
             MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
               
-            // ===== LOOK-AHEAD JUNCTION PLANNING =====
-            // entry_velocity : speed this segment starts at  (from N-1→N junction angle)
-            // exit_velocity  : placeholder safe-start        (patched when segment N+1 arrives)
-            // junction_speed : saved so we can retroactively patch N-1's exit after queuing N
-            //
-            // Use 0.0f so kinematics.c safe_start floor (sqrt(2*a/steps_per_mm)) applies.
-            // This is physically correct: the motor starts at the max speed it can achieve
-            // in a single step from rest, not an arbitrary hardcoded 500mm/min.
-            float feedrate_mm_sec_local = feedrate / 60.0f;
-            float entry_velocity     = 0.0f;
-            float exit_velocity      = 0.0f;
-            float junction_speed     = 0.0f;
-            (void)feedrate_mm_sec_local;
-            uint32_t look_prev_index = 0;
-            bool     has_prev_patch  = false;
-
-            if (appData->motionQueueCount > 0) {
-                look_prev_index = (appData->motionQueueHead - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
-                MotionSegment* prev_seg = &appData->motionQueue[look_prev_index];
-
-                if (prev_seg->dominant_delta > 0) {
-                    // Previous direction vector (normalised from Bresenham deltas)
-                    CoordinatePoint prev_dir;
-                    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-                        SET_COORDINATE_AXIS(&prev_dir, axis,
-                            (float)prev_seg->delta[axis] / (float)prev_seg->dominant_delta);
-                    }
-
-                    // Current direction vector preview
-                    float delta_mm[NUM_AXIS];
-                    float distance = 0.0f;
-                    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-                        delta_mm[axis] = GET_COORDINATE_AXIS(&end, axis) - GET_COORDINATE_AXIS(&start, axis);
-                        distance += delta_mm[axis] * delta_mm[axis];
-                    }
-                    distance = sqrtf(distance);
-
-                    if (distance > 0.001f) {
-                        CoordinatePoint curr_dir;
-                        for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-                            SET_COORDINATE_AXIS(&curr_dir, axis, delta_mm[axis] / distance);
-                        }
-
-                        CNC_Settings* jct_settings = SETTINGS_GetCurrent();
-                        junction_speed = KINEMATICS_CalculateJunctionSpeed(prev_dir, curr_dir,
-                                                                           jct_settings->junction_deviation,
-                                                                           *(g_axis_settings[AXIS_X].acceleration));
-
-                        float max_junction = feedrate / 60.0f;
-                        if (junction_speed > max_junction) junction_speed = max_junction;
-
-                        entry_velocity = junction_speed;
-
-                        // Flag N-1 for retroactive exit patch (skip if arc-locked)
-                        has_prev_patch = !prev_seg->speed_locked;
-
-                        DEBUG_PRINT_MOTION("[JUNCTION] junction=%.1f entry=%.1f mm/s\r\n",
-                                          junction_speed, entry_velocity);
-                    }
-                }
-            }
-
-            // Build segment N with settled entry; exit is placeholder and will be patched
-            KINEMATICS_LinearMove(start, end, feedrate, segment, entry_velocity, exit_velocity);
+            // ===== GRBL-EXACT PLANNER =====
+            // Build the segment (unit_vec, junction fields, conservative entry_speed_sqr
+            // are all written by KINEMATICS_LinearMove).  entry/exit velocity hints
+            // (second-to-last args) are unused in GRBL mode — planner sets them.
+            KINEMATICS_LinearMove(start, end, feedrate, segment, 0.0f, 0.0f);
 
             // Guard: skip zero-length segments (no steps)
             if (segment->steps_remaining == 0) {
@@ -443,76 +430,15 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 return true;
             }
 
-            // Add to motion queue
+            // Enqueue the segment
             appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
             appData->motionQueueCount++;
 
-            // ===== FULL BACKWARD PASS (Look-Ahead Planner) =====
-            // Now that segment N is queued, walk backward from N-1 toward the executing
-            // segment (motionQueueTail) and propagate speed constraints.
-            //
-            // Logic per step:
-            //   seg[i] can exit at v_exit only if it can decelerate from its entry_speed
-            //   to v_exit within its available steps:
-            //       v_achievable = sqrt(entry² + 2*a*dist)
-            //   If v_achievable <= required exit → this segment is already fine, stop.
-            //   If v_achievable >  required exit → clamp its exit and continue backward.
-            //
-            // The "required exit" for seg[i] is seg[i+1]->entry_speed_mms, because that
-            // is the speed the NEXT segment was built to start at.
-            //
-            // Guards:
-            //   - Never patch motionQueueTail (currently executing, ISR owns it)
-            //   - Never patch speed_locked segments (arc cruise is fixed)
-            //   - Stop as soon as no change is needed (speeds are already consistent)
-            if (has_prev_patch) {
-                // Required exit for N-1 is the entry we just computed for N
-                float required_exit = entry_velocity;   // == junction_speed for N-1→N
-                uint32_t i    = look_prev_index;
-                uint32_t tail = appData->motionQueueTail;
+            // GRBL reverse+forward pass — updates entry_speed_sqr for all buffered
+            // segments and calls KINEMATICS_RecalculateTrapezoid on each one.
+            MOTION_PlannerRecalculate(appData);
 
-                while (i != tail) {
-                    MotionSegment* seg = &appData->motionQueue[i];
-
-                    if (seg->speed_locked) {
-                        // Arc segment — its cruise speed is what the next segment must
-                        // match, but we cannot modify it. The required_exit for the
-                        // segment before this arc is the arc's own entry speed.
-                        required_exit = seg->entry_speed_mms;
-                        i = (i - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
-                        continue;
-                    }
-
-                    // Maximum exit speed this segment can achieve given its entry speed
-                    // and the distance it has to decelerate.
-                    float dist_mm = (float)seg->steps_remaining
-                                    / *g_axis_settings[seg->dominant_axis].steps_per_mm;
-                    float v_achievable = sqrtf(seg->entry_speed_mms * seg->entry_speed_mms
-                                               + 2.0f * seg->acceleration * dist_mm);
-
-                    if (v_achievable <= required_exit) {
-                        // This segment is already decelerating enough — all earlier
-                        // segments must also be fine (speeds only decrease going back).
-                        break;
-                    }
-
-                    // Clamp exit to what the forward segment actually needs
-                    float new_exit = (v_achievable < seg->exit_speed_mms)
-                                     ? v_achievable : seg->exit_speed_mms;
-                    if (new_exit > required_exit) new_exit = required_exit;
-
-                    MOTION_RecomputeExit(seg, new_exit);
-                    DEBUG_PRINT_MOTION("[LOOKAHEAD] i=%lu exit patched to %.1f mm/s\r\n",
-                                      (unsigned long)i, new_exit);
-
-                    // The required exit for the segment before this one is this
-                    // segment's entry speed (unchanged — we never modify entry here).
-                    required_exit = seg->entry_speed_mms;
-                    i = (i - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
-                }
-            }
-
-            // ✅ ARRAY-BASED: Update current position
+            // Update current position
             for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                 appData->current[axis] = GET_COORDINATE_AXIS(&end, axis);
             }
@@ -638,25 +564,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                 appData->arcThetaIncrement = -fabsf(appData->arcThetaIncrement);
             }
 
-            // LOOK-AHEAD: patch the preceding G1 segment to decelerate to arc_cruise
-            // rather than safe-start, giving a smooth G1→arc entry.
-            // arc_cruise is the same triangle-peak formula used by KINEMATICS_LinearMoveSimple.
-            {
-                float arc_feedrate_mms = event->data.arcMove.feedrate / 60.0f;
-                float arc_accel = fminf(settings->acceleration[AXIS_X], settings->acceleration[AXIS_Y]);
-                if (arc_accel < 1.0f) arc_accel = 1.0f;
-                float arc_cruise = fminf(arc_feedrate_mms, sqrtf(arc_accel * settings->mm_per_arc_segment));
-
-                if (appData->motionQueueCount > 0) {
-                    uint32_t arc_prev = (appData->motionQueueHead - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
-                    if (arc_prev != appData->motionQueueTail
-                        && !appData->motionQueue[arc_prev].speed_locked) {
-                        MOTION_RecomputeExit(&appData->motionQueue[arc_prev], arc_cruise);
-                        DEBUG_PRINT_MOTION("[LOOKAHEAD] Arc entry: patched preceding G1 exit to %.1f mm/s\r\n", arc_cruise);
-                    }
-                }
-            }
-
+            // The GRBL planner (MOTION_PlannerRecalculate) already handles smooth
+            // G1→arc entry through junction speed limits — no manual patch needed.
             return true;
         }
 

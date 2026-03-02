@@ -102,10 +102,19 @@ typedef struct {
     float end_velocity;          // Ending velocity for this segment (mm/sec)
     float acceleration;          // Acceleration/deceleration rate (mm/sec²)
 
-    // Look-ahead fields — set by kinematics, retroactively patched by MOTION_RecomputeExit()
-    float entry_speed_mms;       // Settled entry speed (mm/s) for backward-pass propagation
-    float exit_speed_mms;        // Settled exit speed (mm/s) — patched when next segment arrives
-    bool  speed_locked;          // true = arc segment — look-ahead must not modify speeds
+    // =========================================================================
+    // GRBL-exact planner fields (March 2026)
+    // =========================================================================
+    // These mirror GRBL's plan_block_t. MOTION_PlannerRecalculate() runs the
+    // standard GRBL reverse+forward pass to settle entry_speed_sqr for every
+    // queued block, then KINEMATICS_RecalculateTrapezoid() converts the settled
+    // speeds back to ISR parameters (initial_rate, final_rate, accel_until …).
+    float unit_vec[NUM_AXIS];           // Normalised direction unit vector (stored for junction calc)
+    float entry_speed_sqr;              // Planned entry speed² (mm/s)² — settled by planner
+    float max_entry_speed_sqr;          // Max allowable entry speed² (junction + neighboring nominals)
+    float max_junction_speed_sqr;       // Junction speed limit from path geometry alone
+    float millimeters;                  // Total segment distance (mm) — used by planner passes
+    bool  speed_locked;                 // true = arc/system segment — planner must not modify
 } MotionSegment;
 
 // ============================================================================
