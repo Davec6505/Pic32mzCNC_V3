@@ -8,14 +8,14 @@ GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, tar
 
 **Branch**: `lookahead` (active development mainline)
 **Firmware**: `bins/CNC_V3.hex`
-**Last build**: March 1, 2026
+**Last build**: March 3, 2026
 
 | Feature | Status |
 |---------|--------|
 | GRBL v1.1 protocol | ✅ Complete |
 | 4-axis coordinated motion (XYZA) | ✅ Complete |
 | Trapezoidal velocity profiling | ✅ Complete |
-| Look-ahead backward-pass planner (junction velocity) | ✅ Complete |
+| GRBL-exact look-ahead planner (reverse+forward pass + junction) | ✅ Complete |
 | Arc interpolation G2/G3 + radius compensation | ✅ Complete |
 | Homing ($H) — 4-phase cycle | ✅ Complete |
 | Spindle PWM (M3/M5 via OC8/TMR6) | ✅ Complete |
@@ -110,7 +110,7 @@ main.c
         ├── APP_LOAD_SETTINGS → settings.c (read flash after peripherals ready)
         ├── APP_CONFIG      → TMC5160_Initialize() [#ifdef HAS_TMC5160_AXIS]
         ├── APP_IDLE
-        │     ├── motion.c  — segment queue, look-ahead planner
+        │     ├── motion.c  — segment queue, GRBL-exact three-pass planner
         │     ├── gcode_parser.c — parse events, flow control
         │     ├── kinematics.c — generate motion segments
         │     ├── stepper.c — load segments to TMR4/OC1
@@ -165,11 +165,21 @@ Three volatile flags gate motion and new command processing at runtime:
 | `g_suppress_hard_limits` | soft reset (Ctrl+X) | all limit pins physically release | Allows jogging off a triggered limit after reset without ALARM |
 | `g_estop_pending` | `ESTOP_Callback` ISR (RF4 IPL7) | soft reset / main loop | Triggers immediate `STEPPER_DisableAll()` and `APP_ALARM` state |
 
-### Look-Ahead Planner
+### GRBL-Exact Look-Ahead Planner
 
-`KINEMATICS_PlanSegment()` runs a **backward-pass junction velocity** calculation across the queued segment chain before each new segment is admitted to the motion queue. This limits entry/exit velocity at direction changes based on the cosine of the junction angle, enabling smooth multi-segment motion without mid-move pauses.
+`MOTION_PlannerRecalculate()` executes a **three-pass algorithm** (exact port of GRBL's `planner_recalculate()`) after every segment is enqueued:
 
-Pre-computed per segment: `rate_delta`, `decel_rate_delta`, `accelerate_until`, `decelerate_after`, `nominal_rate`, `final_rate`. The ISR reads these as integers with no division — all heavy planning math runs in the main loop.
+1. **Reverse pass** (newest → oldest): propagates deceleration constraints backward — each segment's `entry_speed_sqr` is capped by how fast it can decelerate to the next segment's planned entry.
+2. **Forward pass** (oldest → newest): propagates acceleration constraints forward — caps any entry that the preceding segment cannot reach from a standing start given its distance.
+3. **Trapezoid pass**: calls `KINEMATICS_RecalculateTrapezoid()` on every buffered segment to write the final ISR timing fields.
+
+Junction speed uses GRBL's centripetal approximation (dot-product only, no trig):  
+$v_{junction}^2 = \frac{a \cdot e_{d} \cdot \sin(\theta/2)}{1 - \sin(\theta/2)}$
+where $e_d$ is `junction_deviation` ($11) and $a$ is the axis-limited acceleration for the bisector direction.
+
+`KINEMATICS_LinearMove()` uses `convert_to_unit_vector()` + `limit_acceleration_by_axis()` + `limit_rate_by_axis()` (GRBL's `limit_value_by_axis_maximum()`) so that any multi-axis move is correctly constrained to the slowest limiting axis, not just the dominant axis.
+
+Per-segment planner fields stored in `MotionSegment`: `unit_vec[NUM_AXIS]`, `entry_speed_sqr`, `max_entry_speed_sqr`, `max_junction_speed_sqr`, `millimeters`. ISR timing fields written by `RecalculateTrapezoid`: `initial_rate`, `nominal_rate`, `final_rate`, `accelerate_until`, `decelerate_after`. All ISR reads are integers — no float, no division inside the ISR.
 
 ### Flow Control
 

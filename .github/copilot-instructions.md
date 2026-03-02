@@ -784,19 +784,25 @@ if (timer_elapsed()) {appData->motionQueueCount--;
 
 **Known Limitations**:
 
-- No look-ahead junction planning**Blank Line Handling**:
+- No S-curve acceleration (trapezoidal only)
 
-- No S-curve acceleration```c
+- Homing not CNC-tested
 
-- Homing not CNC-tested// Blank lines get "ok" responses with flow control applied (GRBL v1.1 compliant)
+- Spindle PWM not CNC-validated
 
-- Spindle PWM not CNC-validated} else {
+- StallGuard2 / sensorless homing deferred (Phase 2)
 
-    DEBUG_PRINT_GCODE("[IDLE] Blank/comment line - sending ok with flow control\r\n");
+- G38.x probe implemented but pending hardware test
 
-## Quick Reference    SendOrDeferOk(appData, cmdQueue);  // Same flow control as G-code
+**Implemented (March 2026)**:
 
-}
+- ✅ GRBL-exact three-pass look-ahead planner (reverse + forward + trapezoid pass)
+
+- ✅ Trapezoidal velocity profiling (KINEMATICS_RecalculateTrapezoid)
+
+- ✅ Axis-limited acceleration and rate (limit_acceleration_by_axis / limit_rate_by_axis)
+
+- ✅ Junction speed via GRBL centripetal approximation (no trig — dot product only)
 
 ### Build Commands```
 
@@ -1764,17 +1770,32 @@ typedef struct {
 } MotionSegment;
 ```
 
-## Future Enhancements
+## Planner Architecture (March 2026 — GRBL-Exact, Implemented)
 
-### Velocity Profiling (Under Consideration)
-When implementing velocity profiling in the future:
-- Adjust `step_interval` dynamically based on acceleration state
-- Maintain trapezoidal or S-curve velocity profiles
-- Consider look-ahead planning for smooth transitions between segments
-- Pre-compute interval values or use real-time calculation
-- Update dominant axis OCx scheduling with variable intervals
+### MOTION_PlannerRecalculate (motion.c)
+Called after every segment is enqueued. Exact port of GRBL's `planner_recalculate()`.
 
-Note: Velocity profiling is not yet implemented but should be designed with the period-based timer architecture in mind.
+**Three passes:**
+1. **Reverse** (newest → oldest): `entry_speed_sqr = min(max_entry_speed_sqr, next->entry_speed_sqr + 2*accel*mm)`
+2. **Forward** (oldest → newest): cap `entry_speed_sqr` where preceding segment cannot accelerate to it
+3. **Trapezoid**: `KINEMATICS_RecalculateTrapezoid(seg, entry_mms, exit_mms)` on every buffered segment
+
+`speed_locked` segments are skipped in the reverse and forward passes (arc segments with fixed cruise speed).
+
+### KINEMATICS_LinearMove (kinematics.c)
+Exact port of GRBL's `plan_buffer_line()`:
+- `convert_to_unit_vector(delta_mm)` — normalises move direction, returns `seg->millimeters`
+- `limit_acceleration_by_axis(unit_vec)` — axis-limited combined acceleration
+- `limit_rate_by_axis(unit_vec)` — axis-limited combined feed rate
+- Junction cosθ = -dot(prev_unit_vec, unit_vec); centripetal approximation for `max_junction_speed_sqr`
+- Updates `pl_previous_unit_vec[]` and `pl_previous_nominal_speed` for next call
+
+### KINEMATICS_RecalculateTrapezoid (kinematics.c)
+Exact port of GRBL's `calculate_trapezoid_for_block()`:
+- Takes settled `entry_mms` and `exit_mms` from the planner passes
+- Solves accel/decel intersection (handles truncated trapezoid when no plateau fits)
+- Writes: `initial_rate`, `nominal_rate`, `final_rate`, `accelerate_until`, `decelerate_after`, `step_interval`
+- ISR reads these as pure integers — no float, no division in the ISR path
 
 ## Hardware Details
 - Microcontroller: PIC32MZ2048EFH100

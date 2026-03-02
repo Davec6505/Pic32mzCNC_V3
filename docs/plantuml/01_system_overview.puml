@@ -1,13 +1,13 @@
 @startuml
 title CNC Motion Control - System Overview (lookahead branch, March 2026)
 ' Architecture: Single OCP1_ISR, Bresenham + velocity profiling inside ISR,
-' look-ahead backward-pass planner, period-based TMR4/OC1/TMR5
+' GRBL-exact three-pass look-ahead planner, period-based TMR4/OC1/TMR5
 !theme blueprint
 
 participant "GCODE_Tasks\n(✅ Complete)" as GCODE
 participant "UTILS_Module\n(✅ Complete)" as UTILS
 participant "APP_Tasks\n(✅ Complete)" as APP
-participant "KINEMATICS\n(✅ Lookahead)" as KINEMATICS
+participant "KINEMATICS\n(\u2705 GRBL Planner)" as KINEMATICS
 participant "STEPPER\n(✅ Complete)" as STEPPER
 participant "MOTION_Tasks\n(✅ Complete)" as MOTION
 participant "LIMIT_CHECK\n(✅ Complete)" as LIMITS
@@ -29,20 +29,22 @@ GCODE -> APP : event (G1, G90, M3, etc.)
 
 alt event.type == GCODE_EVENT_LINEAR_MOVE
     APP -> APP : Check soft limits
-    APP -> KINEMATICS : KINEMATICS_PlanSegment(start, end, feedrate)
+    APP -> KINEMATICS : KINEMATICS_LinearMove(start, end, feedrate, segment, 0, 0)
     KINEMATICS -> KINEMATICS : Bresenham deltas, dominant axis, abs_delta[]
-    KINEMATICS -> KINEMATICS : Look-ahead backward pass:\n  - Junction velocity (cos angle)\n  - Trapezoidal accel/decel planning\n  - rate_delta, decel_rate_delta computed
-    KINEMATICS -> APP : MotionSegment (fully planned)
+    KINEMATICS -> KINEMATICS : GRBL-exact unit_vec + axis-limited accel/rate\n  (limit_acceleration_by_axis / limit_rate_by_axis)\n  Junction speed: centripetal approx (dot-product, no trig)\n  Writes: unit_vec, max_junction_speed_sqr,\n           max_entry_speed_sqr, entry_speed_sqr, millimeters
+    KINEMATICS -> APP : MotionSegment (planner fields populated)
     APP -> APP : Enqueue in motionQueue[16]
+    APP -> MOTION : MOTION_PlannerRecalculate()\n  1. Reverse pass: cap entry_speed_sqr by decel constraints\n  2. Forward pass: cap entry_speed_sqr by accel constraints\n  3. Trapezoid pass: KINEMATICS_RecalculateTrapezoid()\n     writes initial_rate, nominal_rate, final_rate,\n     accelerate_until, decelerate_after
 end
 
 alt event.type == GCODE_EVENT_ARC_MOVE
     APP -> APP : Compute center, radius, angle, segment count
     APP -> APP : arcGenState = ARC_GEN_ACTIVE
     loop One segment per APP_Tasks() iteration
-        APP -> KINEMATICS : KINEMATICS_PlanSegment() for arc chord
-        KINEMATICS -> APP : MotionSegment
+        APP -> KINEMATICS : KINEMATICS_LinearMove() for arc chord
+        KINEMATICS -> APP : MotionSegment (junction via unit_vec dot-product)
         APP -> APP : Enqueue in motionQueue[16]
+        APP -> MOTION : MOTION_PlannerRecalculate()
     end
 end
 

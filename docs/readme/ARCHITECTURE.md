@@ -3,7 +3,7 @@
 ## Overview
 Comprehensive architectural documentation for the Pic32mzCNC_V3 CNC motion control system.
 
-**Last Updated**: February 28, 2026  
+**Last Updated**: March 3, 2026  
 **Status**: Active Development
 
 ---
@@ -84,29 +84,45 @@ if (appData->motionSegmentCompleted && appData->motionQueueCount == 0) {
 **Critical Rule**: DO NOT MODIFY - Production validated!
 
 ### 2. Kinematics (kinematics.c)
-**Purpose**: Convert G-code coordinates to motion segments with physics
+**Purpose**: Convert G-code coordinates to motion segments with physics, and serve as the GRBL-exact planner computation engine.
 
 **Key Calculations**:
-- Trapezoidal velocity profiling
-- Acceleration/deceleration planning
-- Feedrate limiting to max_rate
-- Arc interpolation (G2/G3)
+- GRBL-exact unit vector normalisation (`convert_to_unit_vector`) and axis-limited acceleration/rate (`limit_acceleration_by_axis`, `limit_rate_by_axis`) — replaces the old single-limiting-axis approach
+- Junction speed via GRBL centripetal approximation (dot-product, no trig): $v_{j}^2 = \frac{a \cdot e_d \cdot \sin(\theta/2)}{1 - \sin(\theta/2)}$
+- Planner fields written per segment: `unit_vec[NUM_AXIS]`, `entry_speed_sqr`, `max_entry_speed_sqr`, `max_junction_speed_sqr`, `millimeters`
+- `KINEMATICS_RecalculateTrapezoid(seg, entry_mms, exit_mms)` — exact port of GRBL's `calculate_trapezoid_for_block()`: writes `initial_rate`, `nominal_rate`, `final_rate`, `accelerate_until`, `decelerate_after`, `step_interval`
+- Arc interpolation (G2/G3) via incremental chord generation
+- Static planner state: `pl_previous_unit_vec[]`, `pl_previous_nominal_speed` (reset via `KINEMATICS_ResetPlannerState()` on init / soft reset)
 
-**Velocity Profile**:
+**Velocity Profile (trapezoid, recomputed by MOTION_PlannerRecalculate after every enqueue)**:
 ```c
-// Three phases: accel → cruise → decel
-float accel_distance = (feedrate^2) / (2 * acceleration);
-float cruise_distance = total_distance - 2*accel_distance;
-float decel_distance = accel_distance;
-
-// Step intervals vary during acceleration
-uint32_t start_interval = high;  // Slow
-uint32_t cruise_interval = low;  // Fast
-uint32_t end_interval = high;    // Slow
+// KINEMATICS_RecalculateTrapezoid() — called by MOTION_PlannerRecalculate
+// after the reverse+forward pass has settled entry_speed_sqr for each segment.
+// No float/division in the ISR — all heavy math here in the main loop.
+seg->accelerate_until = accelerate_steps;   // Steps before cruise
+seg->decelerate_after = total - decel_steps; // Steps where decel begins
+seg->initial_rate  = entry_mms  * steps_per_mm; // steps/s
+seg->nominal_rate  = nominal_mms * steps_per_mm;
+seg->final_rate    = exit_mms   * steps_per_mm;
+seg->step_interval = g_timer_freq / initial_rate; // ticks between steps
 ```
 
 ### 3. Motion Control (motion.c)
-**Purpose**: Manage motion queue and segment execution
+**Purpose**: Manage motion queue, GRBL-exact three-pass planner, and segment execution
+
+**GRBL-Exact Planner** (`MOTION_PlannerRecalculate` — called after every enqueue):
+```
+Reverse pass  (newest → oldest):
+  entry_speed_sqr = min(max_entry_speed_sqr,
+                        next->entry_speed_sqr + 2 * accel * millimeters)
+
+Forward pass  (oldest → newest):
+  entry_speed_sqr = min(entry_speed_sqr,
+                        prev->entry_speed_sqr + 2 * prev->accel * prev->millimeters)
+
+Trapezoid pass:
+  KINEMATICS_RecalculateTrapezoid(seg, sqrt(entry_speed_sqr), sqrt(next->entry_speed_sqr))
+```
 
 **Queue Architecture**:
 ```c
@@ -120,12 +136,12 @@ typedef struct {
 ```
 
 **Segment Lifecycle**:
-1. Kinematics generates segment
-2. Added to queue (if space available)
-3. Stepper module loads segment
-4. ISR executes Bresenham steps
-5. Segment completes → set `motionSegmentCompleted` flag
-6. Next segment loaded automatically
+1. `KINEMATICS_LinearMove()` builds segment with planner fields
+2. Segment enqueued in `motionQueue[16]`
+3. `MOTION_PlannerRecalculate()` runs reverse+forward+trapezoid pass on all buffered segments
+4. `STEPPER_LoadSegment()` loads next segment — ISR timing fields already final
+5. `OCP1_ISR` executes Bresenham steps; velocity profiling reads pre-computed integer fields
+6. Segment completes → `motionSegmentCompleted = true`, next segment loads automatically
 
 ### 4. Stepper Control (stepper.c)
 **Purpose**: Hardware timing and step pulse generation

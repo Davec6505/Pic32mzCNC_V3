@@ -1,7 +1,8 @@
 @startuml
 title Period-Based OC1/TMR4 Step Engine — Single ISR, Bresenham + Velocity Inside ISR
 ' Current architecture as of March 2026 (lookahead branch)
-' Replaces old: TMR2 free-running + OC1/OC2/OC3/OC4 per-axis ISRs + main-loop phase system
+' GRBL-exact three-pass planner runs in main loop after each enqueue.
+' ISR is pure integer: reads pre-computed rate fields, no float, no division.
 
 scale 1.5
 
