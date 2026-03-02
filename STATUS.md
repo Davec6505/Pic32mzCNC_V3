@@ -3,7 +3,26 @@
 **Branch**: `lookahead`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: March 3, 2026
+**Last Updated**: March 2, 2026
+
+---
+
+## 🐛 fix: KINEMATICS_RecalculateTrapezoid unit mismatch — high feedrate frozen (F8000) — March 2, 2026
+
+**Root cause**: `KINEMATICS_RecalculateTrapezoid()` stored `initial_rate`, `nominal_rate`, and
+`final_rate` in **steps/sec** (rate units), but the ISR and `STEPPER_LoadSegment` treat these
+fields as **timer-tick periods**. After the lookahead planner recalculated any segment's trapezoid,
+the ISR's `nominal_rate` floor clamped `step_interval` to e.g. 10 666 ticks (≈ 73 Hz/step ≈
+55 mm/min) instead of the correct 73 ticks (≈ 10 666 Hz/step = 8 000 mm/min) — making the motor
+appear frozen at anything above ~F500.
+
+**Fix applied** — `srcs/motion/kinematics.c` — `KINEMATICS_RecalculateTrapezoid()`:
+- Convert entry/nominal/exit step rates to timer-tick periods (`g_timer_freq / rate`) before
+  storing to `seg->initial_rate`, `seg->nominal_rate`, `seg->final_rate`.
+- Apply same `MAX_START_RATIO=4` and 7-tick hardware-minimum clamps as `KINEMATICS_LinearMove`.
+- Recompute `seg->accel_count` (Austin n_entry) and `seg->accel_count_decel` (n_exit) from the
+  corrected tick periods so the Taylor ramp starts at the right index.
+- Set `seg->step_interval = seg->initial_rate` so `STEPPER_LoadSegment` loads the correct period.
 
 ---
 

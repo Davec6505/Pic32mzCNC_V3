@@ -636,17 +636,55 @@ void KINEMATICS_RecalculateTrapezoid(MotionSegment *seg,
         decelerate_steps = (int32_t)total_steps - accelerate_steps;
     }
 
-    // Store timing parameters consumed by the ISR / velocity profiler
-    seg->initial_rate     = (uint32_t)(entry_rate   > 0.0f ? entry_rate   : 1.0f);
-    seg->nominal_rate     = (uint32_t)(nominal_rate > 0.0f ? nominal_rate : 1.0f);
-    seg->final_rate       = (uint32_t)(exit_rate    > 0.0f ? exit_rate    : 1.0f);
+    // ---- Convert step rates to timer-tick periods (same units as KINEMATICS_LinearMove) ----
+    // CRITICAL: All seg->*_rate fields MUST be timer-tick periods, not steps/sec, because:
+    //   • STEPPER_LoadSegment reads initial_rate directly as PR4 (period register)
+    //   • ISR uses nominal_rate as step_interval floor, final_rate as decel ceiling
+    // Storing steps/sec here causes the ISR to clamp step_interval to a huge period,
+    // making the motor run at ~55 mm/min instead of 8000 mm/min (unit mismatch bug).
+    float c_nominal = (nominal_rate > 0.0f) ? (g_timer_freq / nominal_rate) : g_timer_freq;
+    float c_entry   = (entry_rate   > 0.0f) ? (g_timer_freq / entry_rate)   : g_timer_freq;
+    float c_exit    = (exit_rate    > 0.0f) ? (g_timer_freq / exit_rate)    : g_timer_freq;
+
+    // Entry/exit periods cannot be smaller (faster) than the cruise period.
+    if (c_entry < c_nominal) c_entry = c_nominal;
+    if (c_exit  < c_nominal) c_exit  = c_nominal;
+
+    // Apply MAX_START_RATIO=4 clamp — same as KINEMATICS_LinearMove — so a short replan
+    // doesn't produce a pathologically slow entry (> 4× cruise period).
+    float max_start_c = 4.0f * c_nominal;
+    if (c_entry > max_start_c) c_entry = max_start_c;
+    if (c_exit  > max_start_c) c_exit  = max_start_c;
+
+    // Hardware minimum: 7 ticks (pulse-width guard, same as STEPPER_LoadSegment).
+    if (c_nominal < 7.0f) c_nominal = 7.0f;
+    if (c_entry   < 7.0f) c_entry   = 7.0f;
+    if (c_exit    < 7.0f) c_exit    = 7.0f;
+
+    seg->initial_rate     = (uint32_t)c_entry;
+    seg->nominal_rate     = (uint32_t)c_nominal;
+    seg->final_rate       = (uint32_t)c_exit;
     seg->accelerate_until = (uint32_t)accelerate_steps;
     seg->decelerate_after = (uint32_t)((int32_t)total_steps - decelerate_steps);
 
-    // Convert step rates back to timer intervals (ticks between steps)
-    if (seg->initial_rate > 0) {
-        seg->step_interval = (uint32_t)(g_timer_freq / (float)seg->initial_rate);
-    }
+    // Recompute Austin/Aryzen n_entry so the ISR Taylor ramp starts at the correct index.
+    // n ≈ (c0 / c_entry)² − 0.5  (same formula as the AUSTIN_N macro in LinearMove).
+    // Without this, accel_count is stale from LinearMove — wrong denominator from step 1.
+    float c0_rt = g_timer_freq * sqrtf(2.0f / (accel * steps_per_mm));
+    if (c0_rt < 1.0f) c0_rt = 1.0f;
+
+    float ratio_entry      = c0_rt / (float)seg->initial_rate;
+    seg->accel_count       = (int32_t)fmaxf(0.0f, ratio_entry * ratio_entry - 0.5f);
+    seg->rest              = 0;
+    seg->jerk_count        = 0;
+
+    // Recompute decel starting index (symmetric mirror of entry).
+    float ratio_exit       = c0_rt / (float)seg->final_rate;
+    int32_t n_exit_rt      = (int32_t)fmaxf(0.0f, ratio_exit * ratio_exit - 0.5f);
+    seg->accel_count_decel = -((int32_t)decelerate_steps + n_exit_rt);
+
+    // step_interval starts at entry rate (profiler updates it each ISR tick).
+    seg->step_interval = seg->initial_rate;
 }
 
 // Arc interpolation - generates a single linear segment for an arc

@@ -8,7 +8,7 @@ G21         ; Metric mode (mm)
 G90         ; Absolute positioning
 G17         ; XY plane
 G92 X0 Y0 Z0 ; Zero all axes
-G1 F800    ; Set feedrate to 1000mm/min
+G1 F5000    ; Set feedrate to 1000mm/min
 
 ; Rectangle path (4 corners)
 G1 X20.000 Y0.000   ; Move to corner 1
