@@ -1,9 +1,15 @@
 # Pic32mzCNC_V3 - Development Status Tracker
 
-**Branch**: `tmc5160`  
+**Branch**: `lookahead`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: March 1, 2026
+**Last Updated**: March 2, 2026
+
+---
+
+## ✅ Optimisation: Merge mm→steps and dominant-axis loops — March 2, 2026
+
+- `srcs/motion/kinematics.c:162` — `KINEMATICS_LinearMove()` — Merged two sequential `for (E_AXIS …)` loops into one. The accumulation (`step_accumulator` → `delta[axis]`) and dominant-axis search (`abs(delta[axis]) > max_delta`) now execute in a single pass over `NUM_AXIS`. Halves loop overhead and improves cache locality — `delta[axis]` is read by the dominant-axis check immediately after being written, while it is still hot in cache. No behavioural change.
 
 ---
 

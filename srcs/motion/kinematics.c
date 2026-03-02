@@ -159,30 +159,19 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
                       delta_mm[AXIS_Z],
                       stepper->steps_per_mm[AXIS_Z]);
     
-    // Convert mm to steps WITH ACCUMULATION to preserve fractional steps
-    // Using static file-scope accumulators
+    // Convert mm to steps WITH ACCUMULATION to preserve fractional steps,
+    // and determine dominant axis (highest ABSOLUTE step count) in the same pass.
     static float step_accumulator[NUM_AXIS] = {0.0f, 0.0f, 0.0f, 0.0f};
-    
+
+    int32_t max_delta = 0;
+    segment_buffer->dominant_axis = AXIS_X;
+    E_AXIS limiting_axis = AXIS_X;
+
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         step_accumulator[axis] += delta_mm[axis] * stepper->steps_per_mm[axis];
         segment_buffer->delta[axis] = (int32_t)step_accumulator[axis];
         step_accumulator[axis] -= (float)segment_buffer->delta[axis];
-    }
-    
-    DEBUG_PRINT_MOTION("[KIN] Z: steps=%ld\r\n", segment_buffer->delta[AXIS_Z]);
-    
-    // DEBUG_PRINT_MOTION("[KINEMATICS] dx=%.4f dy=%.4f → steps: X=%ld Y=%ld Z=%ld A=%ld (acc: %.3f,%.3f)\r\n",
-    //                   delta_mm[AXIS_X], delta_mm[AXIS_Y], 
-    //                   segment_buffer->delta[AXIS_X], segment_buffer->delta[AXIS_Y],
-    //                   segment_buffer->delta[AXIS_Z], segment_buffer->delta[AXIS_A],
-    //                   step_accumulator[AXIS_X], step_accumulator[AXIS_Y]);
-    
-    // ✅ ARRAY-BASED: Determine dominant axis (highest ABSOLUTE step count) - for Bresenham and timing
-    int32_t max_delta = 0;
-    segment_buffer->dominant_axis = AXIS_X;
-    E_AXIS limiting_axis = AXIS_X;
-    
-    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+
         int32_t current_delta = abs(segment_buffer->delta[axis]);
         if (current_delta > max_delta) {
             max_delta = current_delta;
@@ -190,6 +179,8 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
             limiting_axis = axis;
         }
     }
+
+    DEBUG_PRINT_MOTION("[KIN] Z: steps=%ld\r\n", segment_buffer->delta[AXIS_Z]);
     
     // Store dominant delta (used by Bresenham in ISR)
     segment_buffer->dominant_delta = max_delta;
