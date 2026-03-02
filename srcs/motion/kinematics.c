@@ -15,7 +15,14 @@
 // Single instance of work coordinates managed by kinematics (physics module)
 static WorkCoordinateSystem work_coordinates;
 
+// TMR4 frequency cached at KINEMATICS_Initialize() — value is fixed at runtime.
+// Avoids a JAL (function call) on every KINEMATICS_LinearMove() invocation.
+static float g_timer_freq = 0.0f;
+
 void KINEMATICS_Initialize(void) {
+    // Cache timer frequency once — TMR4 prescaler is fixed by MCC configuration
+    g_timer_freq = (float)TMR4_FrequencyGet();
+
     // Initialize work coordinate system to default (G54)
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         SET_COORDINATE_AXIS(&work_coordinates.offset, axis, 0.0f);
@@ -222,8 +229,8 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
         feedrate_mm_sec = max_rate_mm_sec;
     }
     
-    // Timer frequency (TMR4 in 16-bit mode)
-    const float TIMER_FREQ = (float)TMR4_FrequencyGet();
+    // Timer frequency — cached at init, g_timer_freq never changes at runtime
+    const float TIMER_FREQ = g_timer_freq;
     
     // Array-based steps_per_mm lookup (replaces switch statement)
     float steps_per_mm_dominant = *g_axis_settings[segment_buffer->dominant_axis].steps_per_mm;

@@ -7,6 +7,14 @@
 
 ---
 
+## ✅ Optimisation: Cache TMR4 frequency at init — March 2, 2026
+
+- `srcs/motion/kinematics.c:16` — Added `static float g_timer_freq` file-scope variable.
+- `srcs/motion/kinematics.c:20` — `KINEMATICS_Initialize()` — Added `g_timer_freq = (float)TMR4_FrequencyGet()` to cache the value once at startup. TMR4 prescaler is fixed by MCC configuration and never changes at runtime.
+- `srcs/motion/kinematics.c:225` — `KINEMATICS_LinearMove()` — Replaced `const float TIMER_FREQ = (float)TMR4_FrequencyGet()` with `const float TIMER_FREQ = g_timer_freq`. Eliminates a JAL + function-body overhead on every segment (called once per arc chord during G2/G3).
+
+---
+
 ## ✅ Optimisation: Merge mm→steps and dominant-axis loops — March 2, 2026
 
 - `srcs/motion/kinematics.c:162` — `KINEMATICS_LinearMove()` — Merged two sequential `for (E_AXIS …)` loops into one. The accumulation (`step_accumulator` → `delta[axis]`) and dominant-axis search (`abs(delta[axis]) > max_delta`) now execute in a single pass over `NUM_AXIS`. Halves loop overhead and improves cache locality — `delta[axis]` is read by the dominant-axis check immediately after being written, while it is still hot in cache. No behavioural change.
