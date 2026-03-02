@@ -59,13 +59,12 @@ package "Motion Queue (APP_DATA)" {
 }
 
 package "Motion Controller (motion.c)" {
-    [Priority Phase\nSystem] as MOTION
+    [MOTION_Tasks\nSegment Queue] as MOTION
     note right of MOTION
-        Phases (priority order):
-        0. VELOCITY - accel/cruise/decel
-        1. BRESENHAM - error accumulation
-        2. SCHEDULE - OCx scheduling
-        3. COMPLETE - segment done
+        Dequeues segments, calls
+        STEPPER_LoadSegment().
+        Polls steps_completed for
+        segment completion.
     end note
 }
 
@@ -91,7 +90,7 @@ end note
 
 ' Motion Execution
 QUEUE -down-> MOTION : Pop segment\nfrom queue
-MOTION -down-> [Hardware Timers\nOC1/OC2/OC3/OC4] : Step pulses\n(absolute timing)
+MOTION -down-> [OCP1_ISR\nTMR4/OC1/TMR5\n(Single ISR)] : Step pulses\n(period-based timing)
 
 ' Arc Completion
 ARC_GEN -right-> ARC_SM : Last segment?\narcGenState = IDLE

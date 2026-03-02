@@ -62,6 +62,19 @@ volatile bool g_hard_limit_alarm = false;
 // Allows motion commands after soft reset even if on limit (operator can jog away)
 volatile bool g_suppress_hard_limits = false;
 
+// ✅ E-STOP PENDING FLAG - Set by ESTOP_Callback ISR (app.c), cleared by soft reset / main loop
+volatile bool g_estop_pending = false;
+
+// ✅ FEED HOLD FLAG - Set by '!' real-time command, cleared by '~' resume or soft reset
+// When true: MOTION_Tasks, arc generation, and event processing are gated in APP_IDLE
+volatile bool g_feed_hold_active = false;
+
+// ✅ FEED HOLD PENDING FLAG - Set by '!', cleared when motion queue drains to 0
+// While pending: MOTION_Tasks keeps running to drain current segment gracefully.
+// Arc generation and new event processing are gated to avoid adding segments.
+// Status reports Hold:1 (decelerating / draining) until queue empties, then Hold:0.
+volatile bool g_feed_hold_pending = false;
+
 // Position tracking (incremented/decremented by ISR based on direction)
 static StepperPosition stepper_pos = {
     .steps = {0, 0, 0, 0},                    // All axes start at zero
@@ -79,6 +92,8 @@ static volatile E_AXIS dominant_axis = AXIS_X;  // Pre-calculated dominant axis
 
 // ✅ ARRAY-BASED: Segment deltas (loaded when new segment starts)
 static volatile int32_t delta[NUM_AXIS] = {0, 0, 0, 0};
+// Pre-computed absolute values — eliminates abs() calls from ISR hot path
+static volatile uint32_t abs_delta[NUM_AXIS] = {0, 0, 0, 0};
 
 // Settings cache for ISR performance
 static uint8_t step_pulse_invert_mask = 0;
@@ -188,9 +203,10 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
         DEBUG_PRINT_STEPPER("[STEPPER_Load] Steppers already enabled\r\n");
     }
 
-    // ✅ ARRAY-BASED: Load deltas for Bresenham (single loop!)
+    // ✅ ARRAY-BASED: Load deltas for Bresenham (single loop!) + pre-compute abs values for ISR
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         delta[axis] = segment->delta[axis];
+        abs_delta[axis] = (uint32_t)(delta[axis] < 0 ? -delta[axis] : delta[axis]);
     }
     
     // Use pre-calculated dominant axis and delta from motion planning
@@ -233,6 +249,10 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     DEBUG_PRINT_STEPPER("[STEPPER_Load] TMR4_Freq=%luHz, initial_rate=%lu, period=%u (%.1fµs), steps=%ld\r\n",
         TMR4_FrequencyGet(), segment->initial_rate, period, 
         (float)period * 1000000.0f / TMR4_FrequencyGet(), segment->steps_remaining);
+    DEBUG_PRINT_STEPPER("[STEPPER_Load] accel_count=%ld, nominal=%lu, accel_until=%lu, decel_after=%lu, final=%lu, step_iv=%lu\r\n",
+        (long)segment->accel_count, segment->nominal_rate,
+        segment->accelerate_until, segment->decelerate_after,
+        segment->final_rate, segment->step_interval);
     
     // ✅ CRITICAL: Initialize OC1 compare registers for continuous pulse mode
     // OCxR = Rising edge (pulse starts)
@@ -270,35 +290,6 @@ void STEPPER_LoadSegment(MotionSegment* segment) {
     if (app_data_ref != NULL) {
         app_data_ref->motionActive = true;
     }
-}
-
-// ============================================================================
-// Velocity Update (Called by Motion Module During Segment Execution)
-// ============================================================================
-
-void STEPPER_SetStepRate(uint32_t rate_ticks) {
-    // Enforce minimum rate to prevent TMR4 issues (16-bit mode)
-    const uint16_t MIN_RATE = 7;  // Minimum for pulse width requirements (5 + 2 ticks)
-    uint16_t period = (uint16_t)rate_ticks;
-    if (period < MIN_RATE) period = MIN_RATE;
-    if (period > 65535) period = 65535;  // Clamp to 16-bit max
-    
-    // ✅ CRITICAL: Update segment's step_interval so ISR uses new rate
-    if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
-        app_data_ref->currentSegment->step_interval = period;
-    }
-    
-    // Update PR4 - this changes the OC1 period
-    TMR4_PeriodSet(period);
-    
-    // ✅ CRITICAL: Update OC1R/OC1RS to maintain valid compare relationship
-    // OCxR near end of period, OCxRS = OCxR + pulse_width
-    // This ensures OCxRS < PR4 so compare fires before TMR4 rollover
-    // Pulse width: 2.5µs = 2 ticks @ 781.25kHz (1:64 prescaler)
-    // Period is guaranteed ≥ 7 ticks, so these values are always valid
-    
-    OCMP1_CompareValueSet(period - 5);                             // OCxR: Rising edge
-    OCMP1_CompareSecondaryValueSet(period - 3);                   // OCxRS: falling edge
 }
 
 bool STEPPER_IsEnabled(void)
@@ -395,6 +386,89 @@ void STEPPER_StopMotion(void)
 }
 
 // ============================================================================
+// Feed Hold / Resume (GRBL real-time '!' and '~')
+// ============================================================================
+
+void STEPPER_PauseMotion(void)
+{
+    // If motion queue is already empty — go straight to fully stopped (Hold:0)
+    if (app_data_ref == NULL || app_data_ref->motionQueueCount == 0) {
+        g_feed_hold_active  = true;
+        g_feed_hold_pending = false;
+        T4CONCLR  = _T4CON_ON_MASK;
+        T5CONCLR  = _T5CON_ON_MASK;
+        OC1CONCLR = _OC1CON_ON_MASK;
+        if (app_data_ref) app_data_ref->motionActive = false;
+        DEBUG_PRINT_STEPPER("[STEPPER] Feed hold — idle, immediate stop (Hold:0)\r\n");
+        return;
+    }
+
+    // Motion in progress — set pending flag only.
+    // MOTION_Tasks keeps running to drain the current segment, then calls
+    // STEPPER_FinalizeHold() when motionQueueCount reaches 0 (Hold:1 → Hold:0).
+    g_feed_hold_pending = true;
+    DEBUG_PRINT_STEPPER("[STEPPER] Feed hold pending — draining segments (Hold:1)\r\n");
+}
+
+// Called by MOTION_Tasks when motionQueueCount hits 0 while g_feed_hold_pending is set.
+// Transitions from Hold:1 (draining) to Hold:0 (fully stopped).
+void STEPPER_FinalizeHold(void)
+{
+    g_feed_hold_pending = false;
+    g_feed_hold_active  = true;
+    T4CONCLR  = _T4CON_ON_MASK;
+    T5CONCLR  = _T5CON_ON_MASK;
+    OC1CONCLR = _OC1CON_ON_MASK;
+    if (app_data_ref != NULL) app_data_ref->motionActive = false;
+    DEBUG_PRINT_STEPPER("[STEPPER] Feed hold finalized — queue drained, fully stopped (Hold:0)\r\n");
+}
+
+void STEPPER_ResumeMotion(void)
+{
+    // Cancel a pending hold (queue still running — just un-gate everything)
+    if (g_feed_hold_pending) {
+        g_feed_hold_pending = false;
+        DEBUG_PRINT_STEPPER("[STEPPER] Feed hold cancelled (was pending, motion continues)\r\n");
+        return;
+    }
+
+    // Full resume from parked state (Hold:0)
+    g_feed_hold_active = false;
+
+    // Guard: nothing to resume if no active segment
+    // (Hold fired BETWEEN segments — MOTION_Tasks will pick up next queued segment naturally)
+    if (app_data_ref == NULL || app_data_ref->currentSegment == NULL) {
+        if (app_data_ref != NULL) {
+            app_data_ref->motionActive = (app_data_ref->motionQueueCount > 0);
+        }
+        DEBUG_PRINT_STEPPER("[STEPPER] Resume: no active segment — MOTION_Tasks will load next\r\n");
+        return;
+    }
+
+    // Restore the step interval that was active when hold fired.
+    // seg->step_interval is updated each ISR step by the velocity profiler,
+    // so it holds the exact rate at the moment of pause — perfect restart point.
+    uint16_t period = (uint16_t)app_data_ref->currentSegment->step_interval;
+    const uint16_t MIN_PERIOD = 7;
+    if (period < MIN_PERIOD) period = MIN_PERIOD;
+
+    // Re-apply OC1 compare registers and period (same formula as STEPPER_LoadSegment)
+    TMR4_PeriodSet(period);
+    OCMP1_CompareValueSet(period - 5);           // OCxR: rising edge
+    OCMP1_CompareSecondaryValueSet(period - 3);  // OCxRS: falling edge ISR trigger
+
+    // Re-enable OC1 before starting TMR4 (per datasheet requirement)
+    OCMP1_Enable();
+
+    // Restart TMR4 — ISR fires again and continues Bresenham from frozen state
+    TMR4_Start();
+
+    app_data_ref->motionActive = true;
+
+    DEBUG_PRINT_STEPPER("[STEPPER] Feed resume — TMR4/OC1 restarted at interval=%u\r\n", period);
+}
+
+// ============================================================================
 // Direction Control (Called by Motion Module)
 // ============================================================================
 
@@ -419,86 +493,160 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward) {
 // ============================================================================
 
 void OCP1_ISR(uintptr_t context) {
-    // ✅ GUARD: No active segment - skip step generation but keep timer running
-    if (app_data_ref == NULL || app_data_ref->currentSegment == NULL) {
-        return;  // Main loop will load next segment or stop timer
+    // ✅ GUARD: cache segment pointer once — eliminates repeated volatile double-dereference.
+    if (app_data_ref == NULL) return;
+    MotionSegment* seg = app_data_ref->currentSegment;
+    if (seg == NULL) return;
+
+    // ===== DOMINANT AXIS STEP =====
+    // switch → compiler emits jump table; each case is the Harmony #define macro which
+    // expands to a single LATxSET register write. No function call, no pointer indirection.
+    // GPIO pin assignments live in plib_gpio.h (MCC-managed) — change pins in MCC only.
+    switch (dominant_axis) {
+        case AXIS_X: StepX_Set(); break;
+        case AXIS_Y: StepY_Set(); break;
+        case AXIS_Z: StepZ_Set(); break;
+        case AXIS_A: StepA_Set(); break;
+        default:     break;  // should never reach here
     }
-    
-    // ===== DOMINANT AXIS STEP (ALWAYS) =====
-    // Use pre-calculated dominant_axis (set during STEPPER_LoadSegment)
-    // Eliminates 4 abs() calls + 3 comparisons per ISR (significant overhead reduction!)
-    
-    // Atomic GPIO step pulse - single instruction, zero overhead!
-    AXIS_StepSet(dominant_axis);
-    
-    // ✅ CRITICAL DEBUG: Read back GPIO state immediately after Set
-    // This confirms if AXIS_StepSet actually toggles the pin
+
     DEBUG_EXEC_STEPPER({
         static uint32_t debug_counter = 0;
-        if (++debug_counter >= 100) {  // Print every 100th step to avoid UART flood
-            debug_counter = 0;
-        }
+        if (++debug_counter >= 100) debug_counter = 0;
     });
-    
-    // Update step counter based on direction (inline, zero overhead)
-    if (direction_bits & (1 << dominant_axis)) {
+
+    // Update position counter (always_inline, address never taken — genuinely inlines at -O1)
+    if (direction_bits & (1U << dominant_axis)) {
         AXIS_IncrementSteps(dominant_axis);
     } else {
         AXIS_DecrementSteps(dominant_axis);
     }
-    
-    // ===== BRESENHAM FOR SUBORDINATE AXES =====
-    // ✅ ARRAY-BASED: Direct array access - ZERO pointer overhead!
-    
+
+    // ===== BRESENHAM SUBORDINATE AXES =====
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        // Skip dominant axis and axes with zero delta
         if (axis == dominant_axis || delta[axis] == 0) continue;
-        
-        // Bresenham error accumulation using direct array access
-        error[axis] += abs(delta[axis]);
+
+        error[axis] += abs_delta[axis];
         if (error[axis] >= dominant_delta) {
-            // Atomic GPIO step pulse - single instruction!
-            AXIS_StepSet(axis);
-            
-            // Update step counter (inline, zero overhead)
-            if (direction_bits & (1 << axis)) {
+            // Same switch pattern: Harmony macro → single LATxSET, no call overhead.
+            switch (axis) {
+                case AXIS_X: StepX_Set(); break;
+                case AXIS_Y: StepY_Set(); break;
+                case AXIS_Z: StepZ_Set(); break;
+                case AXIS_A: StepA_Set(); break;
+                default:     break;  // should never reach here
+            }
+            if (direction_bits & (1U << axis)) {
                 AXIS_IncrementSteps(axis);
             } else {
                 AXIS_DecrementSteps(axis);
             }
-            
             error[axis] -= dominant_delta;
         }
     }
-    
-    // ===== START TMR5 FOR PULSE WIDTH =====
-    // TMR5 pre-configured to fire after 3µs (PR5=149, PBCLK3=50MHz, prescaler 1:1)
-    // TMR5 period is FIXED at 3µs - do NOT change it!
-    TMR5_Start();
-    
-    // ===== SCHEDULE NEXT STEP (CRITICAL!) =====
-    // TMR4 rolls over at PR4, so we use RELATIVE compare values
-    // This is what makes the motion continue - without this, only ONE step occurs!
-    if (app_data_ref != NULL && app_data_ref->currentSegment != NULL) {
-        uint32_t step_interval = app_data_ref->currentSegment->step_interval;  // Ticks between steps
-        
-        // ✅ CRITICAL: Ensure period is large enough for pulse width requirements
-        const uint16_t MIN_PERIOD_FOR_PULSE = 7;  // 5 for rising edge offset + 2 for pulse width
-        uint16_t period = (uint16_t)step_interval;
-        if (period < MIN_PERIOD_FOR_PULSE) period = MIN_PERIOD_FOR_PULSE;
-        
-        // ✅ CRITICAL: Set TMR4 period AND OC1 compare values for continuous pulses
-        // Per datasheet 16.3.2.5: PR4 must be ≥ OC1RS > OC1R
-        // OC1R fires first (rising edge), OC1RS fires second (falling edge + ISR)
-        // Pulse width: 2.5µs = 2 ticks @ 781.25kHz (1:64 prescaler)
-        TMR4_PeriodSet(period);                                             // Timer period (controls step rate)
-        OCMP1_CompareValueSet(period - 5);                                  // Rising edge (pulse starts)
-        OCMP1_CompareSecondaryValueSet(period - 3);                         // Falling edge (ISR trigger)
 
-        // Update step counter and signal main loop for velocity updates
-        app_data_ref->currentSegment->steps_completed++;
-        app_data_ref->motionPhase = MOTION_PHASE_VELOCITY;
+    // ===== PULSE WIDTH TIMER =====
+    // Direct SFR — OC/TMR configuration never changes board-to-board.
+    T5CONSET = _T5CON_ON_MASK;
+
+    // ===== VELOCITY PROFILING (Taylor series — Austin/Aryzen algorithm) =====
+    // Recurrence: c_n = c_{n-1} - (2·c_{n-1} + rest) / (4·n + 1)
+    // This is the exact discretisation of constant linear acceleration:
+    // unlike a fixed linear delta, it is physically correct in real distance,
+    // eliminating the "creep then jolt" artefact at start and end of moves.
+    //
+    // Decel uses the same formula with a negative accel_count:
+    //   (4·n + 1) becomes negative → delta is negative → step_interval INCREASES.
+    // The rest term carries the integer remainder for sub-tick precision.
+    uint32_t sc = seg->steps_completed;
+
+    // Decel phase entry: load symmetric starting index, reset rest, no speed snap.
+    // step_interval stays at cruise — rest accumulator builds sub-tick precision from step 1.
+    if (sc == seg->decelerate_after && sc < seg->steps_remaining) {
+        seg->accel_count = seg->accel_count_decel;  // = -(n_entry + accel_steps)
+        seg->rest        = 0;
+        seg->jerk_count  = 0;
     }
+
+    if (sc < seg->accelerate_until) {
+        // Acceleration: accel_count counts up from entry-velocity-corrected index
+        if (seg->jerk_steps > 0U && seg->jerk_count < (int32_t)seg->jerk_steps) {
+            // =====================================================================
+            // S-CURVE JERK RAMP (accel entry)
+            // =====================================================================
+            // Linear interpolation from initial_rate toward (initial_rate - ref_delta)
+            // where ref_delta = what ONE full Taylor step from initial_rate would give.
+            //
+            // CRITICAL: accel_count and rest are NOT advanced here.
+            // Their values represent the correct Taylor starting index AFTER this ramp.
+            // When jerk ramp ends, Taylor picks up from the real step_interval with the
+            // correct accel_count → no divergence, no frozen-motor bug.
+            //
+            // ref_delta = 2*initial_rate / (4*(n_entry+1)+1)
+            //           = 2*initial_rate / (4*accel_count + 5)   [accel_count frozen = n_entry]
+            int32_t den_first = (seg->accel_count << 2) + 5;
+            if (den_first < 1) den_first = 1;
+            int32_t ref_delta = ((int32_t)seg->initial_rate << 1) / den_first;
+            // Linear scale: apply (jerk_count+1)/jerk_steps fraction each step
+            // Division by jerk_steps using pre-stored log2 bit-shift (zero extra cost)
+            int32_t applied   = (ref_delta * (seg->jerk_count + 1)) >> seg->jerk_steps_log2;
+            int32_t new_iv    = (int32_t)seg->initial_rate - applied;
+            if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
+            seg->step_interval = (uint32_t)new_iv;
+            seg->jerk_count++;
+            // accel_count and rest intentionally NOT changed — Taylor continuity preserved
+        } else {
+            // Normal Taylor accel (also runs when jerk_steps=0 or after jerk ramp completes)
+            seg->accel_count++;
+            int32_t num    = ((int32_t)seg->step_interval << 1) + seg->rest;
+            int32_t den    = (seg->accel_count << 2) + 1;
+            seg->rest      = num % den;
+            int32_t new_iv = (int32_t)seg->step_interval - (num / den);
+            if (new_iv < (int32_t)seg->nominal_rate) new_iv = (int32_t)seg->nominal_rate;
+            seg->step_interval = (uint32_t)new_iv;
+        }
+    } else if (sc >= seg->decelerate_after) {
+        // Deceleration: symmetric mirror of accel.
+        // accel_count runs from -(n_entry+accel_steps) toward 0.
+        // abs_n = -accel_count is always positive (and shrinking), so den is always positive.
+        // Small delta at large abs_n is fine — rest accumulates sub-tick precision each step,
+        // giving a smooth ramp that naturally builds into stronger braking near the end.
+        seg->accel_count++;
+        int32_t abs_n = -seg->accel_count;
+        if (abs_n > 0) {
+            int32_t den    = (abs_n << 2) + 1;                         // always positive
+            int32_t num    = ((int32_t)seg->step_interval << 1) + seg->rest;
+            seg->rest      = num % den;
+            int32_t new_iv = (int32_t)seg->step_interval + (num / den); // ADD: interval grows = slower
+            if (new_iv > (int32_t)seg->final_rate) new_iv = (int32_t)seg->final_rate;
+            seg->step_interval = (uint32_t)new_iv;
+        } else {
+            // accel_count reached 0 — hold at final_rate
+            seg->rest          = 0;
+            seg->step_interval = seg->final_rate;
+        }
+    }
+    // CRUISE (accelerate_until ≤ sc < decelerate_after): step_interval unchanged
+
+    seg->steps_completed++;
+
+    // ===== SEGMENT COMPLETION =====
+    // Detect completion here — stops TMR4 precisely after the final step.
+    // Prevents phantom ISR calls while main loop polls steps_completed.
+    // STEPPER_LoadSegment() restarts TMR4 when the next segment is ready.
+    if (seg->steps_completed >= seg->steps_remaining) {
+        T4CONCLR = _T4CON_ON_MASK;  // Stop TMR4 — direct SFR
+        app_data_ref->motionSegmentCompleted = true;
+        return;
+    }
+
+    // Direct SFR writes — OC1/TMR4 are fixed silicon, never need Harmony abstraction.
+    // PR4 >= OC1RS > OC1R (Output Compare datasheet 16.3.2.5)
+    uint16_t period = (uint16_t)seg->step_interval;
+    if (period < 7U) period = 7U;
+    PR4   = period;
+    OC1R  = period - 5U;
+    OC1RS = period - 3U;
 }
 
 // ============================================================================
@@ -506,15 +654,15 @@ void OCP1_ISR(uintptr_t context) {
 // ============================================================================
 
 void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context) {
-    // LED2 removed - reserved for state indicator (homing/alarm only)
-    
-    // Stop TMR5 (one-shot mode)
-    TMR5_Stop();
-    
-    // Clear all step pins using axis configuration (not hardcoded!)
-    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        AXIS_StepClear(axis);
-    }
+    // Stop TMR5 one-shot — direct SFR, OC/TMR silicon never changes board-to-board.
+    T5CONCLR = _T5CON_ON_MASK;
+
+    // Clear all step pins via Harmony macros — MCC-managed, change pins in MCC only.
+    // All four are always cleared (simpler and faster than a loop with a function pointer call).
+    StepX_Clear();
+    StepY_Clear();
+    StepZ_Clear();
+    StepA_Clear();
 }
 
 

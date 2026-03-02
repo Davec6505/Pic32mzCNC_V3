@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "common.h"           // For STEPPER_DRIVER_TMC5160 and hardware config
 #include "data_structures.h"  // For E_AXIS enum and NUM_AXIS
 
 
@@ -23,8 +24,7 @@ extern GPIO_SetFunc axis_step_set[];
 extern GPIO_ClearFunc axis_step_clear[];
 extern GPIO_SetFunc axis_dir_set[];
 extern GPIO_ClearFunc axis_dir_clear[];
-extern GPIO_SetFunc axis_enable_set[];
-extern GPIO_ClearFunc axis_enable_clear[];
+// Single shared EN pin (EnXYZA) — no per-axis enable arrays.
 
 // Limit switch function pointer arrays
 extern GPIO_GetFunc axis_limit_min_get[];
@@ -61,12 +61,27 @@ static inline void __attribute__((always_inline)) AXIS_DirClear(E_AXIS axis) {
     axis_dir_clear[axis]();
 }
 
+#include "peripheral/gpio/plib_gpio.h"  // For EnXYZA_Set/Clear macros
+
+// ── STEPPERS_Enable / STEPPERS_Disable ───────────────────────────────────────
+// PCB has a single shared EN pin (EnXYZA / RE6) covering all axes.
+// Active LOW: Clear = enabled, Set = disabled.
+static inline void __attribute__((always_inline)) STEPPERS_Enable(void) {
+    EnXYZA_Clear();               // Assert shared ENN (active LOW = enabled)
+}
+
+static inline void __attribute__((always_inline)) STEPPERS_Disable(void) {
+    EnXYZA_Set();                 // Deassert shared ENN (HIGH = disabled)
+}
+
+// ── AXIS_EnableSet / AXIS_EnableClear ─────────────────────────────────────────
+// PCB has one shared EN pin — all per-axis enable calls route here.
 static inline void __attribute__((always_inline)) AXIS_EnableSet(E_AXIS axis) {
-    axis_enable_set[axis]();
+    (void)axis; EnXYZA_Clear();   // Shared ENN (active LOW = enabled)
 }
 
 static inline void __attribute__((always_inline)) AXIS_EnableClear(E_AXIS axis) {
-    axis_enable_clear[axis]();
+    (void)axis; EnXYZA_Set();     // Shared ENN (HIGH = disabled)
 }
 
 static inline bool __attribute__((always_inline)) AXIS_LimitMinGet(E_AXIS axis) {
@@ -146,6 +161,16 @@ static inline bool __attribute__((always_inline)) LIMIT_GetMax(E_AXIS axis) {
 static inline bool __attribute__((always_inline)) LIMIT_CheckAxis(E_AXIS axis, uint8_t invert_mask) {
     bool inverted = (invert_mask >> axis) & 0x01;
     return (LIMIT_GetMin(axis) ^ inverted) || (LIMIT_GetMax(axis) ^ inverted);
+}
+
+// ===== PROBE INPUT ABSTRACTION =====
+
+// Probe input is Z-max limit switch (standard GRBL convention)
+// $6 probe invert setting: 0=normally open (NO), 1=normally closed (NC)
+// Returns true when probe is triggered (contact made)
+static inline bool __attribute__((always_inline)) PROBE_Get(uint8_t probe_invert) {
+    bool pin_state = LIMIT_GetMax(AXIS_Z);  // Z-max limit is probe input
+    return pin_state ^ (probe_invert ? 1 : 0);  // Apply invert setting
 }
 
 // String tokenization utilities for G-code parsing

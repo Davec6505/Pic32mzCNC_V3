@@ -1,7 +1,7 @@
 # LitePlacer GRBL Implementation Plan
 
 **Date**: February 10, 2026  
-**Status**: Design Phase  
+**Status**: Firmware complete (Phases 1–4) — hardware testing pending (Phase 5)  
 **Target Firmware**: Pic32mzCNC_V3 GRBL v1.1 Compatible
 
 ---

@@ -1,6 +1,6 @@
 # Simple Makefile for PIC32MZ project
 # Name of the project binary
-MODULE     := CS23
+MODULE     := CNC_V3
 
 # Default target when running 'make' with no arguments
 # 'make' → incremental build (only rebuilds changed files) [FAST]
@@ -12,13 +12,6 @@ MODULE     := CS23
 # The device is expected to be a PIC32MZ family device.
 DEVICE     := 32MZ2048EFH100
 
-# Build configuration: Debug or Release
-# Controls output directory structure and optimization level
-# Usage: make all BUILD_CONFIG=Debug    (debug build with -g3 -O0)
-#        make all BUILD_CONFIG=Release  (balanced build with -g -O1)
-#        make all                       (defaults to Release: -g -O1)
-BUILD_CONFIG ?= Release
-
 # Build with dependency tracking enabled
 # This enables automatic tracking of header file dependencies
 # Usage: make all                    (disabled by default)
@@ -26,17 +19,15 @@ BUILD_CONFIG ?= Release
 #        make all DEP_TRACKING=1    (enable dependency tracking)
 DEP_TRACKING ?= 0
 
-# Optimization level control (optional override for Release builds)
-# Usage: make all OPT_LEVEL=2    (use -O2 instead of default -O1)
-#        make all OPT_LEVEL=3    (use -O3 for maximum optimization)
-#        make all                (uses default -O1)
-# Note: Only affects Release builds; Debug always uses -O0
+# Optimization level control (optional override)
+# Usage: make OPT_LEVEL=2    (use -O2 instead of default -O1)
+#        make OPT_LEVEL=3    (use -O3 for maximum optimization)
+#        make                (uses default -O1)
 OPT_LEVEL ?= 1
 
-# Debug flags control: set DEBUG=1 to enable debug output
-# Usage: make all DEBUG=1  (enable debug messages)
-#        make all BUILD_CONFIG=Debug     (Debug builds must be enabled)
-#        make all                        (disabled by default)
+# Debug flags: enable compile-time UART debug output (zero runtime overhead in normal builds)
+# Usage: make DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"   (enable specific subsystem traces)
+#        make                                           (no debug output, default)
 DEBUG_ ?= 0
 
 # Junction look-ahead control: set to 1 to force exact-stop (disable junction blending)
@@ -81,14 +72,14 @@ BUILD_DIR=make build_dir
 
 # Default target: incremental build (only rebuilds changed files)
 build:
-	@echo "######  INCREMENTAL BUILD ($(BUILD_CONFIG))  ########"
+	@echo "######  INCREMENTAL BUILD  ########"
 ifeq ($(USE_SHARED_LIB),1)
 	@echo "######  (Using pre-built shared library)  ########"
 endif
-	cd srcs && $(BUILD) COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) USE_SHARED_LIB=$(USE_SHARED_LIB) BUILD_CONFIG=$(BUILD_CONFIG) OPT_LEVEL=$(OPT_LEVEL) DEBUG_FLAGS="$(DEBUG_FLAGS)" DEBUG_MOTION_BUFFER=$(DEBUG_) DISABLE_JUNCTION_LOOKAHEAD=$(DISABLE_JUNCTION_LOOKAHEAD) DEP_TRACKING=$(DEP_TRACKING)
+	cd srcs && $(BUILD) COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) USE_SHARED_LIB=$(USE_SHARED_LIB) OPT_LEVEL=$(OPT_LEVEL) DEBUG_FLAGS="$(DEBUG_FLAGS)" DEBUG_MOTION_BUFFER=$(DEBUG_) DISABLE_JUNCTION_LOOKAHEAD=$(DISABLE_JUNCTION_LOOKAHEAD) DEP_TRACKING=$(DEP_TRACKING)
 	@echo "###### BIN TO HEX ########"
-	cd bins/$(BUILD_CONFIG) && "$(COMPILER_LOCATION)/xc32-bin2hex" $(MODULE)
-	@echo "######  BUILD COMPLETE (bins/$(BUILD_CONFIG)/$(MODULE).hex)  ########"
+	cd bins && "$(COMPILER_LOCATION)/xc32-bin2hex" $(MODULE)
+	@echo "######  BUILD COMPLETE (bins/$(MODULE).hex)  ########"
 
 # Clean + full rebuild
 all: clean build
@@ -96,9 +87,9 @@ all: clean build
 
 # Build shared library from libs/*.c files
 shared_lib:
-	@echo "######  BUILDING SHARED LIBRARY ($(BUILD_CONFIG))  ########"
-	cd srcs && $(BUILD) shared_lib COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) BUILD_CONFIG=$(BUILD_CONFIG) OPT_LEVEL=$(OPT_LEVEL) DEBUG_FLAGS="$(DEBUG_FLAGS)" DEBUG_MOTION_BUFFER=$(DEBUG_) DISABLE_JUNCTION_LOOKAHEAD=$(DISABLE_JUNCTION_LOOKAHEAD)
-	@echo "######  SHARED LIBRARY COMPLETE (libs/$(BUILD_CONFIG)/libCS23shared.a)  ########"
+	@echo "######  BUILDING SHARED LIBRARY  ########"
+	cd srcs && $(BUILD) shared_lib COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) OPT_LEVEL=$(OPT_LEVEL) DEBUG_FLAGS="$(DEBUG_FLAGS)" DEBUG_MOTION_BUFFER=$(DEBUG_) DISABLE_JUNCTION_LOOKAHEAD=$(DISABLE_JUNCTION_LOOKAHEAD)
+	@echo "######  SHARED LIBRARY COMPLETE (libs/libCS23shared.a)  ########"
 
 # Quiet build - shows only errors, warnings, and completion status
 quiet:
@@ -109,44 +100,34 @@ ifeq ($(OS),Windows_NT)
     \$$filtered = \$$output | Select-String -Pattern 'error|warning' -CaseSensitive:\$$false; \
     if (\$$filtered) { \$$filtered | Write-Host -ForegroundColor Red }; \
     if (\$$LASTEXITCODE -eq 0) { \
-        cd bins/$(BUILD_CONFIG); & '$(COMPILER_LOCATION)/xc32-bin2hex' $(MODULE) | Out-Null; \
+        cd bins; & '$(COMPILER_LOCATION)/xc32-bin2hex' $(MODULE) | Out-Null; \
         if (\$$LASTEXITCODE -eq 0) { Write-Host '######  BUILD COMPLETE (no errors)  ########' -ForegroundColor Green } \
         else { Write-Host '######  HEX CONVERSION FAILED  ########' -ForegroundColor Red; exit 1 } \
     } else { Write-Host '######  BUILD FAILED  ########' -ForegroundColor Red; exit 1 }"
 else
 	@cd srcs && $(BUILD) COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) DEBUG_=$(DEBUG_) 2>&1 | grep -iE 'error|warning' || echo "No errors or warnings"
-	@if [ $$? -eq 0 ]; then cd bins/$(BUILD_CONFIG) && "$(COMPILER_LOCATION)/xc32-bin2hex" $(MODULE) >/dev/null 2>&1 && echo "######  BUILD COMPLETE  ########"; fi
+	@if [ $$? -eq 0 ]; then cd bins && "$(COMPILER_LOCATION)/xc32-bin2hex" $(MODULE) >/dev/null 2>&1 && echo "######  BUILD COMPLETE  ########"; fi
 endif
 
 build_dir:
 	@echo "###### BUILDING DIRECTORIES FOR OUTPUT BINARIES #######"
-	cd srcs && $(BUILD_DIR) BUILD_CONFIG=$(BUILD_CONFIG)
+	cd srcs && $(BUILD_DIR) DRY_RUN=$(DRY_RUN)
 	@echo "############ BUILDING DIRECTORIES COMPLETED ###########"
 
 debug:
 	@echo "####### DEBUGGING OUTPUTS #######"
-	cd srcs && $(BUILD) debug COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) BUILD_CONFIG=$(BUILD_CONFIG) DEBUG_FLAGS="$(DEBUG_FLAGS)" DEBUG_=$(DEBUG_)
+	cd srcs && $(BUILD) debug COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE) HEAP_SIZE=$(HEAP_SIZE) STACK_SIZE=$(STACK_SIZE) DEBUG_FLAGS="$(DEBUG_FLAGS)" DEBUG_=$(DEBUG_)
 
 platform:
 	@echo "####### PLATFORM INFO #######"
 	cd srcs && $$(BUILD) platform COMPILER_LOCATION="$(COMPILER_LOCATION)" DFP_LOCATION="$(DFP_LOCATION)" DFP="$(DFP)" DEVICE=$(DEVICE) MODULE=$(MODULE)
 
 clean:
-	@echo "####### CLEANING OUTPUTS ($(BUILD_CONFIG)) #######"
+	@echo "####### CLEANING OUTPUTS #######"
 ifeq ($(OS),Windows_NT)
-	@powershell -NoProfile -Command "cd srcs; make clean DRY_RUN=$(DRY_RUN) BUILD_CONFIG=$(BUILD_CONFIG)"
+	@powershell -NoProfile -Command "cd srcs; make clean DRY_RUN=$(DRY_RUN)"
 else
-	cd srcs && $(MAKE) clean DRY_RUN=$(DRY_RUN) BUILD_CONFIG=$(BUILD_CONFIG)
-endif
-
-clean_all:
-	@echo "####### CLEANING ALL BUILD CONFIGURATIONS #######"
-ifeq ($(OS),Windows_NT)
-	@powershell -NoProfile -Command "cd srcs; make clean BUILD_CONFIG=Debug DRY_RUN=$(DRY_RUN)"
-	@powershell -NoProfile -Command "cd srcs; make clean BUILD_CONFIG=Release DRY_RUN=$(DRY_RUN)"
-else
-	cd srcs && $(MAKE) clean BUILD_CONFIG=Debug DRY_RUN=$(DRY_RUN)
-	cd srcs && $(MAKE) clean BUILD_CONFIG=Release DRY_RUN=$(DRY_RUN)
+	cd srcs && $(MAKE) clean DRY_RUN=$(DRY_RUN)
 endif
 
 rem_dir:

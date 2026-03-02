@@ -28,6 +28,9 @@
 #include "settings.h"
 #include "data_structures.h"
 #include "utils/uart_utils.h"
+#ifdef HAS_TMC5160_AXIS
+#include "motion/tmc5160.h"   // For TMC5160_ApplySettings()
+#endif
 #include "../config/default/peripheral/uart/plib_uart3.h"
 #include <xc.h>  // For RSWRST, SYSKEY, and processor registers
 #include "definitions.h"                  // For T4CON/_T4CON_ON_MASK (hardware state)
@@ -63,7 +66,7 @@ GCODE_Data gcodeData = {
 static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
-static bool feedHoldActive = false;         /* '!' feed hold, '~' resume */
+// g_feed_hold_active is in stepper.h (defined in stepper.c) — global, gated in app.c APP_IDLE
 static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
 static bool unitsInches = false;            /* false=mm (G21), true=inches (G20) */
 
@@ -155,6 +158,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     // Clear alarm but suppress hard limits until user moves off limit
     // This prevents immediate re-alarm after soft reset while on limit
     g_hard_limit_alarm = false;
+    g_estop_pending = false;        // Just in case ESTOP was pending when soft limit was hit.
     g_suppress_hard_limits = true;  // Will auto-clear in IDLE when limits released
     appData->alarmCode = 0;
     grblAlarm = false;
@@ -170,7 +174,8 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     /* 9. Reset G-code parser state */
     okPendingCount = 0;  // Clear all deferred ok responses
     grblCheckMode = false;
-    feedHoldActive = false;
+    g_feed_hold_active  = false;  // Clear hold (defined in stepper.c / stepper.h)
+    g_feed_hold_pending = false;  // Cancel any in-flight pending hold
     unitsInches = false;
     
 
@@ -202,7 +207,8 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
     unitsInches = false;
     grblCheckMode = false;
     grblAlarm = false;
-    feedHoldActive = false;
+    g_feed_hold_active  = false;
+    g_feed_hold_pending = false;
 
     // ✅ REMOVED: Startup deferral initialization (no longer used)
 }
@@ -415,9 +421,64 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             }
         }
 
+        // G38.2, G38.3, G38.4, G38.5 - Probe commands
+        if (gnum == 38) {
+            // Parse subcode after decimal point (e.g., G38.2 -> subcode = 2)
+            char* pDot = find_char((char*)cmd, '.');
+            if (pDot) {
+                int subcode = (int)strtol(pDot + 1, NULL, 10);
+                if (subcode >= 2 && subcode <= 5) {
+                    // Determine probe direction and alarm behavior
+                    if (subcode == 2 || subcode == 3) {
+                        ev->type = GCODE_EVENT_PROBE_TOWARD;  // Probe toward workpiece
+                        ev->data.probe.probe_toward = true;
+                    } else {  // subcode == 4 || subcode == 5
+                        ev->type = GCODE_EVENT_PROBE_AWAY;    // Probe away from workpiece
+                        ev->data.probe.probe_toward = false;
+                    }
+                    
+                    // Set alarm behavior: G38.2 and G38.4 alarm on failure
+                    ev->data.probe.alarm_on_fail = (subcode == 2 || subcode == 4);
+                    
+                    // Parse axis parameters and feedrate
+                    const float unit_scale = unitsInches ? 25.4f : 1.0f;
+                    
+                    // Array-based axis parameter parsing
+                    float axis_values[NUM_AXIS];
+                    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                        char* pAxis = find_char((char*)cmd, axis_letters[axis]);
+                        axis_values[axis] = pAxis ? parse_float_after(pAxis) : NAN;
+                    }
+                    
+                    // Store target coordinates (NAN = no change for that axis)
+                    ev->data.probe.x = !isnan(axis_values[AXIS_X]) ? axis_values[AXIS_X] * unit_scale : NAN;
+                    ev->data.probe.y = !isnan(axis_values[AXIS_Y]) ? axis_values[AXIS_Y] * unit_scale : NAN;
+                    ev->data.probe.z = !isnan(axis_values[AXIS_Z]) ? axis_values[AXIS_Z] * unit_scale : NAN;
+                    ev->data.probe.a = !isnan(axis_values[AXIS_A]) ? axis_values[AXIS_A] * unit_scale : NAN;
+                    
+                    // Parse feedrate (required for probe moves)
+                    char* pF = find_char((char*)cmd, 'F');
+                    ev->data.probe.feedrate = pF ? (parse_float_after(pF) * unit_scale) : 0.0f;
+                    
+                    DEBUG_PRINT_GCODE("[PARSE] Probe G38.%d: toward=%d alarm=%d Z=%.2f F=%.1f\r\n",
+                                     subcode, ev->data.probe.probe_toward, 
+                                     ev->data.probe.alarm_on_fail,
+                                     ev->data.probe.z, ev->data.probe.feedrate);
+                    
+                    return true;
+                } else {
+                    DEBUG_PRINT_GCODE("[PARSE] Invalid G38 subcode: %d\r\n", subcode);
+                    return false;
+                }
+            }
+            DEBUG_PRINT_GCODE("[PARSE] G38 missing subcode\r\n");
+            return false;
+        }
+
         if (gnum == 0 || gnum == 1) {
             ev->type = GCODE_EVENT_LINEAR_MOVE;
-            DEBUG_PRINT_GCODE("[PARSE] Linear move (G%d)\r\n", gnum);
+            ev->data.linearMove.isRapid = (gnum == 0);  // G0 = rapid, G1 = feed
+            DEBUG_PRINT_GCODE("[PARSE] Linear move (G%d)%s\r\n", gnum, (gnum == 0) ? " RAPID" : "");
         } else if (gnum == 2) {
             ev->type = GCODE_EVENT_ARC_MOVE;
             ev->data.arcMove.clockwise = true;
@@ -455,6 +516,7 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             ev->data.linearMove.z = !isnan(axis_values[AXIS_Z]) ? axis_values[AXIS_Z] * unit_scale : NAN;
             ev->data.linearMove.a = !isnan(axis_values[AXIS_A]) ? axis_values[AXIS_A] * unit_scale : NAN;
             ev->data.linearMove.feedrate = (f > 0.0f) ? (f * unit_scale) : 0.0f;
+            // For G0, isRapid was already set above; feedrate=0 means "use max_rate in motion.c"
             return true;
         } else if (ev->type == GCODE_EVENT_ARC_MOVE) {
             char* pI = find_char((char*)cmd, 'I');
@@ -816,8 +878,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 const char* state = "Idle";
                 if (grblAlarm) {
                     state = "Alarm";
-                } else if (feedHoldActive) {
-                    state = "Hold";
+                } else if (g_feed_hold_pending) {
+                    state = "Hold:1";  // GRBL v1.1: Hold:1 = draining / decelerating
+                } else if (g_feed_hold_active) {
+                    state = "Hold:0";  // GRBL v1.1: Hold:0 = fully stopped
                 } else if (appData->arcGenState == ARC_GEN_ACTIVE) {
                     // Arc generator active → still processing arc segments
                     state = "Run";
@@ -845,7 +909,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
                     feedrate_mm_min, (unsigned)spindle_rpm,
                     grblCheckMode ? "|Cm:1" : "",
-                    feedHoldActive ? "|FH:1" : "");
+                    "");  // Hold state reported via state string (Hold:0), not separate flag
                 UART3_Write(txBuffer, response_len);
                 
                 // ⚠️ Real-time commands NEVER trigger deferred ok checks
@@ -853,14 +917,16 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 break;
             }
             case '~': /* Cycle start / resume */
-                if (feedHoldActive) {
-                    feedHoldActive = false;
-                    /* Future: Re-enable motion pipeline if paused */
+                if (g_feed_hold_active || g_feed_hold_pending) {
+                    STEPPER_ResumeMotion();  // Cancels pending OR restarts from full stop
+                    DEBUG_PRINT_GCODE("[GCODE] Feed hold released — motion resuming\r\n");
                 }
                 break;
             case '!': /* Feed hold */
-                feedHoldActive = true;
-                STEPPER_DisableAll();
+                if (!g_feed_hold_active && !g_feed_hold_pending) {
+                    STEPPER_PauseMotion();   // Sets pending (drain) or immediate if queue empty
+                    DEBUG_PRINT_GCODE("[GCODE] Feed hold active\r\n");
+                }
                 break;
             case 0x18: /* Soft reset (Ctrl+X) */
             {
@@ -1124,6 +1190,17 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     if (param <= 5) {
                         STEPPER_ReloadSettings();
                     }
+
+#ifdef HAS_TMC5160_AXIS
+                    // Re-apply TMC5160 configuration when motor driver params change ($200-$253)
+                    // Parameter layout: $2X0 = axis X, $2X1 = axis Y, $2X2 = Z, $2X3 = A
+                    if (param >= 200 && param <= 253) {
+                        uint32_t axis_idx = (uint32_t)param % 10;
+                        if (axis_idx < (uint32_t)NUM_AXIS) {
+                            TMC5160_ApplySettings((E_AXIS)axis_idx, s);
+                        }
+                    }
+#endif
                     
                     handled = true;
                 } else {

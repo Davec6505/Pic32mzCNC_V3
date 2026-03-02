@@ -1,6 +1,56 @@
-# GitHub Copilot Instructions for Pic32mzCNC_V3# GitHub Copilot Instructions for Pic32mzCNC_V3
+# GitHub Copilot Instructions for Pic32mzCNC_V3
+
+## 🔴 CRITICAL: PCB Hardware Constraints — READ BEFORE EDITING GPIO CODE
+
+### Stepper Enable Pin
+- **Single shared enable pin only**: `EnXYZA` (RE6) — `EnXYZA_Set()` / `EnXYZA_Clear()` / `EnXYZA_Toggle()`
+- **There are NO per-axis enable GPIO macros** (`EnX_Set`, `EnY_Set`, etc. do NOT exist in `plib_gpio.h`)
+- All per-axis enable wrappers in `srcs/utils/utils.c` delegate to `enable_all_set()` / `enable_all_clear()`
+- Do NOT introduce `EnX_Set/Clear`, `EnY_Set/Clear`, `EnZ_Set/Clear`, `EnA_Set/Clear` — they will cause compiler errors
+- This applies to BOTH `DRIVER_TMC5160` and `DRIVER_DRV8825` axes on this board
+
+### Driver Selection
+- Per-axis driver type is set in `incs/common.h` via `AXIS_X_DRIVER` … `AXIS_A_DRIVER`
+- Valid values: `DRIVER_TMC5160` or `DRIVER_DRV8825`
+- Do NOT use the old `STEPPER_DRIVER_TMC5160` / `STEPPER_DRIVER_LEGACY` defines — they are removed
+- Use `HAS_TMC5160_AXIS` / `HAS_DRV8825_AXIS` aggregate flags for conditional compilation
+
+---
+
+## 🔴 CRITICAL: Change Tracking Requirements
+
+**ALL code changes MUST be documented in STATUS.md**
+
+For every code addition, modification, or correction:
+- ✅ **DO**: Update `STATUS.md` with: File path, Line number, Function name, Description of change
+- ✅ **DO**: Create planning documents (e.g., LITEPLACER_GRBL_IMPLEMENTATION.md)
+- ❌ **DO NOT**: Create individual .md files for each code change/session
+- ❌ **DO NOT**: Create change log files for corrections or additions
+
+**Example STATUS.md Entry**:
+```
+- `incs/gcode/gcode_parser.h:35` - Added `GCODE_EVENT_PROBE_TOWARD` enum value
+- `srcs/gcode/gcode_parser.c:456` - `parse_command_to_event()` - Added G38.2/G38.3 parsing
+```
 
 All sub README's are under docs/readme
+
+## 🔴 CRITICAL: README.md Must Stay Current
+
+**`README.md` is the authoritative public description of the system. It must be updated whenever code changes affect:**
+- Feature status table (any feature added, completed, or changed)
+- ISR architecture or step sequence
+- Hardware pin assignments or timer configuration
+- New GRBL settings ($-parameters)
+- New safety flags or global state variables
+- Motion pipeline or call hierarchy
+- Build commands or file structure
+
+For every code change session:
+- ✅ **DO**: Update the relevant README.md section(s) to match the new code
+- ✅ **DO**: Update STATUS.md AND README.md when both are affected
+- ❌ **DO NOT**: Leave README.md describing old/removed behaviour (e.g. a phase system that no longer exists)
+- ❌ **DO NOT**: Commit code changes without checking whether README.md needs a corresponding update
 
 ## Project Overview
 
@@ -21,8 +71,6 @@ This is a CNC motion control system for PIC32MZ microcontrollers using hardware 
 - **See**: `docs/readme/ARC_Z_AXIS_FIX_2025-11-21.md` for complete documentation##    Always run make from root directory VI
 
 To ensure proper build configuration and output paths, always execute `make` commands from the root directory of the Pic32mzCNC_V3 project. This guarantees that all relative paths and build settings are correctly applied. makefile incs target is dynamic, it knows the paths no need to add absolute file references, all paths are relative to the root directory.
-
-## Critical Build Rules
 
 ## ­ƒÜÇ Current Implementation Status (November 13, 2025)
 
@@ -2134,3 +2182,143 @@ Major changes (40 files total, 2,499 insertions, 217 deletions):
 
 **System Status**: ­ƒÜÇ **READY FOR PRODUCTION CNC OPERATIONS**
 
+
+---
+
+## TMC5160 SPI Driver - Implementation Plan (February 23, 2026)
+
+**Branch**: `liteplacer`
+**Status**: Planning / Infrastructure Complete - Implementation Pending
+
+### Overview
+
+Add TMC5160 stepper driver support via SPI2. The architecture preserves the existing Step/Dir/Enable GPIO motion system completely - SPI is used exclusively for:
+1. **Startup configuration** - motor current, microstepping, StealthChop, ChopConf registers
+2. **Runtime diagnostics** - DRVSTATUS polling (stall, overtemp, open load, short circuit)
+3. **Phase 2 (future)** - StallGuard2 for sensorless homing
+
+The existing stepper ISR, Bresenham interpolation, OC/TMR timing, and all motion code are **untouched**.
+
+### Infrastructure Completed (February 23, 2026)
+
+#### MCC / Harmony Changes
+- SPI2 peripheral added and configured in MCC (SPI Master mode)
+- MCC regenerated: `srcs/config/config/default/peripheral/spi/spi_master/plib_spi2_master.c/.h`
+- Headers moved to `incs/config/config/default/peripheral/spi/spi_master/` via `make build_dir DRY_RUN=0`
+
+#### Build System Fixes
+- Root `Makefile` - `build_dir` target now forwards `DRY_RUN=$(DRY_RUN)` to inner make
+- `srcs/Makefile` - `SRC_DIRS` wildcard extended from 4 to 6 levels deep to handle `spi/spi_master/` nesting
+
+### Files to Create
+
+```
+srcs/motion/tmc5160.c        - TMC5160 SPI driver implementation
+incs/motion/tmc5160.h        - Register map, config structs, public API
+```
+
+### Architecture - Step/Dir + SPI Config
+
+```
+PIC32MZ                          TMC5160 (per axis)
+SPI2 SCK  ─────────────────────► SCK
+SPI2 MOSI ─────────────────────► SDI
+SPI2 MISO ◄─────────────────────SDO
+CS_X (GPIO) ────────────────────► CSN  (axis X)
+CS_Y (GPIO) ────────────────────► CSN  (axis Y)
+CS_Z (GPIO) ────────────────────► CSN  (axis Z)
+CS_A (GPIO) ────────────────────► CSN  (axis A)
+StepX/DirX ─────────────────────► STEP/DIR (unchanged)
+EnX ────────────────────────────► EN   (unchanged, active low)
+```
+
+CS Strategy: Separate GPIO CS per axis (4 pins) - simpler than daisy-chain, easier to debug.
+
+### TMC5160 Key Registers to Configure at Startup
+
+| Register   | Address | Purpose                                     |
+|------------|---------|---------------------------------------------|
+| GCONF      | 0x00    | Global config (en_pwm_mode for StealthChop) |
+| IHOLD_IRUN | 0x10    | Motor current (hold / run current)          |
+| CHOPCONF   | 0x6C    | Chopper config (microstep resolution)       |
+| PWMCONF    | 0x70    | StealthChop PWM config                      |
+| GSTAT      | 0x01    | Read global status / clear flags            |
+| DRVSTATUS  | 0x6F    | Read driver status (stall, temp, shorts)    |
+
+### SPI Frame Format (TMC5160)
+
+40-bit frame (5 bytes):
+Byte 0:  bit7=Write(1)/Read(0)  bits6:0=Register address
+Bytes 1-4: 32-bit data MSB first
+Response: Previous register read data returned during next transaction
+
+### Planned API (tmc5160.h)
+
+```c
+// Initialization
+void TMC5160_Initialize(void);
+void TMC5160_ConfigAxis(E_AXIS axis);
+
+// Register access
+bool TMC5160_WriteRegister(E_AXIS axis, uint8_t reg, uint32_t data);
+uint32_t TMC5160_ReadRegister(E_AXIS axis, uint8_t reg);
+
+// Diagnostics (non-blocking, called from APP_IDLE rate-limited)
+bool TMC5160_CheckStatus(E_AXIS axis, uint32_t* status_out);
+bool TMC5160_IsOverTemp(E_AXIS axis);
+bool TMC5160_IsOpenLoad(E_AXIS axis);
+
+// Current control
+void TMC5160_SetRunCurrent(E_AXIS axis, uint8_t irun);   // 0-31 scale
+void TMC5160_SetHoldCurrent(E_AXIS axis, uint8_t ihold); // 0-31 scale
+```
+
+### Integration Points in Existing Code
+
+- `srcs/app.c` APP_CONFIG state - Call `TMC5160_Initialize()` at startup
+- `srcs/app.c` APP_IDLE state - Call `TMC5160_CheckStatus()` rate-limited (not every loop)
+- `srcs/motion/stepper.c` - No changes (Step/Dir/Enable fully unchanged)
+- `incs/utils/utils.h` - Add CS GPIO inline functions following existing LED/axis pattern
+
+### CS Pin Assignment (TBD - confirm after PCB/MCC pin manager review)
+
+```c
+// Placeholders - update once physical pins confirmed
+static inline void TMC_CS_X_Set(void)   { /* GPIO */ }
+static inline void TMC_CS_X_Clear(void) { /* GPIO */ }
+// Y, Z, A follow same pattern
+```
+
+### GRBL Settings for TMC5160 — IMPLEMENTED ✅ ($200–$253)
+
+Added to `CNC_Settings` struct (guarded `#ifdef HAS_TMC5160_AXIS`). Persist to NVM flash
+(SETTINGS_VERSION = 3). Changes take effect immediately via `TMC5160_ApplySettings()` — no reboot needed.
+
+| Param      | Axis | Description                                               | Default |
+|------------|------|-----------------------------------------------------------|---------|
+| $200–$203  | X–A  | Chopper mode: 1=StealthChop 2=SpreadCycle 3=Mixed 4=CoolStep | 1   |
+| $210–$213  | X–A  | Run current 0–31 (linear % of Vref)                      | 20      |
+| $220–$223  | X–A  | Hold current 0–31                                         | 10      |
+| $230–$233  | X–A  | Microstep resolution (0=256 … 8=full-step)                | 4 (16µ) |
+| $240–$243  | X–A  | TPWMTHRS — StealthChop→SpreadCycle crossover (Mixed mode) | 500     |
+| $250–$253  | X–A  | TCOOLTHRS — CoolStep lower velocity threshold             | 0       |
+
+Parameter format: `$2XY=value` where X=tens digit (0=mode,1=irun,2=ihold,3=mres,4=pwmthrs,5=coolthrs)
+and Y=axis (0=X, 1=Y, 2=Z, 3=A). Only active when `HAS_TMC5160_AXIS` is defined.
+Handler in `srcs/gcode/gcode_parser.c` calls `TMC5160_ApplySettings((E_AXIS)(param % 10), s)`
+immediately after flash save.
+
+### StallGuard2 / Sensorless Homing (Phase 2 - deferred)
+
+- Read SG_RESULT from DRVSTATUS during homing seek
+- Replace physical limit switch trigger with stall detection threshold
+- Requires careful tuning of SGTHRS per axis and speed
+- Do NOT implement until basic SPI config is validated on hardware
+
+### Rules for TMC5160 Implementation
+
+- DO NOT modify srcs/motion/stepper.c ISR - timing-critical, Step/Dir unchanged
+- DO NOT modify srcs/gcode/gcode_parser.c - working perfectly
+- DO NOT use blocking SPI waits in any ISR context
+- All SPI transactions must be in main loop context only (APP_CONFIG or rate-limited APP_IDLE)
+- Follow LED pattern for CS GPIO - add to axis_cs_set[]/axis_cs_clear[] arrays in utils.c

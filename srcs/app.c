@@ -27,6 +27,7 @@
 #include "utils/uart_utils.h"  // Non-blocking UART utilities
 #include "utils/utils.h"       // For UTILS_InitAxisConfig
 #include "motion.h"
+#include "motion/tmc5160.h"    // TMC5160 SPI stepper driver
 
 // *****************************************************************************
 // *****************************************************************************
@@ -51,6 +52,41 @@
 */
 
 APP_DATA appData;
+
+// *****************************************************************************
+// E-Stop Callback — fired by EXTERNAL_3_InterruptHandler at IPL7
+// RF4 pulled LOW (falling edge) when E-Stop button pressed
+// *****************************************************************************
+static void ESTOP_Callback(EXTERNAL_INT_PIN pin, uintptr_t context)
+{
+    (void)pin;
+    (void)context;
+
+    // Debounce: ignore if pin bounced back HIGH
+    if (ESTOP_Get() != 0U) {
+        return;
+    }
+
+    // 1. Kill all steppers immediately (hardware level)
+    STEPPER_DisableAll();
+
+    // 2. Stop step timer
+    TMR4_Stop();
+
+    // 3. Kill spindle PWM
+    OCMP8_Disable();
+
+    // 4. Flush motion queue
+    appData.motionQueueCount = 0;
+    appData.motionQueueHead  = 0;
+    appData.motionQueueTail  = 0;
+    appData.currentSegment   = NULL;
+
+    // 5. Signal application state machine
+    appData.eStopTriggered = true;
+    appData.alarmCode      = 10;   // GRBL ALARM:10 = E-Stop
+    appData.state          = APP_ALARM;
+}
 
 // *****************************************************************************
 // *****************************************************************************
@@ -119,10 +155,7 @@ void APP_Initialize ( void )
     // ✅ Initialize alarm state
     appData.alarmCode = 0;             // No alarm
     
-    // ✅ Initialize motion phase system (priority-based task scheduler)
-    appData.motionPhase = MOTION_PHASE_IDLE;   // Safe for G-code processing
     appData.dominantAxis = AXIS_X;             // Default dominant axis
-    appData.currentStepInterval = 0;           // No active motion
     appData.currentSegment = NULL;             // No active segment
     
     // ✅ ARRAY-BASED: Initialize Bresenham errors for all axes
@@ -184,7 +217,17 @@ void APP_Tasks ( void )
             STEPPER_Initialize(&appData);                   // ✅ Pass APP_DATA reference for ISR phase signaling
             MOTION_Initialize();                            // Motion planning initialization  
             KINEMATICS_Initialize();                        // Initialize work coordinates
-            
+
+#ifdef HAS_TMC5160_AXIS
+            TMC5160_Initialize();                          // Configure TMC5160 drivers via SPI2
+#endif
+
+            // Register E-Stop callback on INT3 (RF4 via PPS, IPL7)
+            // Button pressed → RF4 pulled LOW → falling edge fires EXTERNAL_3_Handler
+            EVIC_ExternalInterruptCallbackRegister(EXTERNAL_INT_3, ESTOP_Callback, (uintptr_t)NULL);
+            EVIC_SourceStatusClear(INT_SOURCE_EXTERNAL_3);  // Clear any flag set during boot
+            EVIC_ExternalInterruptEnable(EXTERNAL_INT_3);
+
             appData.state = APP_LOAD_SETTINGS;
             break;
         }
@@ -229,7 +272,19 @@ void APP_Tasks ( void )
             // ✅ CRITICAL: Reload stepper invert masks ($0-$5) after settings loaded from flash
             // This ensures direction_invert_mask, step_pulse_invert_mask, enable_invert are current
             STEPPER_ReloadSettings();
-            
+
+#ifdef HAS_TMC5160_AXIS
+            // ✅ Re-apply TMC5160 driver config from flash-loaded settings
+            // TMC5160_Initialize() ran in APP_CONFIG with compile-time defaults;
+            // now apply whatever the user saved via $200-$253 at runtime.
+            {
+                E_AXIS ax;
+                for (ax = AXIS_X; ax < NUM_AXIS; ax++) {
+                    TMC5160_ApplySettings(ax, settings);
+                }
+            }
+#endif
+
             appData.state = APP_GCODE_INIT;
             break;
         }
@@ -245,6 +300,21 @@ void APP_Tasks ( void )
         
         case APP_IDLE:
         {
+
+#ifdef HAS_TMC5160_AXIS
+            // Rate-limited TMC5160 DRVSTATUS diagnostic poll (~10Hz)
+            // Uses CoreTimer tick difference to avoid blocking motion
+            static uint32_t tmc_last_poll = 0;
+            uint32_t tmc_now = CORETIMER_CounterGet();
+            // CoreTimer runs at CPU/2 = 100MHz. 100,000,000 ticks = 1s -> 10Hz = 10,000,000
+            if ((tmc_now - tmc_last_poll) >= 10000000UL) {
+                tmc_last_poll = tmc_now;
+                if (TMC5160_Tasks()) {
+                    // Fault detected — log (alarm handling can be added here later)
+                    UART_Printf("[TMC5160] Driver fault detected!\r\n");
+                }
+            }
+#endif
 
             // ===== PROCESS G-CODE FIRST (EVERY ITERATION) =====
             // Flow control uses appData.motionQueueCount directly (no sync needed)
@@ -269,6 +339,84 @@ void APP_Tasks ( void )
             // Generate arc segments one at a time when arc is active
             if(appData.arcGenState == ARC_GEN_ACTIVE) {
                 MOTION_Arc(&appData);
+            }
+            
+            // ===== PROBE MONITORING (G38.x COMMANDS) =====
+            // Check probe input during motion and handle trigger/failure
+            if (appData.probeState == PROBE_STATE_MOVING) {
+                // Check if probe input triggered (Z-max with $6 invert applied)
+                CNC_Settings* settings = SETTINGS_GetCurrent();
+                bool probe_triggered = PROBE_Get(settings->probe_invert);
+                
+                if (probe_triggered) {
+                    // ✅ PROBE TRIGGERED - Stop motion immediately
+                    DEBUG_PRINT_MOTION("[PROBE] Triggered! Stopping motion\r\n");
+                    
+                    // Stop all motion
+                    TMR4_Stop();
+                    OCMP1_Disable();
+                    STEPPER_DisableAll();
+                    
+                    // Clear motion queue
+                    appData.motionQueueHead = 0;
+                    appData.motionQueueTail = 0;
+                    appData.motionQueueCount = 0;
+                    appData.currentSegment = NULL;
+                    
+                    // Save trigger position (current position is exact trigger point)
+                    appData.probePosition.coordinate[AXIS_X] = appData.current[AXIS_X];
+                    appData.probePosition.coordinate[AXIS_Y] = appData.current[AXIS_Y];
+                    appData.probePosition.coordinate[AXIS_Z] = appData.current[AXIS_Z];
+                    appData.probePosition.coordinate[AXIS_A] = appData.current[AXIS_A];
+                    
+                    // Mark success and transition to triggered state
+                    appData.probeSuccess = true;
+                    appData.probeState = PROBE_STATE_TRIGGERED;
+                    
+                } else if (appData.motionQueueCount == 0 && !appData.probeSuccess) {
+                    // ✅ PROBE FAILED - Reached target without trigger
+                    DEBUG_PRINT_MOTION("[PROBE] Failed - no trigger detected\r\n");
+                    appData.probeState = PROBE_STATE_FAILED;
+                }
+            }
+            
+            // Handle probe completion (triggered or failed)
+            if (appData.probeState == PROBE_STATE_TRIGGERED) {
+                // Send probe result: [PRB:x,y,z,a:1]
+                UART_Printf("[PRB:%.3f,%.3f,%.3f,%.3f:1]\r\n",
+                           appData.probePosition.coordinate[AXIS_X],
+                           appData.probePosition.coordinate[AXIS_Y],
+                           appData.probePosition.coordinate[AXIS_Z],
+                           appData.probePosition.coordinate[AXIS_A]);
+                UART_SendOK();
+                
+                // Reset probe state
+                appData.probeState = PROBE_STATE_IDLE;
+                
+                DEBUG_PRINT_MOTION("[PROBE] Success reported\r\n");
+                
+            } else if (appData.probeState == PROBE_STATE_FAILED) {
+                if (appData.probeAlarmOnFail) {
+                    // G38.2 or G38.4 - Trigger ALARM
+                    UART_Printf("ALARM:5\r\n");  // Probe fail alarm
+                    appData.state = APP_ALARM;
+                    appData.alarmCode = 5;
+                    
+                    DEBUG_PRINT_MOTION("[PROBE] ALARM:5 triggered (probe failed)\r\n");
+                } else {
+                    // G38.3 or G38.5 - No alarm, just report failure
+                    UART_Printf("[PRB:%.3f,%.3f,%.3f,%.3f:0]\r\n",
+                               appData.current[AXIS_X],
+                               appData.current[AXIS_Y],
+                               appData.current[AXIS_Z],
+                               appData.current[AXIS_A]);
+                    UART_SendOK();
+                    
+                    DEBUG_PRINT_MOTION("[PROBE] Failure reported (no alarm)\r\n");
+                }
+                
+                // Reset probe state
+                appData.probeState = PROBE_STATE_IDLE;
             }
             
             // ===== HOMING STATE MACHINE (NON-BLOCKING) =====
@@ -460,7 +608,14 @@ void APP_Tasks ( void )
                 DEBUG_PRINT_APP("[APP_ALARM] Hard limit suppression cleared - all limits released\r\n");
             }
             
-            // ✅ Check if alarm cleared by $X command
+            // ✅ Report E-Stop alarm once to host
+            if (appData.eStopTriggered) {
+                UART_Printf("ALARM:10\r\n");  // E-Stop asserted
+                appData.eStopTriggered = false;
+                // Recovery: host must send Ctrl+X (soft reset) to clear
+            }
+
+            // ✅ Check if alarm cleared by $X command (hard limit)
             if (!g_hard_limit_alarm && appData.alarmCode == 1) {
                 // Hard limit alarm cleared - return to IDLE
                 DEBUG_PRINT_APP("[APP] Hard limit alarm cleared, returning to IDLE\r\n");

@@ -125,36 +125,30 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
             break;
             
         case HOMING_STATE_PULLOFF:
-            // APP.C handles limit clearing and transitions to COMPLETE
-            // Here we just wait for motion to complete
-            if (!g_homing.motion_active && appData->motionQueueCount == 0) {
-                DEBUG_PRINT_GCODE("[HOMING] PULLOFF motion complete\r\n");
-                // APP.C should have already transitioned to COMPLETE if limit cleared
-                // If we're still here, keep waiting
+            // Pulloff complete when motion queue drains — advance to COMPLETE.
+            // motion_active flag is NOT reliable here (set true by StartPulloff, never cleared
+            // by the ISR path), so check motionQueueCount alone.
+            if (appData->motionQueueCount == 0 && !appData->motionActive) {
+                DEBUG_PRINT_GCODE("[HOMING] PULLOFF complete → COMPLETE\r\n");
+                g_homing.motion_active = false;
+                g_homing.state = HOMING_STATE_COMPLETE;
             }
             break;
             
         case HOMING_STATE_COMPLETE:
-            // Homing complete - set position based on homing direction
+            // Homing complete - step counter was already zeroed at the LOCATE trigger
+            // (machine position 0 = home switch). After pulloff, step counter reflects
+            // +pull_off_distance (MIN) or max_travel-pull_off_distance (MAX).
+            // Sync appData.current[] from step counters so the motion planner agrees.
             g_homing.axes_homed |= (1 << g_homing.current_axis);
-            
-            // Determine if homed to MAX or MIN
-            CNC_Settings* settings = SETTINGS_GetCurrent();
-            uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
-            bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
-            
-            float home_position = 0.0f;
-            if (home_positive) {
-                // Homing to MAX - set to max travel value (use array index)
-                home_position = settings->max_travel[g_homing.current_axis];
-                DEBUG_PRINT_MOTION("[HOMING_COMPLETE] Axis %d homed to MAX, position=%.3f\r\n",
-                                  g_homing.current_axis, home_position);
-            } else {
-                DEBUG_PRINT_MOTION("[HOMING_COMPLETE] Axis %d homed to MIN, position=0.0\r\n",
-                                  g_homing.current_axis);
+            {
+                float machine_pos = (float)AXIS_GetSteps(g_homing.current_axis) /
+                                    (*g_axis_settings[g_homing.current_axis].steps_per_mm);
+                appData->current[g_homing.current_axis] = machine_pos;
+                DEBUG_PRINT_MOTION("[HOMING_COMPLETE] Axis %d: step_count=%ld, MPos=%.3f\r\n",
+                                  g_homing.current_axis,
+                                  (long)AXIS_GetSteps(g_homing.current_axis), machine_pos);
             }
-            
-            KINEMATICS_SetAxisMachinePosition(g_homing.current_axis, home_position);
             
             if (HOMING_NextAxis()) {
                 g_homing.state = HOMING_STATE_SEEK;

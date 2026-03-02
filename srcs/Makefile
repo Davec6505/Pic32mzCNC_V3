@@ -36,7 +36,7 @@ endif
 
 # RM command with dry run and logging support to remove files matching a pattern in a directory
 ifeq ($(OS),Windows_NT)
-	RM = powershell -NoProfile -ExecutionPolicy Bypass -Command \
+	RM = powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \
 	"\$$ConfirmPreference = 'None'; \
 	\$$dryRun = '$(DRY_RUN)' -eq '1'; \
 	\$$logPath = \$$env:LOG_PATH; \
@@ -46,7 +46,8 @@ ifeq ($(OS),Windows_NT)
 		Write-Host ('Would delete: ' + \$$item.FullName) -ForegroundColor Red; \
 		if (\$$logPath) { Add-Content -Path \$$logPath -Value ('Would delete: ' + \$$item.FullName) } \
 		} else { \
-		Remove-Item \$$item.FullName -Force -ErrorAction SilentlyContinue; \
+		Set-ItemProperty -Path \$$item.FullName -Name IsReadOnly -Value \$$false -ErrorAction SilentlyContinue; \
+		Microsoft.PowerShell.Management\Remove-Item \$$item.FullName -Force -Confirm:\$$false -ErrorAction SilentlyContinue; \
 		if (Test-Path \$$item.FullName) { \
 			Write-Host ('Warning: Could not delete ' + \$$item.FullName) -ForegroundColor Yellow; \
 			if (\$$logPath) { Add-Content -Path \$$logPath -Value ('Warning: Could not delete ' + \$$item.FullName) } \
@@ -100,20 +101,16 @@ endif
 # The other directory is used to store other files such as maps and XML files.
 ROOT     := ..
 
-# Build configuration: Default, Debug, or Release
-# Controls optimization level and output directory structure
-BUILD_CONFIG ?= Default
-
-# Output directories based on configuration
+# Output directories (flat - no Debug/Release subdirectories)
 BASE_BIN_DIR  := $(ROOT)/bins
 BASE_LIB_DIR  := $(ROOT)/libs
 BASE_OBJ_DIR  := $(ROOT)/objs
 BASE_OUT_DIR  := $(ROOT)/other
 
-BIN_DIR  := $(BASE_BIN_DIR)/$(BUILD_CONFIG)
-LIB_DIR  := $(BASE_LIB_DIR)/$(BUILD_CONFIG)
-OBJ_DIR  := $(BASE_OBJ_DIR)/$(BUILD_CONFIG)
-OUT_DIR  := $(BASE_OUT_DIR)/$(BUILD_CONFIG)
+BIN_DIR  := $(BASE_BIN_DIR)
+LIB_DIR  := $(BASE_LIB_DIR)
+OBJ_DIR  := $(BASE_OBJ_DIR)
+OUT_DIR  := $(BASE_OUT_DIR)
 
 INC_DIR  := $(ROOT)/incs
 SRC_DIR  := $(ROOT)/srcs
@@ -189,32 +186,17 @@ endif
 OPT_LEVEL ?= 1
 
 # Configuration-specific compiler flags
-# Only validate BUILD_CONFIG when actually building (not for build_dir, clean, etc.)
-ifneq ($(filter-out build_dir clean clean_all rem_dir mk_dir debug debug_path,$(MAKECMDGOALS)),)
-  ifeq ($(BUILD_CONFIG),Debug)
-      # Debug: Full debug symbols, no optimization, debug defines
-      OPT_FLAGS := -g3 -O0
-      CONFIG_DEFINES := -DDEBUG -DXPRJ_Debug=Debug
-      # Debug builds enable DEBUG_MOTION_BUFFER by default
-      DEBUG_MOTION_BUFFER := 1
-      $(info *** DEBUG BUILD: -g3 -O0 with debug symbols ***)
-  else ifeq ($(BUILD_CONFIG),Release)
-      # Release: Uses OPT_LEVEL from root Makefile (default: -O1)
-      OPT_FLAGS := -g -O$(OPT_LEVEL)
-      CONFIG_DEFINES := -DXPRJ_Release=Release
-      $(info *** RELEASE BUILD: -g -O$(OPT_LEVEL) ***)
-  else
-      # Invalid configuration - error out
-      $(error Invalid BUILD_CONFIG: $(BUILD_CONFIG). Use Debug or Release)
-  endif
-endif
+# Use OPT_LEVEL from root Makefile (default: 1)
+OPT_FLAGS := -g -O$(OPT_LEVEL)
+CONFIG_DEFINES :=
+$(info *** BUILD: -g -O$(OPT_LEVEL) ***)
 
 # ===== DEBUG FLAGS SYSTEM =====
 # Elegant compile-time debug control with zero runtime overhead
 # See incs/common.h for complete documentation
 #
 # Usage from root Makefile:
-#   make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"
+#   make DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"
 #
 # Available flags (enable multiple simultaneously):
 #   DEBUG_MOTION   - Motion planning and segment execution
@@ -257,7 +239,7 @@ endif
 # Assign all Include directories dynamically, first run "make build_dir" from terminal.
 # Get all directories under INC_DIR recursively (up to 4 levels deep)
 define get_inc_dirs
-$(sort $(dir $(wildcard $(1)/*/)) $(dir $(wildcard $(1)/*/*/)) $(dir $(wildcard $(1)/*/*/*/)) $(dir $(wildcard $(1)/*/*/*/*/)))
+$(sort $(dir $(wildcard $(1)/*/)) $(dir $(wildcard $(1)/*/*/)) $(dir $(wildcard $(1)/*/*/*/)) $(dir $(wildcard $(1)/*/*/*/*/)) $(dir $(wildcard $(1)/*/*/*/*/*/)))
 endef
 
 INC_SUBDIRS := $(call get_inc_dirs,$(INC_DIR))
@@ -287,7 +269,7 @@ DIRECT_OBJ := $(CC) $(OPT_FLAGS) -c $(MCU) -ffunction-sections -fdata-sections -
 
 LINKER_SCRIPT := $(DFP)/xc32/$(DEVICE)/p$(DEVICE).ld
 # ✅ Add FPU + MIPS flags to linker (must match compiler flags)
-DIRECT_LINK := $(CC) $(MCU) -nostartfiles $(FPU_FLAGS) $(MIPS_FLAGS) $(CONFIG_DEFINES) -mdfp="$(DFP)" -Wl,--defsym=__MPLAB_BUILD=1,--script="$(LINKER_SCRIPT)",--defsym=_min_heap_size=$(HEAP_SIZE),--defsym=_min_stack_size=$(STACK_SIZE),--gc-sections,--no-code-in-dinit,--no-dinit-in-serial-mem,-Map="$(OUT_DIR)/$(BUILD_CONFIG).map",--memorysummary,$(OUT_DIR)/memoryfile.xml 
+DIRECT_LINK := $(CC) $(MCU) -nostartfiles $(FPU_FLAGS) $(MIPS_FLAGS) $(CONFIG_DEFINES) -mdfp="$(DFP)" -Wl,--defsym=__MPLAB_BUILD=1,--script="$(LINKER_SCRIPT)",--defsym=_min_heap_size=$(HEAP_SIZE),--defsym=_min_stack_size=$(STACK_SIZE),--gc-sections,--no-code-in-dinit,--no-dinit-in-serial-mem,-Map="$(OUT_DIR)/CS23.map",--memorysummary,$(OUT_DIR)/memoryfile.xml 
 
 
 
@@ -377,7 +359,7 @@ platform:
 # This is useful for organizing the build output and include files.
 # To run this target, use: make build_dir
 # Get all directories under SRC_DIR dynamically (similar to how we get source files)
-SRC_DIRS := $(sort $(dir $(wildcard $(SRC_DIR)/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/*/)))
+SRC_DIRS := $(sort $(dir $(wildcard $(SRC_DIR)/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/*/*/)) $(dir $(wildcard $(SRC_DIR)/*/*/*/*/*/*/)))
 # Filter out startup directory from automatic creation and convert to relative paths
 SRC_SUBDIRS := $(sort $(filter-out startup/,$(SRC_DIRS:$(SRC_DIR)/%=%)))
 
@@ -390,10 +372,7 @@ build_dir:
 	@$(call MKDIR,$(BASE_OUT_DIR))
 	@$(call MKDIR,$(SRC_DIR))
 	@$(call MKDIR,$(INC_DIR))
-	@echo "Creating bins/Debug and bins/Release for final executables..."
-	@$(call MKDIR,$(BASE_BIN_DIR)/Debug)
-	@$(call MKDIR,$(BASE_BIN_DIR)/Release)
-	@echo "Creating configuration-specific working directories for $(BUILD_CONFIG)..."
+	@echo "Creating working directories..."
 	@$(call MKDIR,$(LIB_DIR))
 	@$(call MKDIR,$(OBJ_DIR))
 	@$(call MKDIR,$(OUT_DIR))
@@ -448,7 +427,7 @@ debug_path:
 # Display the source files, object files, and include directories
 debug:
 	@echo "Build system debug info ($(detected_OS)):"
-	@echo "Build configuration: $(BUILD_CONFIG)"
+	@echo "Build configuration: single (no Debug/Release split)"
 	@echo "Use shared library: $(USE_SHARED_LIB)"
 	@echo "Executable target: $(BIN_DIR)/$(MODULE)"
 	@echo "Library target: $(LIB_DIR)/libCS23shared.a"

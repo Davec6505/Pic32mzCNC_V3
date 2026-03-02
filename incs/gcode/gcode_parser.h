@@ -57,7 +57,8 @@ typedef struct {
     union {
         struct {
             float x, y, z, a;    // Target coordinates
-            float feedrate;      // Feed rate in units/min
+            float feedrate;      // Feed rate in units/min (0 = use modal/rapid)
+            bool  isRapid;       // true = G0 rapid (use max_rate), false = G1 feed
         } linearMove;
         
         struct {

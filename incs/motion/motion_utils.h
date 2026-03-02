@@ -26,8 +26,8 @@
 // Direction GPIO pin numbers (indexed by E_AXIS)
 extern const GPIO_PIN DIR_PINS[AXIS_COUNT];
 
-// Enable GPIO pin numbers (indexed by E_AXIS)
-extern const GPIO_PIN EN_PINS[AXIS_COUNT];
+// Enable GPIO: PCB has ONE shared EnXYZA pin — no per-axis EN_PINS array.
+// Use STEPPERS_Enable() / STEPPERS_Disable() or MOTION_UTILS_EnableAllAxes().
 
 // Step GPIO pin numbers (indexed by E_AXIS) - read only
 extern const GPIO_PIN STEP_PINS[AXIS_COUNT];

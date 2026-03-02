@@ -19,163 +19,14 @@
 #include "../config/default/peripheral/gpio/plib_gpio.h"  // Required for DEBUG_EXEC_XXX LED toggles
 
 // ============================================================================
-// Motion State Machine (Non-Blocking Architecture)
-// ============================================================================
-// This state machine runs every APP_Tasks() iteration during motion.
-// Static variables persist across scans (like ISR variables would).
-// All motion logic runs here - ISRs only count positions.
-// ============================================================================
-
-typedef enum {
-    MOTION_STATE_IDLE,              // Waiting for segment from queue
-    MOTION_STATE_LOAD_SEGMENT,      // Load new segment and initialize
-    MOTION_STATE_EXECUTING,         // Active motion with Bresenham + velocity profiling
-    MOTION_STATE_SEGMENT_COMPLETE   // Segment done, move to next
-} MotionState;
-
-// ============================================================================
-// Static Variables (Persist Across Scans - Like ISR Variables)
-// ============================================================================
-
-static MotionState motion_state = MOTION_STATE_IDLE;
-static MotionSegment* current_segment = NULL;
-
-// Velocity profiling state (Bresenham now in ISR)
-static uint32_t current_step_interval = 0;   // Timer ticks between steps
-static uint32_t steps_completed = 0;         // Steps executed in current segment
-
 // ============================================================================
 // Initialization
 // ============================================================================
 
 void MOTION_Initialize(void) {
-    motion_state = MOTION_STATE_IDLE;
-    current_segment = NULL;
+    // Velocity profiling and Bresenham execute inside OCP1_ISR (shadow register set).
+    // No main-loop state to initialise.
 }
-
-// ============================================================================
-// Motion Tasks - Non-Blocking State Machine (Runs Every APP_Tasks Iteration)
-// ============================================================================
-
-void MOTION_SegmentTasks(MotionSegment motionQueue[], uint32_t* head, uint32_t* tail, uint32_t* count) {
-    
-    switch(motion_state) {
-        // ====================================================================
-        // IDLE: Wait for segment from queue
-        // ====================================================================
-        case MOTION_STATE_IDLE:
-            if (*count > 0) {
-                // Segment available - transition to load state
-                motion_state = MOTION_STATE_LOAD_SEGMENT;
-            }
-            break;
-            
-        // ====================================================================
-        // LOAD_SEGMENT: Initialize new segment for execution
-        // ====================================================================
-        case MOTION_STATE_LOAD_SEGMENT:
-        {
-            // Get segment from tail of circular buffer
-            current_segment = &motionQueue[*tail];
-            
-            // ✅ NEW ARCHITECTURE: Load entire segment into stepper module
-            // This sets directions, Bresenham errors, deltas, and initial PR2
-            STEPPER_LoadSegment(current_segment);
-            
-            // Initialize local velocity state
-            current_step_interval = current_segment->initial_rate;
-            steps_completed = 0;
-            
-            // Transition to executing state
-            motion_state = MOTION_STATE_EXECUTING;
-            break;
-        }
-            
-        // ====================================================================
-        // EXECUTING: Monitor segment completion and update velocity (PR2)
-        // ====================================================================
-        case MOTION_STATE_EXECUTING:
-        {
-            // ✅ DWELL SEGMENT: Check timer instead of steps
-            if (current_segment->type == SEGMENT_TYPE_DWELL) {
-                if (STEPPER_IsDwellComplete()) {
-                    motion_state = MOTION_STATE_SEGMENT_COMPLETE;
-                }
-                break;  // Don't check steps or velocity for dwell
-            }
-            
-            // ✅ MOTION SEGMENT (LINEAR/ARC): Check steps and update velocity
-            // ✅ DEBUG: Check completion status periodically
-            static uint32_t debug_check_counter = 0;
-            if (++debug_check_counter >= 1000) {
-                debug_check_counter = 0;
-            }
-            
-            // Check if segment is complete (ISR updates steps_completed)
-            if (current_segment->steps_completed >= current_segment->steps_remaining) {
-                motion_state = MOTION_STATE_SEGMENT_COMPLETE;
-                break;
-            }
-            
-            // ============================================================
-            // VELOCITY PROFILING - Update PR2 based on acceleration state
-            // ============================================================
-            uint32_t new_rate;
-            
-            if (current_segment->steps_completed < current_segment->accelerate_until) {
-                // ACCELERATION PHASE - decrease rate (increase speed)
-                new_rate = current_segment->initial_rate - 
-                    (current_segment->steps_completed * current_segment->rate_delta);
-                if (new_rate < current_segment->nominal_rate) {
-                    new_rate = current_segment->nominal_rate;
-                }
-                
-            } else if (current_segment->steps_completed >= current_segment->decelerate_after) {
-                // DECELERATION PHASE - increase rate (decrease speed)
-                uint32_t decel_steps = current_segment->steps_completed - current_segment->decelerate_after;
-                new_rate = current_segment->nominal_rate + 
-                    (decel_steps * current_segment->rate_delta);
-                if (new_rate > current_segment->final_rate) {
-                    new_rate = current_segment->final_rate;
-                }
-                
-            } else {
-                // CRUISE PHASE - constant speed
-                new_rate = current_segment->nominal_rate;
-            }
-            
-            // Update step rate if changed
-            if (new_rate != current_step_interval) {
-                current_step_interval = new_rate;
-                STEPPER_SetStepRate(new_rate);  // Updates PR2
-            }
-            
-            break;
-        }
-            
-        // ====================================================================
-        // SEGMENT_COMPLETE: Dequeue and move to next segment or idle
-        // ====================================================================
-        case MOTION_STATE_SEGMENT_COMPLETE:
-        {
-            // Remove segment from queue
-            *tail = (*tail + 1) % MAX_MOTION_SEGMENTS;
-            (*count)--;
-            
-            // Check if more segments available
-            if (*count > 0) {
-                // Load next segment immediately (no gap in motion)
-                motion_state = MOTION_STATE_LOAD_SEGMENT;
-            } else {
-                // No more segments - return to idle
-                current_segment = NULL;
-                motion_state = MOTION_STATE_IDLE;
-            }
-            break;
-        }
-    }
-}
-
 
 void MOTION_Tasks(APP_DATA* appData) {
     // ===== SIMPLIFIED MOTION CONTROL (NEW ARCHITECTURE) =====
@@ -211,75 +62,13 @@ void MOTION_Tasks(APP_DATA* appData) {
         // Update dominant axis tracker for ISR
         appData->dominantAxis = appData->currentSegment->dominant_axis;
         
-        // Set initial step rate (PR4 controls OC1 period)
-        STEPPER_SetStepRate(appData->currentSegment->initial_rate);
-        
-        
         return;  // Exit and let ISR start stepping
-    }
-    
-    // ===== 2. VELOCITY PROFILING (DURING MOTION) =====
-    // Update step rate based on acceleration/cruise/decel
-    if(appData->currentSegment != NULL) {
-        MotionSegment* seg = appData->currentSegment;
-        
-        // ✅ TRAPEZOIDAL VELOCITY PROFILING
-        uint32_t new_rate;
-        
-        if(seg->steps_completed < seg->accelerate_until) {
-            // ✅ ACCELERATION PHASE
-            // Rate decreases (interval gets shorter, speed increases)
-            // Guard against underflow from multiplication overflow
-            int32_t rate_change = (int32_t)seg->steps_completed * abs(seg->rate_delta);
-            if (rate_change > (int32_t)seg->initial_rate) {
-                new_rate = seg->nominal_rate;  // Clamp to nominal if underflow would occur
-            } else {
-                new_rate = seg->initial_rate - rate_change;
-                
-                // Clamp to nominal rate (don't overshoot)
-                if(new_rate < seg->nominal_rate) {
-                    new_rate = seg->nominal_rate;
-                }
-            }
-            
-        } else if(seg->steps_completed > seg->decelerate_after) {
-            // ✅ DECELERATION PHASE
-            // Rate increases (interval gets longer, speed decreases)
-            uint32_t decel_steps = seg->steps_completed - seg->decelerate_after;
-            int32_t rate_change = (int32_t)decel_steps * abs(seg->rate_delta);
-            
-            new_rate = seg->nominal_rate + rate_change;
-            
-            // Clamp to final rate (don't slow below minimum)
-            if(new_rate > seg->final_rate) {
-                new_rate = seg->final_rate;
-            }
-            
-        } else {
-            // ✅ CRUISE PHASE (constant velocity)
-            new_rate = seg->nominal_rate;
-        }
-        
-        // Update PR2 if rate changed (non-blocking, single register write)
-        if(new_rate != appData->currentStepInterval) {
-            STEPPER_SetStepRate(new_rate);
-            appData->currentStepInterval = new_rate;
-            
-        }
     }
     
     // ===== 3. SEGMENT COMPLETION CHECK =====
     // Check if current segment is done (ISR updates steps_completed)
     if(appData->currentSegment != NULL) {
         MotionSegment* seg = appData->currentSegment;
-        
-        // ✅ DEBUG: Periodic completion check
-        static uint32_t completion_check_counter = 0;
-        if (++completion_check_counter >= 5000) {
-            completion_check_counter = 0;
-            DEBUG_PRINT_MOTION("[CHECK] steps_completed=%lu, steps_remaining=%lu\r\n",
-                seg->steps_completed, seg->steps_remaining);
-        }
         
         if(seg->steps_completed >= seg->steps_remaining) {
             // ===== DEBUG: Segment Completion =====
@@ -300,19 +89,81 @@ void MOTION_Tasks(APP_DATA* appData) {
             // TMR4 runs continuously across segments for smooth multi-segment motion
             // Only stop when the complete distance has been reached (no more segments)
             if(appData->motionQueueCount == 0) {
-                TMR4_Stop();
-                appData->motionActive = false;  // Mark motion fully stopped
+                // ✅ FEED HOLD: finalize hold if '!' was pending a segment drain
+                if (g_feed_hold_pending) {
+                    STEPPER_FinalizeHold();  // Hold:1 → Hold:0, stops TMR4/OC1
+                } else {
+                    TMR4_Stop();
+                    appData->motionActive = false;
+                }
             }
         }
     }
 }
+
+// ============================================================================
+// Look-Ahead Helper: Recompute Exit Profile
+// ============================================================================
+// Called when the NEXT segment's entry speed (junction speed) is known.
+// Patches the exit side of a queued-but-not-executing segment so it decelerates
+// to the correct speed instead of always grinding down to safe-start (8.33 mm/s).
+// Updates: exit_speed_mms, final_rate, decelerate_after, accel_count_decel.
+// Safe to call only on segments that are NOT currentSegment (motionQueueTail).
+// ============================================================================
+static void MOTION_RecomputeExit(MotionSegment* seg, float new_exit_mms) {
+    const float TIMER_FREQ = (float)TMR4_FrequencyGet();
+    float steps_per_mm = *g_axis_settings[seg->dominant_axis].steps_per_mm;
+    float accel        = seg->acceleration;
+
+    // Cruise speed in mm/s (nominal_rate is ticks — lower ticks = faster speed)
+    float nominal_mms = (TIMER_FREQ / (float)seg->nominal_rate) / steps_per_mm;
+
+    // Clamp: exit can't exceed cruise or go negative
+    if (new_exit_mms > nominal_mms) new_exit_mms = nominal_mms;
+    if (new_exit_mms < 0.0f)        new_exit_mms = 0.0f;
+    seg->exit_speed_mms = new_exit_mms;
+
+    // Recompute final_rate from new exit speed
+    float exit_steps_per_sec = new_exit_mms * steps_per_mm;
+    if (exit_steps_per_sec < 1.0f) exit_steps_per_sec = 1.0f;
+    uint32_t new_final = (uint32_t)(TIMER_FREQ / exit_steps_per_sec);
+    if (new_final < seg->nominal_rate) new_final = seg->nominal_rate;
+    seg->final_rate = new_final;
+
+    // Recompute decelerate_after:
+    // decel distance = (v_nominal² - v_exit²) / (2 * a)
+    float decel_dist_mm = (nominal_mms * nominal_mms - new_exit_mms * new_exit_mms) / (2.0f * accel);
+    if (decel_dist_mm < 0.0f) decel_dist_mm = 0.0f;
+    uint32_t decel_steps = (uint32_t)(decel_dist_mm * steps_per_mm);
+    if (decel_steps > seg->steps_remaining) decel_steps = seg->steps_remaining;
+
+    uint32_t new_decel_after = seg->steps_remaining - decel_steps;
+    // Decel start must be at or after the acceleration end
+    if (new_decel_after < seg->accelerate_until) new_decel_after = seg->accelerate_until;
+    seg->decelerate_after = new_decel_after;
+
+    // accel_count_decel = -(decel_steps + n_exit)
+    // Mirrors the formula in KINEMATICS_LinearMove.
+    // n_exit = Taylor index corresponding to the exit speed — ISR ramps from -(decel_steps+n_exit)
+    // back toward -n_exit, landing exactly at exit_v.
+    int32_t n_exit_calc = (int32_t)(2.0f * new_exit_mms * new_exit_mms * steps_per_mm / accel) - 1;
+    if (n_exit_calc < 0) n_exit_calc = 0;
+    seg->accel_count_decel = -((int32_t)decel_steps + n_exit_calc);
+    if (seg->accel_count_decel >= 0) seg->accel_count_decel = -1;  // Safety: must start negative
+}
+
 void MOTION_Arc(APP_DATA* appData) {
 
-    // Only generate if arc is active and motion queue has space
-    if(appData->arcGenState != ARC_GEN_ACTIVE || appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+    // Only generate if arc is active
+    if(appData->arcGenState != ARC_GEN_ACTIVE) {
         return;
     }
-    
+
+    // ✅ FILL QUEUE: loop until queue is full or arc is complete.
+    // Generating one segment at a time caused stop/go jitter because the
+    // main loop could not refill faster than the ISR consumed segments.
+    while(appData->arcGenState == ARC_GEN_ACTIVE &&
+          appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
 
     CoordinatePoint next;
     bool is_last_segment = false;
@@ -360,6 +211,7 @@ void MOTION_Arc(APP_DATA* appData) {
     
     // Use simple linear move for arc segments (no junction planning needed for smooth arcs)
     KINEMATICS_LinearMoveSimple(appData->arcCurrent, next, appData->arcFeedrate, segment);
+    segment->speed_locked = true;   // arc cruise is fixed — look-ahead must not modify this segment
 
     // Add to motion queue
     appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
@@ -378,6 +230,8 @@ void MOTION_Arc(APP_DATA* appData) {
     
     // Increment segment counter
     appData->arcSegmentCurrent++;
+
+    } // end while(arcGenState == ARC_GEN_ACTIVE && queue not full)
 }
 
 
@@ -468,15 +322,43 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             }
             */
             
-            // Use feedrate from event, or modal feedrate if not specified
+            // Use feedrate from event, or rapid/modal feedrate if not specified
             float feedrate = event->data.linearMove.feedrate;
-            if (feedrate == 0.0f) {
-                // If modal is also zero (e.g., after reset), apply a safe default (600 mm/min)
+            if (event->data.linearMove.isRapid) {
+                // ✅ G0 RAPID: compute vector feedrate from per-axis max_rate settings
+                // Finds the maximum feedrate that doesn't exceed any axis's max_rate.
+                // Algorithm: the slowest axis limits the move (GRBL inverse-time approach).
+                CNC_Settings* rsettings = SETTINGS_GetCurrent();
+                float delta_mm[NUM_AXIS];
+                float total_dist = 0.0f;
+                for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                    delta_mm[axis] = fabsf(GET_COORDINATE_AXIS(&end, axis) - GET_COORDINATE_AXIS(&start, axis));
+                    total_dist += delta_mm[axis] * delta_mm[axis];
+                }
+                total_dist = sqrtf(total_dist);
+                if (total_dist > 0.001f) {
+                    // Find smallest (max_rate[axis]/delta[axis]) ratio — that axis is the bottleneck
+                    float min_time_sec = 0.0f;
+                    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                        if (delta_mm[axis] > 0.001f) {
+                            float axis_time = delta_mm[axis] / (rsettings->max_rate[axis] / 60.0f);  // sec
+                            if (axis_time > min_time_sec) min_time_sec = axis_time;
+                        }
+                    }
+                    feedrate = (min_time_sec > 0.0f) ? (total_dist / min_time_sec * 60.0f) : rsettings->max_rate[AXIS_X];
+                } else {
+                    feedrate = rsettings->max_rate[AXIS_X];  // Zero-length rapid — doesn't matter
+                }
+                DEBUG_PRINT_MOTION("[RAPID] G0 feedrate=%.0f mm/min (from max_rate)\r\n", feedrate);
+                // G0 does NOT update modalFeedrate (G0 speed is not modal)
+            } else if (feedrate == 0.0f) {
+                // G1 with no F word: use modal feedrate
                 if (appData->modalFeedrate <= 0.0f) {
                     appData->modalFeedrate = 600.0f;
                 }
                 feedrate = appData->modalFeedrate;
             } else {
+                // G1 with explicit F word: update modal feedrate
                 appData->modalFeedrate = feedrate;
             }
             
@@ -488,26 +370,35 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             // Get next queue slot
             MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
               
-            // ===== JUNCTION PLANNING: Calculate entry and exit velocities =====
-            float entry_velocity = 8.33f;  // Default: start from minimum speed (500 mm/min)
-            float exit_velocity = 8.33f;   // Default: decelerate to stop
-            
-            // Check if we can apply junction deviation with previous segment
+            // ===== LOOK-AHEAD JUNCTION PLANNING =====
+            // entry_velocity : speed this segment starts at  (from N-1→N junction angle)
+            // exit_velocity  : placeholder safe-start        (patched when segment N+1 arrives)
+            // junction_speed : saved so we can retroactively patch N-1's exit after queuing N
+            //
+            // Use 0.0f so kinematics.c safe_start floor (sqrt(2*a/steps_per_mm)) applies.
+            // This is physically correct: the motor starts at the max speed it can achieve
+            // in a single step from rest, not an arbitrary hardcoded 500mm/min.
+            float feedrate_mm_sec_local = feedrate / 60.0f;
+            float entry_velocity     = 0.0f;
+            float exit_velocity      = 0.0f;
+            float junction_speed     = 0.0f;
+            (void)feedrate_mm_sec_local;
+            uint32_t look_prev_index = 0;
+            bool     has_prev_patch  = false;
+
             if (appData->motionQueueCount > 0) {
-                // Get previous segment for junction analysis
-                uint32_t prev_index = (appData->motionQueueHead - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
-                MotionSegment* prev_segment = &appData->motionQueue[prev_index];
-                
-                // Calculate normalized direction vectors
-                if (prev_segment->dominant_delta > 0) {
-                    // ✅ ARRAY-BASED: Previous direction vector from segment deltas
+                look_prev_index = (appData->motionQueueHead - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+                MotionSegment* prev_seg = &appData->motionQueue[look_prev_index];
+
+                if (prev_seg->dominant_delta > 0) {
+                    // Previous direction vector (normalised from Bresenham deltas)
                     CoordinatePoint prev_dir;
                     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-                        SET_COORDINATE_AXIS(&prev_dir, axis, 
-                            (float)prev_segment->delta[axis] / (float)prev_segment->dominant_delta);
+                        SET_COORDINATE_AXIS(&prev_dir, axis,
+                            (float)prev_seg->delta[axis] / (float)prev_seg->dominant_delta);
                     }
-                    
-                    // We need current segment's direction, so do a preview calculation
+
+                    // Current direction vector preview
                     float delta_mm[NUM_AXIS];
                     float distance = 0.0f;
                     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
@@ -515,59 +406,117 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
                         distance += delta_mm[axis] * delta_mm[axis];
                     }
                     distance = sqrtf(distance);
-                    
-                    if (distance > 0.001f) {  // Avoid division by zero
-                        // ✅ ARRAY-BASED: Current direction vector
+
+                    if (distance > 0.001f) {
                         CoordinatePoint curr_dir;
                         for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                             SET_COORDINATE_AXIS(&curr_dir, axis, delta_mm[axis] / distance);
                         }
-                        
-                        // Get settings for junction calculation
-                        CNC_Settings* settings = SETTINGS_GetCurrent();
-                        float junction_speed = KINEMATICS_CalculateJunctionSpeed(prev_dir, curr_dir, 
-                                                                                settings->junction_deviation,
-                                                                                *(g_axis_settings[AXIS_X].acceleration));  // Use X axis for junction accel
-                        
-                        // Limit junction speed to reasonable maximum (feedrate / 60)
-                        float max_junction = feedrate / 60.0f;  // Convert mm/min to mm/sec
-                        if (junction_speed > max_junction) {
-                            junction_speed = max_junction;
-                        }
-                        
-                        // Update previous segment's exit velocity for smoother transition
+
+                        CNC_Settings* jct_settings = SETTINGS_GetCurrent();
+                        junction_speed = KINEMATICS_CalculateJunctionSpeed(prev_dir, curr_dir,
+                                                                           jct_settings->junction_deviation,
+                                                                           *(g_axis_settings[AXIS_X].acceleration));
+
+                        float max_junction = feedrate / 60.0f;
+                        if (junction_speed > max_junction) junction_speed = max_junction;
+
                         entry_velocity = junction_speed;
-                        
-                        // DEBUG_PRINT_MOTION("[JUNCTION] Junction speed: %.1f mm/sec (entry to current segment)\r\n", 
-                        //                   junction_speed);
+
+                        // Flag N-1 for retroactive exit patch (skip if arc-locked)
+                        has_prev_patch = !prev_seg->speed_locked;
+
+                        DEBUG_PRINT_MOTION("[JUNCTION] junction=%.1f entry=%.1f mm/s\r\n",
+                                          junction_speed, entry_velocity);
                     }
                 }
             }
-            
-            // Convert to motion segment with junction velocities
+
+            // Build segment N with settled entry; exit is placeholder and will be patched
             KINEMATICS_LinearMove(start, end, feedrate, segment, entry_velocity, exit_velocity);
 
             // Guard: skip zero-length segments (no steps)
             if (segment->steps_remaining == 0) {
-                // DEBUG_PRINT_MOTION("[MOTION] Zero-length segment - skipping\r\n");
-                // ✅ ARRAY-BASED: Update current position and treat as no-op
                 for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                     appData->current[axis] = GET_COORDINATE_AXIS(&end, axis);
                 }
                 return true;
             }
 
-            // DEBUG_PRINT_MOTION("[MOTION] Adding segment to queue (count will be %d)\r\n", appData->motionQueueCount + 1);
-            
             // Add to motion queue
             appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
             appData->motionQueueCount++;
-            
-            // ✅ ARRAY-BASED: Update current position using coordinate utilities
+
+            // ===== FULL BACKWARD PASS (Look-Ahead Planner) =====
+            // Now that segment N is queued, walk backward from N-1 toward the executing
+            // segment (motionQueueTail) and propagate speed constraints.
+            //
+            // Logic per step:
+            //   seg[i] can exit at v_exit only if it can decelerate from its entry_speed
+            //   to v_exit within its available steps:
+            //       v_achievable = sqrt(entry² + 2*a*dist)
+            //   If v_achievable <= required exit → this segment is already fine, stop.
+            //   If v_achievable >  required exit → clamp its exit and continue backward.
+            //
+            // The "required exit" for seg[i] is seg[i+1]->entry_speed_mms, because that
+            // is the speed the NEXT segment was built to start at.
+            //
+            // Guards:
+            //   - Never patch motionQueueTail (currently executing, ISR owns it)
+            //   - Never patch speed_locked segments (arc cruise is fixed)
+            //   - Stop as soon as no change is needed (speeds are already consistent)
+            if (has_prev_patch) {
+                // Required exit for N-1 is the entry we just computed for N
+                float required_exit = entry_velocity;   // == junction_speed for N-1→N
+                uint32_t i    = look_prev_index;
+                uint32_t tail = appData->motionQueueTail;
+
+                while (i != tail) {
+                    MotionSegment* seg = &appData->motionQueue[i];
+
+                    if (seg->speed_locked) {
+                        // Arc segment — its cruise speed is what the next segment must
+                        // match, but we cannot modify it. The required_exit for the
+                        // segment before this arc is the arc's own entry speed.
+                        required_exit = seg->entry_speed_mms;
+                        i = (i - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+                        continue;
+                    }
+
+                    // Maximum exit speed this segment can achieve given its entry speed
+                    // and the distance it has to decelerate.
+                    float dist_mm = (float)seg->steps_remaining
+                                    / *g_axis_settings[seg->dominant_axis].steps_per_mm;
+                    float v_achievable = sqrtf(seg->entry_speed_mms * seg->entry_speed_mms
+                                               + 2.0f * seg->acceleration * dist_mm);
+
+                    if (v_achievable <= required_exit) {
+                        // This segment is already decelerating enough — all earlier
+                        // segments must also be fine (speeds only decrease going back).
+                        break;
+                    }
+
+                    // Clamp exit to what the forward segment actually needs
+                    float new_exit = (v_achievable < seg->exit_speed_mms)
+                                     ? v_achievable : seg->exit_speed_mms;
+                    if (new_exit > required_exit) new_exit = required_exit;
+
+                    MOTION_RecomputeExit(seg, new_exit);
+                    DEBUG_PRINT_MOTION("[LOOKAHEAD] i=%lu exit patched to %.1f mm/s\r\n",
+                                      (unsigned long)i, new_exit);
+
+                    // The required exit for the segment before this one is this
+                    // segment's entry speed (unchanged — we never modify entry here).
+                    required_exit = seg->entry_speed_mms;
+                    i = (i - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+                }
+            }
+
+            // ✅ ARRAY-BASED: Update current position
             for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                 appData->current[axis] = GET_COORDINATE_AXIS(&end, axis);
             }
-            
+
             return true;
         }
         
@@ -688,10 +637,29 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             } else {
                 appData->arcThetaIncrement = -fabsf(appData->arcThetaIncrement);
             }
-                      
+
+            // LOOK-AHEAD: patch the preceding G1 segment to decelerate to arc_cruise
+            // rather than safe-start, giving a smooth G1→arc entry.
+            // arc_cruise is the same triangle-peak formula used by KINEMATICS_LinearMoveSimple.
+            {
+                float arc_feedrate_mms = event->data.arcMove.feedrate / 60.0f;
+                float arc_accel = fminf(settings->acceleration[AXIS_X], settings->acceleration[AXIS_Y]);
+                if (arc_accel < 1.0f) arc_accel = 1.0f;
+                float arc_cruise = fminf(arc_feedrate_mms, sqrtf(arc_accel * settings->mm_per_arc_segment));
+
+                if (appData->motionQueueCount > 0) {
+                    uint32_t arc_prev = (appData->motionQueueHead - 1 + MAX_MOTION_SEGMENTS) % MAX_MOTION_SEGMENTS;
+                    if (arc_prev != appData->motionQueueTail
+                        && !appData->motionQueue[arc_prev].speed_locked) {
+                        MOTION_RecomputeExit(&appData->motionQueue[arc_prev], arc_cruise);
+                        DEBUG_PRINT_MOTION("[LOOKAHEAD] Arc entry: patched preceding G1 exit to %.1f mm/s\r\n", arc_cruise);
+                    }
+                }
+            }
+
             return true;
         }
-        
+
         case GCODE_EVENT_SPINDLE_ON:
             appData->modalSpindleRPM = event->data.spindle.rpm;
             SPINDLE_SetSpeed(event->data.spindle.rpm);
@@ -802,6 +770,76 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             DEBUG_PRINT_MOTION("[DWELL] Enqueued %.3f second dwell segment (%lu ticks)\r\n", seconds, (unsigned long)ticks);
             return true;
         }
+        
+        case GCODE_EVENT_PROBE_TOWARD:
+        case GCODE_EVENT_PROBE_AWAY:
+        {
+            // G38.2/G38.3 (probe toward) or G38.4/G38.5 (probe away)
+            
+            // Check if motion queue has space before processing
+            if (appData->motionQueueCount >= MAX_MOTION_SEGMENTS) {
+                return false;  // Queue full - retry later
+            }
+            
+            // ✅ ARRAY-BASED: Build start coordinate from current position
+            CoordinatePoint start = {{
+                appData->current[AXIS_X], appData->current[AXIS_Y],
+                appData->current[AXIS_Z], appData->current[AXIS_A]
+            }};
+            CoordinatePoint end;
+            
+            // ✅ ARRAY-BASED: Build end coordinate (absolute mode only for probing)
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                float event_value;
+                // Extract event value based on axis
+                if (axis == AXIS_X) event_value = event->data.probe.x;
+                else if (axis == AXIS_Y) event_value = event->data.probe.y;
+                else if (axis == AXIS_Z) event_value = event->data.probe.z;
+                else event_value = event->data.probe.a;
+                
+                // Probing uses absolute coordinates only (NAN = no change)
+                SET_COORDINATE_AXIS(&end, axis, 
+                    isnan(event_value) ? appData->current[axis] : event_value);
+            }
+            
+            // Get feedrate (required for probe moves)
+            float feedrate = event->data.probe.feedrate;
+            if (feedrate <= 0.0f) {
+                // Probe requires explicit feedrate
+                DEBUG_PRINT_MOTION("[PROBE] Error: No feedrate specified for probe move\r\n");
+                return false;
+            }
+            
+            // Get next queue slot
+            MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
+            
+            // Convert to motion segment (probe moves always start/end at minimum speed)
+            float probe_speed = 8.33f;  // ~500 mm/min minimum speed
+            KINEMATICS_LinearMove(start, end, feedrate, segment, probe_speed, probe_speed);
+            
+            // Guard: skip zero-length segments
+            if (segment->steps_remaining == 0) {
+                DEBUG_PRINT_MOTION("[PROBE] Zero-length probe move - skipping\r\n");
+                return true;
+            }
+            
+            // Initialize probe state
+            appData->probeState = PROBE_STATE_MOVING;
+            appData->probeSuccess = false;
+            appData->probeAlarmOnFail = event->data.probe.alarm_on_fail;
+            
+            // Add to motion queue
+            appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
+            appData->motionQueueCount++;
+            
+            DEBUG_PRINT_MOTION("[PROBE] Started G38.%d: alarm=%d feedrate=%.1f\r\n",
+                             event->data.probe.alarm_on_fail ? 2 : 3,
+                             event->data.probe.alarm_on_fail,
+                             feedrate);
+            
+            return true;
+        }
+        
         case GCODE_EVENT_COOLANT_ON:
         case GCODE_EVENT_COOLANT_OFF:
         case GCODE_EVENT_SET_TOOL:

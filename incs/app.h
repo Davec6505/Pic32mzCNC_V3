@@ -18,6 +18,8 @@
 #include "common.h"
 #include "stepper.h"
 
+/* E-Stop atomic flag — see stepper.h (defined in stepper.c) */
+
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility

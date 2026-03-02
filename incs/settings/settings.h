@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "common.h"   // For HAS_TMC5160_AXIS, NUM_AXIS
 
 // CNC Controller Settings Structure
 typedef struct {
@@ -18,6 +19,7 @@ typedef struct {
     uint8_t step_direction_invert; // $3 - direction port invert mask (0-255)
     uint8_t step_enable_invert;    // $4 - invert step enable pin (bool as uint8)
     uint8_t limit_pins_invert;     // $5 - invert limit pins (bool as uint8)
+    uint8_t probe_invert;          // $6 - probe pin invert (0=active low, 1=active high)
     
     // Arc configuration ($12-$13)
     float mm_per_arc_segment;      // $12 - Arc segment length in mm (default 0.1mm)
@@ -28,7 +30,14 @@ typedef struct {
     float max_rate[4];             // $110-$113 - Max rate (mm/min) [X, Y, Z, A]
     float acceleration[4];         // $120-$123 - Acceleration (mm/sec^2) [X, Y, Z, A]
     float max_travel[4];           // $130-$133 - Max travel (mm) [X, Y, Z, A]
-    
+
+    // Jerk control — limits how fast acceleration can change ($140-$143)
+    // Units: mm/s/step (effective jerk aggressiveness; higher = shorter S-curve ramp)
+    // Formula: jerk_ramp_steps = acceleration * steps_per_mm / jerk
+    // Low value  → long S-curve ramp  → very smooth, slightly slower acceleration
+    // High value → short S-curve ramp → snappier, closer to pure trapezoidal
+    float jerk[4];                 // $140-$143 - Jerk [X, Y, Z, A]
+
     // Spindle configuration
     float spindle_max_rpm;         // $30 - Max spindle speed (RPM)
     float spindle_min_rpm;         // $31 - Min spindle speed (RPM)
@@ -61,13 +70,33 @@ typedef struct {
     float g92_offset[3];           // G92 coordinate offset [X, Y, Z]
     float tool_length_offset;      // Tool length offset (TLO)
     
+#ifdef HAS_TMC5160_AXIS
+    // TMC5160 runtime tuning ($200-$253) — one slot per axis (0=X,1=Y,2=Z,3=A)
+    // DRV8825 axes have slots but values are unused / not sent to driver
+    uint8_t  tmc_mode[4];        // $200-$203: 1=StealthChop 2=SpreadCycle 3=Mixed 4=CoolStep
+    uint8_t  tmc_irun[4];        // $210-$213: run current 0-31
+    uint8_t  tmc_ihold[4];       // $220-$223: hold current 0-31
+    uint8_t  tmc_mres[4];        // $230-$233: microstep resolution (TMC5160_MRES_xxx)
+    uint32_t tmc_tpwm_thrs[4];   // $240-$243: Mixed mode StealthChop→SpreadCycle velocity threshold
+    uint32_t tmc_tcoolthrs[4];   // $250-$253: CoolStep lower velocity threshold
+#endif
+
     // CRC32 checksum (for validation)
     uint32_t checksum;
 } CNC_Settings;
 
 // Default settings
 #define SETTINGS_SIGNATURE 0x47524231  // "GRB1"
-#define SETTINGS_VERSION   2           // Incremented when structure changes (was 1)
+// Version tracks the BINARY layout of CNC_Settings.
+// TMC5160 fields are guarded by #ifdef HAS_TMC5160_AXIS, so they only exist
+// in the struct when at least one TMC5160 axis is enabled.  Bump the version
+// only when the struct actually changes — otherwise existing flash settings
+// (written as version 2 with DRV8825-only builds) remain valid.
+#ifdef HAS_TMC5160_AXIS
+#define SETTINGS_VERSION   4  // v4: jerk[4] added + TMC5160 fields present
+#else
+#define SETTINGS_VERSION   3  // v3: jerk[4] added (DRV8825-only build)
+#endif
 
 // ✅ CRITICAL: Safe NVM storage location based on MikroE bootloader
 // PIC32MZ2048EFH100 Program Flash with MikroE Bootloader:
