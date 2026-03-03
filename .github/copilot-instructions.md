@@ -2343,3 +2343,160 @@ immediately after flash save.
 - DO NOT use blocking SPI waits in any ISR context
 - All SPI transactions must be in main loop context only (APP_CONFIG or rate-limited APP_IDLE)
 - Follow LED pattern for CS GPIO - add to axis_cs_set[]/axis_cs_clear[] arrays in utils.c
+
+---
+
+## 🗺️ DEVELOPMENT ROADMAP — Ordered Implementation Phases
+
+Phases must be implemented **in sequence**. Do not begin a phase until the previous one is
+hardware-validated and committed to master.
+
+---
+
+### Phase 1 — Probing (G38.x) ✅ Stub exists — IMPLEMENT NEXT
+
+**Goal**: Reliable tool/workpiece contact detection via a probe input pin.
+
+**Scope**:
+- G38.2 (probe toward, error on no contact)
+- G38.3 (probe toward, no error)
+- G38.4 (probe away, error on contact)
+- G38.5 (probe away, no error)
+- `PRB:` coordinate report in `$#` response
+- `GCODE_EVENT_PROBE_TOWARD` / `GCODE_EVENT_PROBE_AWAY` events already exist in `gcode_parser.h`
+
+**Architecture**:
+- Probe pin sampled in main loop (not ISR) — checked every MOTION_Tasks() iteration
+- On contact: call `STEPPER_StopMotion()` (flushes TRAJECTORY + stops INTERPOLATOR), latch MPos
+- Store probe position in `CNC_Settings` probe_position[3] (persist to NVM)
+- `$#` handler prints `[PRB:x,y,z:1]` (contacted) or `[PRB:x,y,z:0]` (not contacted)
+- No encoder feedback at this phase — open-loop position at contact moment
+
+**Key files**: `srcs/gcode/gcode_parser.c`, `srcs/motion/motion_bridge.c`, `srcs/settings/settings.c`
+
+**Do NOT**: Use probe in ISR, block the main loop, or modify the GRBL parser.
+
+---
+
+### Phase 2 — Tool Length Offsets (G43 / G49)
+
+**Goal**: Apply tool length compensation so Z=0 is always the workpiece surface regardless of tool.
+
+**Scope**:
+- G43 Hn — activate tool length offset for tool n
+- G49 — cancel tool length offset
+- Tool table: up to 16 tools, length stored in NVM (`settings.tool_length_offset[16]`)
+- G43.1 Zn — set dynamic offset (current tool, inline value)
+- `TLO:` field in `$#` report
+
+**Architecture**:
+- Offset applied in `KINEMATICS_GetCurrentPosition()` / coordinate transforms — not in motion planner
+- Tool number tracked in modal state (existing `T` word handling)
+- `$T` command to view current tool offset table
+
+**Key files**: `srcs/motion/kinematics.c`, `srcs/settings/settings.c`, `srcs/gcode/gcode_parser.c`
+
+---
+
+### Phase 3 — Multiple Work Offsets (G54–G59)
+
+**Goal**: Six independent work coordinate systems, switchable mid-program.
+
+**Scope**:
+- G54–G59 modal WCS select (currently only G54/G92 implemented)
+- `G10 L2 Pn` — set WCS offset from machine position
+- `G10 L20 Pn` — set WCS offset from current work position
+- `$#` response prints all six WCS offsets
+
+**Architecture**:
+- `wcs_offset[6][NUM_AXIS]` in `CNC_Settings` (replace current single `wcs_offset[NUM_AXIS]`)
+- Active WCS index in modal state
+- All coordinate transforms route through `KINEMATICS_WorkToMachine()` using active index
+- NVM layout change → bump `SETTINGS_VERSION`
+
+**Key files**: `srcs/motion/kinematics.c`, `incs/data_structures.h`, `srcs/settings/settings.c`
+
+---
+
+### Phase 4 — Rigid Tapping & Fixed Cycle Probing (G33, G81–G89)
+
+**Goal**: Canned drilling/tapping cycles and spindle-synchronised tapping.
+
+**Scope**:
+- G81 — simple drill cycle
+- G83 — peck drilling
+- G33 — spindle-synchronised motion (rigid tapping precursor; requires spindle encoder)
+- G98/G99 — canned cycle return plane
+
+**Architecture**:
+- Canned cycles expand to sequences of G0/G1 moves inside `gcode_parser.c` event handler — no new motion primitives needed
+- G33 blocked until spindle encoder feedback is available (Phase 5)
+- Implemented as a state machine inside `GCODE_Tasks` to avoid blocking
+
+**Key files**: `srcs/gcode/gcode_parser.c`, `srcs/motion/motion_bridge.c`
+
+---
+
+### Phase 5 — CAN Bus & EtherCAT Drive Communication
+
+**Goal**: Replace Step/Dir GPIO with fieldbus commands to smart drives.
+
+**Scope — CAN (first)**:
+- PIC32MZ has on-chip CAN1/CAN2 — use Harmony CAN PLIB
+- CANopen DS402 profile (standard motion drive profile)
+- One CAN node per axis drive
+- Cyclic Synchronous Position (CSP) mode: master sends target position every servo period
+- Status word polling: fault, ready, in-position
+
+**Scope — EtherCAT (second)**:
+- Requires external EtherCAT slave controller IC (e.g. LAN9252 or AX58100) on SPI2 or SPI3
+- EtherCAT master stack (e.g. SOEM or proprietary) running on PIC32MZ
+- Process Data Objects (PDO) map target position + control word each cycle
+- Deterministic 1ms cycle time — driven from TMR4 100kHz ISR decimated to 1kHz
+
+**Architecture**:
+- Abstract drive interface: `DRIVE_SetTargetPosition(axis, steps)`, `DRIVE_GetActualPosition(axis)`
+- Step/Dir path and fieldbus path selected at compile time via `DRIVE_BACKEND` in `common.h`
+- `INTERPOLATOR_Tick()` writes to drive interface instead of GPIO when fieldbus backend active
+- motion_bridge.c unchanged — only `interpolator.c` output path changes
+
+**Key files**: `srcs/motion/interpolator.c`, new `srcs/drives/can_drive.c`, new `srcs/drives/ethercat_drive.c`
+
+**Do NOT** attempt EtherCAT before CAN is validated on hardware.
+
+---
+
+### Phase 6 — Closed-Loop Encoder Feedback via EtherCAT / CAN
+
+**Goal**: Close the position loop — drive reports actual encoder position; controller corrects error.
+
+**Scope**:
+- Read actual position from drive PDO each fieldbus cycle
+- Position error = target (DDS accumulator) − actual (encoder)
+- Proportional correction term added to next cycle's target position command
+- Following error alarm: if |error| > threshold ($-parameter), trigger ALARM state
+- Full servo loop runs at fieldbus cycle rate (1kHz CAN, up to 4kHz EtherCAT)
+
+**Architecture**:
+- `INTERPOLATOR_Tick()` reads `DRIVE_GetActualPosition()` each cycle
+- Following error checked against `settings.following_error_limit[axis]` ($-parameter, NVM)
+- Alarm raised via existing `g_hard_limit_alarm` path → APP_ALARM state
+- Position display (`?` status) reports encoder position, not DDS accumulator
+
+**This phase transforms the system from open-loop stepper to closed-loop servo.**
+
+**Key files**: `srcs/motion/interpolator.c`, `srcs/drives/ethercat_drive.c` / `can_drive.c`, `srcs/app.c`
+
+---
+
+### Roadmap Summary Table
+
+| Phase | Feature                        | Status      | Branch (planned)    |
+|-------|--------------------------------|-------------|---------------------|
+| 0     | S-curve engine + arc + homing  | ✅ Complete  | `scurve_motion`     |
+| 1     | Probing (G38.x)                | 🔲 Next     | `probing`           |
+| 2     | Tool length offsets (G43/G49)  | 🔲 Pending  | `tool_offsets`      |
+| 3     | Multi WCS (G54–G59)            | 🔲 Pending  | `multi_wcs`         |
+| 4     | Rigid tapping / canned cycles  | 🔲 Pending  | `canned_cycles`     |
+| 5     | CAN + EtherCAT drives          | 🔲 Pending  | `fieldbus`          |
+| 6     | Closed-loop encoder feedback   | 🔲 Pending  | `closed_loop`       |
