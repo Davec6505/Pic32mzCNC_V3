@@ -192,14 +192,69 @@ void MOTION_Tasks(APP_DATA *appData)
     }
 }
 
-// MOTION_Arc — incremental arc segment generation.
-// In the old engine this pushed one segment per call.  In the new engine, arc
-// geometry is converted to many TRAJECTORY_AddMove calls upfront by the G-code
-// event handler.  This stub handles the residual calls from app.c.
+// MOTION_Arc — incremental arc segment generation (one segment per call).
+// Called by app.c every idle iteration while appData->arcGenState == ARC_GEN_ACTIVE.
+// Generates exactly one trajectory segment per invocation so the main loop
+// is never blocked, and backs off gracefully when the queue is full.
 void MOTION_Arc(APP_DATA *appData)
 {
-    (void)appData;
-    // No-op: arcs are generated entirely by MOTION_ProcessGcodeEvent
+    if (appData == NULL || appData->arcGenState != ARC_GEN_ACTIVE) return;
+
+    // Back off if trajectory queue is almost full (leave 2 slots headroom)
+    if (TRAJECTORY_QueueCount() >= (uint32_t)(TRAJ_QUEUE_SIZE - 2)) return;
+
+    // Advance segment counter; determine whether this is the final segment
+    appData->arcSegmentCurrent++;
+    bool is_last = (appData->arcSegmentCurrent >= appData->arcSegmentTotal);
+
+    CoordinatePoint next;
+
+    if (is_last) {
+        // Use the exact programmed end point to avoid accumulated rounding error
+        next = appData->arcEndPoint;
+    } else {
+        // Advance angle and compute new XY position
+        appData->arcTheta += appData->arcThetaIncrement;
+        float cx = appData->arcCenter.coordinate[AXIS_X];
+        float cy = appData->arcCenter.coordinate[AXIS_Y];
+        next.coordinate[AXIS_X] = cx + appData->arcRadius * cosf(appData->arcTheta);
+        next.coordinate[AXIS_Y] = cy + appData->arcRadius * sinf(appData->arcTheta);
+
+        // Linear interpolation for Z and A axes (helical / 4-axis motion)
+        float progress = (float)appData->arcSegmentCurrent / (float)appData->arcSegmentTotal;
+        float sz = appData->arcStartPoint.coordinate[AXIS_Z];
+        float ez = appData->arcEndPoint.coordinate[AXIS_Z];
+        float sa = appData->arcStartPoint.coordinate[AXIS_A];
+        float ea = appData->arcEndPoint.coordinate[AXIS_A];
+        next.coordinate[AXIS_Z] = sz + (ez - sz) * progress;
+        next.coordinate[AXIS_A] = sa + (ea - sa) * progress;
+    }
+
+    // Attempt to add the segment to the trajectory queue
+    if (TRAJECTORY_AddMove(appData->arcCurrent, next, appData->arcFeedrate, 0.0f, 0.0f)) {
+        TRAJECTORY_Recalculate();
+
+        // Pump the interpolator if it went idle between arc segments
+        if (!INTERPOLATOR_IsActive()) {
+            SCurveMove mv;
+            if (TRAJECTORY_GetNextMove(&mv)) {
+                STEPPERS_Enable();
+                INTERPOLATOR_LoadMove(&mv);
+            }
+        }
+
+        appData->arcCurrent = next;
+
+        if (is_last) {
+            appData->arcGenState = ARC_GEN_IDLE;
+        }
+    } else {
+        // Queue unexpectedly full — roll back and retry next iteration
+        appData->arcSegmentCurrent--;
+        if (!is_last) {
+            appData->arcTheta -= appData->arcThetaIncrement;
+        }
+    }
 }
 
 // MOTION_ProcessGcodeEvent — convert a parsed G-code event to motion.
@@ -236,6 +291,83 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
                     }
                 }
             }
+            return true;
+        }
+
+        case GCODE_EVENT_ARC_MOVE: {
+            // Guard: only one arc at a time
+            if (appData->arcGenState == ARC_GEN_ACTIVE) return false;
+
+            CoordinatePoint start = KINEMATICS_GetCurrentPosition();
+
+            // Center in absolute coordinates (I/J are always relative to start per GRBL)
+            float cx = start.coordinate[AXIS_X] + event->data.arcMove.centerX;
+            float cy = start.coordinate[AXIS_Y] + event->data.arcMove.centerY;
+
+            // Absolute end point
+            float ex = event->data.arcMove.x;
+            float ey = event->data.arcMove.y;
+            float ez = event->data.arcMove.z;
+            float ea = event->data.arcMove.a;
+
+            float fr = event->data.arcMove.feedrate;
+            if (fr < 1.0f) fr = s->max_rate[AXIS_X];
+
+            // Radius from start to center
+            float dx_s = start.coordinate[AXIS_X] - cx;
+            float dy_s = start.coordinate[AXIS_Y] - cy;
+            float radius = sqrtf(dx_s * dx_s + dy_s * dy_s);
+            if (radius < 0.001f) return false; // Degenerate arc
+
+            // Angular sweep in the correct direction
+            float theta_start = atan2f(dy_s, dx_s);
+            float dx_e = ex - cx;
+            float dy_e = ey - cy;
+            float theta_end = atan2f(dy_e, dx_e);
+
+            bool cw = event->data.arcMove.clockwise;
+            float sweep;
+            if (cw) {
+                // G2 clockwise: angle decreases
+                sweep = theta_start - theta_end;
+                if (sweep <= 0.0f) sweep += 2.0f * 3.14159265358979f;
+            } else {
+                // G3 counter-clockwise: angle increases
+                sweep = theta_end - theta_start;
+                if (sweep <= 0.0f) sweep += 2.0f * 3.14159265358979f;
+            }
+
+            // Number of linear segments
+            float arc_length = radius * sweep;
+            float mm_per_seg = s->mm_per_arc_segment;
+            if (mm_per_seg < 0.001f) mm_per_seg = 0.1f;
+            uint32_t n_seg = (uint32_t)ceilf(arc_length / mm_per_seg);
+            if (n_seg < 1) n_seg = 1;
+
+            float theta_inc = cw ? -(sweep / (float)n_seg)
+                                 :  (sweep / (float)n_seg);
+
+            // Store arc state into APP_DATA — MOTION_Arc() will consume it
+            appData->arcCenter.coordinate[AXIS_X]    = cx;
+            appData->arcCenter.coordinate[AXIS_Y]    = cy;
+            appData->arcCenter.coordinate[AXIS_Z]    = start.coordinate[AXIS_Z];
+            appData->arcCenter.coordinate[AXIS_A]    = start.coordinate[AXIS_A];
+            appData->arcCurrent                      = start;
+            appData->arcStartPoint                   = start;
+            appData->arcEndPoint.coordinate[AXIS_X]  = ex;
+            appData->arcEndPoint.coordinate[AXIS_Y]  = ey;
+            appData->arcEndPoint.coordinate[AXIS_Z]  = ez;
+            appData->arcEndPoint.coordinate[AXIS_A]  = ea;
+            appData->arcRadius                       = radius;
+            appData->arcClockwise                    = cw;
+            appData->arcFeedrate                     = fr;
+            appData->arcTheta                        = theta_start;
+            appData->arcThetaStart                   = theta_start;
+            appData->arcThetaEnd                     = theta_end;
+            appData->arcThetaIncrement               = theta_inc;
+            appData->arcSegmentCurrent               = 0;
+            appData->arcSegmentTotal                 = n_seg;
+            appData->arcGenState                     = ARC_GEN_ACTIVE;
             return true;
         }
 
