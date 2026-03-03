@@ -223,23 +223,12 @@ void HOMING_StartSeek(APP_DATA* appData) {
     // Array-based axis targeting (replaces switch statement)
     ADD_COORDINATE_AXIS(&target, g_homing.current_axis, search_distance);
     
-    // Generate motion segment at seek rate using pure GRBL constant-speed builder.
-    // HomingMove: instant cruise speed, no Taylor profiler, no acceleration ramps.
-    // speed_locked prevents the GRBL lookahead planner from modifying timing.
-    if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
-        MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_HomingMove(current, target,
-                             *g_homing_settings[g_homing.current_axis].homing_seek_rate,
-                             segment);
-        
-        appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-        appData->motionQueueCount++;
-        
-        g_homing.motion_active = true;
-    } else {
-        // Queue full - retry next iteration
-        g_homing.motion_active = false;
-    }
+    // Submit seek move to the trajectory queue via the motion bridge.
+    // MOTION_HomingMove handles the queue-full check, Recalculate, and
+    // interpolator kick-start — homing.c no longer touches motionQueue[] directly.
+    g_homing.motion_active =
+        MOTION_HomingMove(appData, current, target,
+                          *g_homing_settings[g_homing.current_axis].homing_seek_rate);
 }
 
 void HOMING_StartLocate(APP_DATA* appData) {
@@ -266,32 +255,19 @@ void HOMING_StartLocate(APP_DATA* appData) {
     // Array-based axis targeting (replaces switch statement)
     ADD_COORDINATE_AXIS(&target, g_homing.current_axis, backoff_distance);
     
-    // Generate backoff motion segment at feed rate using pure GRBL constant-speed builder.
-    if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
-        MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_HomingMove(current, target,
-                             *g_homing_settings[g_homing.current_axis].homing_feed_rate,
-                             segment);
-        appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-        appData->motionQueueCount++;
-    }
-    
+    // Queue backoff move then slow re-approach — both via the motion bridge.
+    MOTION_HomingMove(appData, current, target,
+                      *g_homing_settings[g_homing.current_axis].homing_feed_rate);
+
     // Generate slow re-approach segment
     current = target;
-    
+
     // Array-based axis targeting (replaces switch statement)
     ADD_COORDINATE_AXIS(&target, g_homing.current_axis, locate_distance);
-    
-    if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
-        MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_HomingMove(current, target,
-                             *g_homing_settings[g_homing.current_axis].homing_feed_rate,
-                             segment);
-        appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-        appData->motionQueueCount++;
-        
-        g_homing.motion_active = true;
-    }
+
+    g_homing.motion_active =
+        MOTION_HomingMove(appData, current, target,
+                          *g_homing_settings[g_homing.current_axis].homing_feed_rate);
 }
 
 void HOMING_StartPulloff(APP_DATA* appData) {
@@ -316,17 +292,10 @@ void HOMING_StartPulloff(APP_DATA* appData) {
     // Array-based axis targeting (replaces switch statement)
     ADD_COORDINATE_AXIS(&target, g_homing.current_axis, pulloff_distance);
     
-    // Generate pulloff motion segment using pure GRBL constant-speed builder.
-    if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
-        MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_HomingMove(current, target,
-                             *g_homing_settings[g_homing.current_axis].homing_feed_rate,
-                             segment);
-        appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
-        appData->motionQueueCount++;
-        
-        g_homing.motion_active = true;
-    }
+    // Submit pulloff move to trajectory queue via the motion bridge.
+    g_homing.motion_active =
+        MOTION_HomingMove(appData, current, target,
+                          *g_homing_settings[g_homing.current_axis].homing_feed_rate);
 }
 
 bool HOMING_LimitTriggered(void) {

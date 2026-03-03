@@ -18,5 +18,10 @@ void MOTION_Arc(APP_DATA* appData);
 // Process a single gcode event and convert to motion segments
 bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event);
 
+// Submit a constant-speed homing move to the trajectory queue.
+// Handles queue-full check, Recalculate, and interpolator kick-start.
+// Returns true if the move was queued, false if queue was full.
+bool MOTION_HomingMove(APP_DATA* appData, CoordinatePoint start,
+                       CoordinatePoint end, float feedrate_mm_min);
 
 #endif /* MOTION_H */

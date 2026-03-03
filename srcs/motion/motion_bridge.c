@@ -420,3 +420,33 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             return false;
     }
 }
+
+// ─── HOMING BRIDGE ────────────────────────────────────────────────────────────
+
+// Submit one constant-speed homing move to the trajectory queue.
+// Homing uses a fixed cruise speed with no junction blending (entry/exit = 0
+// so TRAJECTORY_Recalculate leaves the move's speed untouched).
+// Kicks the interpolator if it is currently idle.
+bool MOTION_HomingMove(APP_DATA *appData,
+                       CoordinatePoint start,
+                       CoordinatePoint end,
+                       float feedrate_mm_min)
+{
+    if (appData == NULL) return false;
+    if (TRAJECTORY_QueueCount() >= (uint32_t)TRAJ_QUEUE_SIZE) return false;
+
+    if (!TRAJECTORY_AddMove(start, end, feedrate_mm_min, 0.0f, 0.0f)) {
+        return false;  // Queue full
+    }
+    TRAJECTORY_Recalculate();
+
+    // Kick interpolator if it went idle between homing segments
+    if (!INTERPOLATOR_IsActive()) {
+        SCurveMove mv;
+        if (TRAJECTORY_GetNextMove(&mv)) {
+            STEPPERS_Enable();
+            INTERPOLATOR_LoadMove(&mv);
+        }
+    }
+    return true;
+}
