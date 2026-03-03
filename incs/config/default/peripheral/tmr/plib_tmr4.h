@@ -89,6 +89,8 @@ uint32_t TMR4_FrequencyGet(void);
 
 bool TMR4_PeriodHasExpired(void);
 
+void TMR4_CallbackRegister(TMR_CALLBACK callback, uintptr_t context);
+
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility

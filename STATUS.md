@@ -1,11 +1,58 @@
 # STATUS — scurve_motion branch
-**Date**: March 3, 2026  
+**Last updated**: March 2026 (session 3)
 **Branch**: `scurve_motion` (based on `lookahead`)  
 **Goal**: Replace entire GRBL AVR motion engine with a professional 32-bit architecture:
 - Fixed 100kHz servo tick (TMR4 period-match ISR, replaces OC1 variable-rate ISR)
 - DDS (Direct Digital Synthesis) step generation — 32-bit accumulator per axis
 - S-curve (jerk-limited) velocity profiles computed in main loop on FPU
 - G-code protocol layer (gcode_parser.c, settings.c) kept completely intact
+
+## SESSION 3 PROGRESS — Full build succeeds ✅
+
+| File | Status | Notes |
+|------|--------|-------|
+| `srcs/motion/motion_bridge.c` | ✅ Created | Compatibility shim; old stepper.c/motion.c API → new engine |
+| `srcs/config/default/peripheral/tmr/plib_tmr4.c` | ✅ Modified | Added `TMR4_CallbackRegister` + `TIMER4_ISR` |
+| `incs/config/default/peripheral/tmr/plib_tmr4.h` | ✅ Modified | Declared `TMR4_CallbackRegister` |
+
+**Build result**: `######  BUILD COMPLETE (bins/CNC_V3.hex)  ########` — all .o files compile and link.
+
+### motion_bridge.c — what it provides
+
+**Global volatile flags** (defined here, `extern` in stepper.h):
+- `g_hard_limit_alarm`, `g_suppress_hard_limits`, `g_estop_pending`
+- `g_feed_hold_active`, `g_feed_hold_pending`
+
+**STEPPER_* bridges** (old API → new engine):
+- `STEPPER_Initialize` → `INTERPOLATOR_Initialize()` + `TRAJECTORY_Initialize()`
+- `STEPPER_DisableAll/EnableAll` → `STEPPERS_Disable/Enable()` GPIO macros
+- `STEPPER_StopMotion` → `INTERPOLATOR_Stop()` + `TRAJECTORY_Reset()`
+- `STEPPER_PauseMotion/FinalizeHold/ResumeMotion` → feed-hold flag management + ISR control
+- `STEPPER_GetPosition/GetPositionPointer` → `s_stepper_pos` backed by `*g_axis_settings[axis].step_count`
+- `STEPPER_GetCurrentFeedrateMmMin` → `INTERPOLATOR_GetInstantVelocity() × 60`
+
+**MOTION_* bridges**:
+- `MOTION_Initialize` → `TRAJECTORY_Initialize()`
+- `MOTION_Tasks` → polls `INTERPOLATOR_MoveComplete()`, pops + loads next `SCurveMove`
+- `MOTION_ProcessGcodeEvent` → converts `GCODE_EVENT_LINEAR_MOVE` to `TRAJECTORY_AddMove` + pump
+
+**Remaining for full wiring** (next session):
+1. MCC: reconfigure TMR4 prescaler 1:1, PR4=499 in MPLAB X (hardware machine only)
+2. `data_structures.h`: remove old `StepSegment`, `StepperBlock`, `prep_*` fields, `segmentBuffer[]`
+3. `app.h`: replace `#include "stepper.h"` / `"motion.h"` with new headers once migration is complete
+4. Hardware testing: verify 100kHz ISR fires, DDS produces correct step rates, S-curve profiles run
+5. Arc support: `GCODE_EVENT_ARC_MOVE` → decompose into `TRAJECTORY_AddMove` calls in motion_bridge.c
+
+## SESSION 2 PROGRESS — All source files created ✅
+
+| File | Status | Notes |
+|------|--------|-------|
+| `incs/motion/trajectory.h` | ✅ Created | SCurveMove struct, TRAJ_QUEUE_SIZE=64, full API |
+| `incs/motion/interpolator.h` | ✅ Created | DDS_SCALE=2^30, TICK_RATE=100kHz, feed override |
+| `srcs/motion/trajectory.c` | ✅ Created | 7-phase solver, binary search, reverse+forward junction pass |
+| `srcs/motion/interpolator.c` | ✅ Created | 100kHz DDS ISR, phase-accurate velocity update, feed hold |
+| `srcs/motion/kinematics.c` | ✅ Created | WCS transforms only; old planner API stubbed to NULL |
+| `incs/motion/kinematics.h` | ✅ Updated | Added `SetG92Offset` / `ClearG92Offset` declarations |
 
 ---
 

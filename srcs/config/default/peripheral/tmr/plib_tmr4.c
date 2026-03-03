@@ -53,6 +53,9 @@
 #include "plib_tmr4.h"
 #include "interrupts.h"
 
+// Callback object (registered by INTERPOLATOR_Initialize)
+static TMR_TIMER_OBJECT tmr4CallbackObj;
+
 
 
 
@@ -120,4 +123,21 @@ bool TMR4_PeriodHasExpired(void)
         IFS0CLR = _IFS0_T4IF_MASK;
 
     return status;
+}
+
+void TMR4_CallbackRegister(TMR_CALLBACK callback, uintptr_t context)
+{
+    tmr4CallbackObj.callback_fn = callback;
+    tmr4CallbackObj.context     = context;
+    // Enable TMR4 interrupt in the EVIC now that a callback is registered
+    IEC0SET = _IEC0_T4IE_MASK;
+}
+
+void __ISR(_TIMER_4_VECTOR, IPL6SRS) TIMER4_ISR(void)
+{
+    IFS0CLR = _IFS0_T4IF_MASK;   // clear flag
+    if (tmr4CallbackObj.callback_fn != NULL)
+    {
+        tmr4CallbackObj.callback_fn(0U, tmr4CallbackObj.context);
+    }
 }
