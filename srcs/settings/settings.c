@@ -49,7 +49,14 @@ static const CNC_Settings default_settings = {
     .step_direction_invert = 0,
     .step_enable_invert = 0,       // false as uint8
     .limit_pins_invert = 0,        // false as uint8
-    
+
+    // New GRBL params filling prior implicit padding
+    .probe_invert = 0,             // $6  - active-low probe (default)
+    .status_report_mask = 3,       // $10 - report MPos + buffer state (GRBL default)
+    .report_inches = 0,            // $13 - mm output (default)
+    .soft_limits_enable = 0,       // $20 - soft limits off by default
+    .laser_mode = 0,               // $32 - CNC mode (not laser)
+
     // Steps per mm — 16-microstep, 200 steps/rev:
     //   X/Y: GT2 belt, 20-tooth pulley → 40mm/rev → 3200/40 = 80 steps/mm
     //   Z:   M6 leadscrew, 1mm pitch  → 1mm/rev  → 3200/1  = 3200 steps/mm
@@ -80,7 +87,6 @@ static const CNC_Settings default_settings = {
     .hard_limits_enable = 0,       // false as uint8 (disabled by default for safety)
     .homing_enable = 0x07,         // Bit mask: X=bit0, Y=bit1, Z=bit2, A=bit3 (default: XYZ enabled)
     .homing_dir_mask = 0,
-    .padding2 = 0,
     .homing_feed_rate = 500.0f,
     .homing_seek_rate = 2000.0f,
     .homing_debounce = 25,
@@ -254,14 +260,13 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 2: settings->step_pulse_invert = (uint8_t)value; break;
         case 3: settings->step_direction_invert = (uint8_t)value; break;
         case 4: settings->step_enable_invert = (uint8_t)value; break;
-        case 5: settings->limit_pins_invert = (uint8_t)value; break;
-        
-        // Junction deviation
-        case 11: settings->junction_deviation = value; break;
-        
-        // Arc configuration
-        case 12: settings->mm_per_arc_segment = value; break;
-        case 13: settings->arc_tolerance = value; break;
+        case 5:  settings->limit_pins_invert    = (uint8_t)value; break;
+        case 6:  settings->probe_invert          = (uint8_t)value; break;
+        // Reporting / arc
+        case 10: settings->status_report_mask    = (uint8_t)value; break;
+        case 11: settings->junction_deviation    = value;          break;
+        case 12: settings->mm_per_arc_segment    = value;          break;
+        case 13: settings->report_inches         = (uint8_t)(value != 0.0f); break;
         
         // Steps per mm ($100-$103) - Array-based
         case 100: settings->steps_per_mm[AXIS_X] = value; break;
@@ -292,11 +297,13 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 142: settings->jerk[AXIS_Z] = value; break;
         case 143: settings->jerk[AXIS_A] = value; break;
         
-        // Spindle
-        case 30: settings->spindle_max_rpm = value; break;
-        case 31: settings->spindle_min_rpm = value; break;
-        
-        // Homing & Limits
+        // Spindle / laser
+        case 30: settings->spindle_max_rpm = value;                         break;
+        case 31: settings->spindle_min_rpm = value;                         break;
+        case 32: settings->laser_mode      = (uint8_t)(value != 0.0f);      break;
+
+        // Limits & homing
+        case 20: settings->soft_limits_enable = (uint8_t)value; break;
         case 21: settings->hard_limits_enable = (uint8_t)value; break;
         case 22:
             // ✅ UGS COMPATIBILITY: Translate boolean 0/1 to bitmask
@@ -373,11 +380,12 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         case 2: return (float)settings->step_pulse_invert;
         case 3: return (float)settings->step_direction_invert;
         case 4: return (float)settings->step_enable_invert;
-        case 5: return (float)settings->limit_pins_invert;
-        
+        case 5:  return (float)settings->limit_pins_invert;
+        case 6:  return (float)settings->probe_invert;
+        case 10: return (float)settings->status_report_mask;
         case 11: return settings->junction_deviation;
         case 12: return settings->mm_per_arc_segment;
-        case 13: return settings->arc_tolerance;
+        case 13: return (float)settings->report_inches;
         // Steps per mm ($100-$103) - Array-based
         case 100: return settings->steps_per_mm[AXIS_X];
         case 101: return settings->steps_per_mm[AXIS_Y];
@@ -409,7 +417,9 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
 
         case 30: return settings->spindle_max_rpm;
         case 31: return settings->spindle_min_rpm;
+        case 32: return (float)settings->laser_mode;
         
+        case 20: return (float)settings->soft_limits_enable;
         case 21: return (float)settings->hard_limits_enable;
         case 22: return (float)settings->homing_enable;
         case 23: return (float)settings->homing_dir_mask;
@@ -466,30 +476,33 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     int len = 0;
     
     // Format: $<param>=<value> (lowercase 'ok' per GRBL protocol)
-    len += sprintf(&settings_buffer[len], "$0=%u\r\n", (unsigned int)settings->step_pulse_time);
-    len += sprintf(&settings_buffer[len], "$1=%u\r\n", (unsigned int)settings->step_idle_delay);
-    len += sprintf(&settings_buffer[len], "$2=%u\r\n", settings->step_pulse_invert);
-    len += sprintf(&settings_buffer[len], "$3=%u\r\n", settings->step_direction_invert);
-    len += sprintf(&settings_buffer[len], "$4=%u\r\n", settings->step_enable_invert);
-    len += sprintf(&settings_buffer[len], "$5=%u\r\n", settings->limit_pins_invert);
-    len += sprintf(&settings_buffer[len], "$11=%.3f\r\n", settings->junction_deviation);
-    len += sprintf(&settings_buffer[len], "$12=%.3f\r\n", settings->mm_per_arc_segment);
-    len += sprintf(&settings_buffer[len], "$13=%.3f\r\n", settings->arc_tolerance);
-        
-    len += sprintf(&settings_buffer[len], "$21=%u\r\n", settings->hard_limits_enable);
-    // ✅ UGS COMPATIBILITY: Report $22 as boolean 0/1 for GRBL v1.1 compliance
-    // UGS checks value == "1" (not just non-zero) via "1".equalsIgnoreCase(value)
-    // Internal bitmask preserved for per-axis homing control via $H command
-    // Translation: $22=7 internal → report $22=1 to UGS, $22=0 internal → report $22=0
-    len += sprintf(&settings_buffer[len], "$22=%u\r\n", settings->homing_enable ? 1 : 0);
-    len += sprintf(&settings_buffer[len], "$23=%u\r\n", settings->homing_dir_mask);
-    len += sprintf(&settings_buffer[len], "$24=%.3f\r\n", settings->homing_feed_rate);
-    len += sprintf(&settings_buffer[len], "$25=%.3f\r\n", settings->homing_seek_rate);
-    len += sprintf(&settings_buffer[len], "$26=%u\r\n", (unsigned int)settings->homing_debounce);
-    len += sprintf(&settings_buffer[len], "$27=%.3f\r\n", settings->homing_pull_off);
-
-    len += sprintf(&settings_buffer[len], "$30=%.3f\r\n", settings->spindle_max_rpm);
-    len += sprintf(&settings_buffer[len], "$31=%.3f\r\n", settings->spindle_min_rpm);
+    // $0-$6: step/limit/probe configuration
+    len += sprintf(&settings_buffer[len], "$0=%u\r\n",   (unsigned int)settings->step_pulse_time);
+    len += sprintf(&settings_buffer[len], "$1=%u\r\n",   (unsigned int)settings->step_idle_delay);
+    len += sprintf(&settings_buffer[len], "$2=%u\r\n",   settings->step_pulse_invert);
+    len += sprintf(&settings_buffer[len], "$3=%u\r\n",   settings->step_direction_invert);
+    len += sprintf(&settings_buffer[len], "$4=%u\r\n",   settings->step_enable_invert);
+    len += sprintf(&settings_buffer[len], "$5=%u\r\n",   settings->limit_pins_invert);
+    len += sprintf(&settings_buffer[len], "$6=%u\r\n",   settings->probe_invert);
+    // $10-$13: reporting / arc
+    len += sprintf(&settings_buffer[len], "$10=%u\r\n",  settings->status_report_mask);
+    len += sprintf(&settings_buffer[len], "$11=%.3f\r\n",settings->junction_deviation);
+    len += sprintf(&settings_buffer[len], "$12=%.3f\r\n",settings->mm_per_arc_segment);
+    len += sprintf(&settings_buffer[len], "$13=%u\r\n",  settings->report_inches);
+    // $20-$27: limits and homing
+    len += sprintf(&settings_buffer[len], "$20=%u\r\n",  settings->soft_limits_enable);
+    len += sprintf(&settings_buffer[len], "$21=%u\r\n",  settings->hard_limits_enable);
+    // UGS COMPATIBILITY: report $22 as boolean 0/1; internal bitmask preserved for $H
+    len += sprintf(&settings_buffer[len], "$22=%u\r\n",  settings->homing_enable ? 1 : 0);
+    len += sprintf(&settings_buffer[len], "$23=%u\r\n",  settings->homing_dir_mask);
+    len += sprintf(&settings_buffer[len], "$24=%.3f\r\n",settings->homing_feed_rate);
+    len += sprintf(&settings_buffer[len], "$25=%.3f\r\n",settings->homing_seek_rate);
+    len += sprintf(&settings_buffer[len], "$26=%u\r\n",  (unsigned int)settings->homing_debounce);
+    len += sprintf(&settings_buffer[len], "$27=%.3f\r\n",settings->homing_pull_off);
+    // $30-$32: spindle / laser
+    len += sprintf(&settings_buffer[len], "$30=%.3f\r\n",settings->spindle_max_rpm);
+    len += sprintf(&settings_buffer[len], "$31=%.3f\r\n",settings->spindle_min_rpm);
+    len += sprintf(&settings_buffer[len], "$32=%u\r\n",  settings->laser_mode);
     
     // Steps per mm ($100-$103) - Array-based
     len += sprintf(&settings_buffer[len], "$100=%.3f\r\n", settings->steps_per_mm[AXIS_X]);

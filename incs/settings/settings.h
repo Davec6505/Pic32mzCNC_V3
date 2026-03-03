@@ -19,11 +19,16 @@ typedef struct {
     uint8_t step_direction_invert; // $3 - direction port invert mask (0-255)
     uint8_t step_enable_invert;    // $4 - invert step enable pin (bool as uint8)
     uint8_t limit_pins_invert;     // $5 - invert limit pins (bool as uint8)
-    uint8_t probe_invert;          // $6 - probe pin invert (0=active low, 1=active high)
-    
-    // Arc configuration ($12-$13)
-    float mm_per_arc_segment;      // $12 - Arc segment length in mm (default 0.1mm)
-    float arc_tolerance;           // $13 - Arc tolerance in mm (default 0.002mm, GRBL v1.1)
+    uint8_t probe_invert;          // $6  - probe pin invert (0=active low, 1=active high)
+    uint8_t status_report_mask;    // $10 - status report mask (default 3: MPos + buf state)
+    uint8_t report_inches;         // $13 - 0=mm output, 1=inches output (GRBL v1.1)
+    uint8_t soft_limits_enable;    // $20 - soft limit enable
+    // NOTE: the 3 bytes above fill what was implicit compiler padding after probe_invert,
+    // so no existing field offsets are shifted.
+
+    // Arc configuration ($12)
+    float mm_per_arc_segment;      // $12 - Arc segment chord length in mm (default 0.5mm)
+    float arc_tolerance;           // internal - radius mismatch guard (not user-settable, not printed)
     
     // Motion configuration ($100-$132) - Array-based for scalability
     float steps_per_mm[4];         // $100-$103 - Steps per mm [X, Y, Z, A]
@@ -49,7 +54,7 @@ typedef struct {
                                     //       UGS reads $$ → firmware reports 1 if any axis enabled
                                     //       Manual $22=7 works for per-axis control (advanced users)
     uint8_t homing_dir_mask;       // $23 - Homing dir invert mask
-    uint8_t padding2;              // Alignment padding
+    uint8_t laser_mode;            // $32 - 0=CNC mode, 1=laser mode (replaces padding2, same offset)
     float homing_feed_rate;        // $24 - Homing locate feed rate (mm/min)
     float homing_seek_rate;        // $25 - Homing search seek rate (mm/min)
     uint32_t homing_debounce;      // $26 - Homing switch debounce (ms)
@@ -93,9 +98,9 @@ typedef struct {
 // only when the struct actually changes — otherwise existing flash settings
 // (written as version 2 with DRV8825-only builds) remain valid.
 #ifdef HAS_TMC5160_AXIS
-#define SETTINGS_VERSION   4  // v4: jerk[4] added + TMC5160 fields present
+#define SETTINGS_VERSION   5  // v5: added $6/$10/$13/$20/$32 GRBL params (TMC5160 build)
 #else
-#define SETTINGS_VERSION   3  // v3: jerk[4] added (DRV8825-only build)
+#define SETTINGS_VERSION   4  // v4: added $6/$10/$13/$20/$32 GRBL params (DRV8825-only build)
 #endif
 
 // ✅ CRITICAL: Safe NVM storage location based on MikroE bootloader
