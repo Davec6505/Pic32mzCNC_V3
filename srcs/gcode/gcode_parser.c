@@ -71,6 +71,15 @@ GCODE_Data gcodeData = {
 };
 
 static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
+
+// Startup pre-fill gate.
+// On power-on or soft-reset the trajectory queue is empty.  We withhold ALL
+// "ok" responses until the queue reaches the high-water mark (63/64 slots).
+// Once that threshold is crossed for the first time we flip this flag and
+// switch to normal 1-for-1 flow: release one "ok" per freed slot so UGS
+// keeps the queue at high-water indefinitely.
+static bool startupPrefillDone = false;
+
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
 // g_feed_hold_active is in stepper.h (defined in stepper.c) — global, gated in app.c APP_IDLE
@@ -179,7 +188,8 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     cmdQueue->count = 0;
     
     /* 9. Reset G-code parser state */
-    okPendingCount = 0;  // Clear all deferred ok responses
+    okPendingCount = 0;       // Clear all deferred ok responses
+    startupPrefillDone = false; // Re-arm pre-fill gate after soft reset
     grblCheckMode = false;
     g_feed_hold_active  = false;  // Clear hold (defined in stepper.c / stepper.h)
     g_feed_hold_pending = false;  // Cancel any in-flight pending hold
@@ -209,7 +219,8 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
 
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
-    okPendingCount = 0;  // Clear all deferred ok responses
+    okPendingCount = 0;       // Clear all deferred ok responses
+    startupPrefillDone = false; // Arm pre-fill gate on first init
     gcodeData.state = GCODE_STATE_IDLE;
     unitsInches = false;
     grblCheckMode = false;
@@ -685,10 +696,34 @@ static inline uint32_t Flow_LowWater(const GCODE_CommandQueue* q)
  * @param q Command queue (unused with current logic)
  */
 void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
-    // Send deferred "ok" responses when buffer drops below low-water mark
-    // This prevents deadlock on long motion files while still providing backpressure
-    uint32_t lowWater = appData->gcodeCommandQueue.maxMotionSegments - MOTION_BUFFER_LOW_WATER;
-    
+    uint32_t highWater = Flow_HighWater(&appData->gcodeCommandQueue); // MAX - 1 = 63
+    uint32_t lowWater  = Flow_LowWater(&appData->gcodeCommandQueue);  // MAX - 1 = 63
+
+    if (!startupPrefillDone) {
+        // ── Pre-fill phase ────────────────────────────────────────────────────
+        // Hold ALL "ok" responses until the trajectory queue is at high-water.
+        // Once it crosses that line, flush every accumulated "ok" in one burst
+        // and switch to normal 1-for-1 flow.
+        if (appData->motionQueueCount >= highWater) {
+            startupPrefillDone = true;
+            DEBUG_PRINT_GCODE("[PREFILL] Queue reached high-water (%lu), flushing %lu deferred ok(s)\r\n",
+                              (unsigned long)highWater, (unsigned long)okPendingCount);
+            while (okPendingCount > 0) {
+                if (UART_SendOK()) {
+                    okPendingCount--;
+                } else {
+                    break; // TX buffer full, remainder released next iteration
+                }
+            }
+        }
+        // else: still filling — nothing to release yet
+        return;
+    }
+
+    // ── Normal flow phase ─────────────────────────────────────────────────────
+    // Release one "ok" per freed slot: as long as the queue is below high-water
+    // (i.e. any slot is free) drain one pending ok at a time so UGS immediately
+    // refills that slot and the queue stays near 63/64.
     while (okPendingCount > 0 && appData->motionQueueCount < lowWater) {
         DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue=%lu < lowWater=%lu, pending=%lu)\r\n",
                           (unsigned long)appData->motionQueueCount, (unsigned long)lowWater,
@@ -712,21 +747,19 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
  */
 static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 {
-    // ✅ Dual-threshold flow control to keep motion buffer fed
-    // Defer "ok" when buffer reaches high-water mark (almost full)
-    // Resume sending "ok" when buffer drains to low-water mark
-    
-    uint32_t highWater = Flow_HighWater(q);  // maxSegments - 2 (defer when 14/16 used)
-    
-    if (appData->motionQueueCount >= highWater) {
-        // Buffer almost full - defer this "ok" to apply backpressure
-        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu >= highWater=%lu, pending=%lu)\r\n", 
+    uint32_t highWater = Flow_HighWater(q); // MAX - 1 = 63
+
+    if (!startupPrefillDone || appData->motionQueueCount >= highWater) {
+        // Defer: either still in pre-fill phase, or queue is at high-water.
+        // GCODE_CheckDeferredOk() will release this once a slot opens.
+        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (prefillDone=%d queue=%lu >= highWater=%lu, pending=%lu)\r\n",
+                          (int)startupPrefillDone,
                           (unsigned long)appData->motionQueueCount,
                           (unsigned long)highWater,
                           (unsigned long)(okPendingCount + 1));
         okPendingCount++;
     } else {
-        // Buffer has space - send "ok" immediately
+        // Queue has a free slot and prefill is done — send immediately.
         DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (queue=%lu < highWater=%lu)\r\n",
                           (unsigned long)appData->motionQueueCount,
                           (unsigned long)highWater);
