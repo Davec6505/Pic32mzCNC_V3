@@ -28,6 +28,11 @@ void KINEMATICS_SetWorkCoordinates(float x, float y, float z);  // Fixed: Remove
 // Get current active work coordinate system offset (uses appData->activeWCS)
 void KINEMATICS_GetActiveWCSOffset(uint8_t activeWCS, float* x_offset, float* y_offset, float* z_offset);
 
+// G92 temporary work offset (not flash-backed; cleared on soft reset)
+// machine[NUM_AXIS] = current machine coords, desired_work[NUM_AXIS] = requested work position.
+void KINEMATICS_SetG92Offset(const float machine[NUM_AXIS], const float desired_work[NUM_AXIS]);
+void KINEMATICS_ClearG92Offset(void);
+
 // Physics & profiling calculations for motion planning
 MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end, float feedrate, 
                                    MotionSegment* segment_buffer,
