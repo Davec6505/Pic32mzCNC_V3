@@ -234,19 +234,36 @@ void MOTION_Arc(APP_DATA *appData)
     if (TRAJECTORY_AddMove(appData->arcCurrent, next, appData->arcFeedrate, 0.0f, 0.0f)) {
         TRAJECTORY_Recalculate();
 
-        // Pump the interpolator if it went idle between arc segments
-        if (!INTERPOLATOR_IsActive()) {
-            SCurveMove mv;
-            if (TRAJECTORY_GetNextMove(&mv)) {
-                STEPPERS_Enable();
-                INTERPOLATOR_LoadMove(&mv);
-            }
-        }
-
         appData->arcCurrent = next;
 
         if (is_last) {
             appData->arcGenState = ARC_GEN_IDLE;
+        }
+
+        // Pre-fill gate: only release the interpolator once the queue is deep enough
+        // to absorb any main-loop timing jitter without starving the ISR.
+        //
+        // For short arcs  (total < queue capacity): wait until fully generated.
+        // For long arcs   (total ≥ queue capacity): wait until queue is nearly full.
+        //
+        // After this initial kick, MOTION_Tasks() keeps the interpolator fed by
+        // popping the next SCurveMove each time MoveComplete() fires.
+        if (!INTERPOLATOR_IsActive()) {
+            uint32_t prefill_target =
+                (appData->arcSegmentTotal < (uint32_t)(TRAJ_QUEUE_SIZE - 2))
+                ? appData->arcSegmentTotal          // short arc: wait for full generation
+                : (uint32_t)(TRAJ_QUEUE_SIZE - 2);  // long arc:  wait for near-full queue
+
+            bool prefill_ready = (appData->arcGenState == ARC_GEN_IDLE) ||
+                                 (TRAJECTORY_QueueCount() >= prefill_target);
+
+            if (prefill_ready) {
+                SCurveMove mv;
+                if (TRAJECTORY_GetNextMove(&mv)) {
+                    STEPPERS_Enable();
+                    INTERPOLATOR_LoadMove(&mv);
+                }
+            }
         }
     } else {
         // Queue unexpectedly full — roll back and retry next iteration
