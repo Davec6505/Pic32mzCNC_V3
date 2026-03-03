@@ -44,6 +44,7 @@ typedef struct {
     
     // Motion tracking
     bool motion_active;         // True when homing move in progress
+    bool locate_backing_off;    // True during LOCATE backoff (before re-approach)
     uint32_t alarm_code;        // Non-zero if homing failed
 } HomingControl;
 
@@ -125,6 +126,13 @@ void HOMING_StartPulloff(APP_DATA* appData);
  * @return true if limit triggered and debounced
  */
 bool HOMING_LimitTriggered(void);
+
+/**
+ * @brief Read instantaneous (non-debounced) limit state for current homing axis.
+ * Applies $23 direction and $5 invert. Used by app.c to feed UTILS_HomingLimitUpdate.
+ * @return true if the relevant limit switch is currently active
+ */
+bool HOMING_IsLimitActiveNow(void);
 
 /**
  * @brief Move to next axis in homing sequence

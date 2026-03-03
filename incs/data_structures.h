@@ -52,8 +52,34 @@ typedef struct {
 
 
 // ============================================================================
-// Motion Segment Structure
 // ============================================================================
+// GRBL-Style Segment Buffer Architecture (March 2, 2026)
+// ============================================================================
+// GRBL breaks each planner block into many small constant-velocity segments.
+// The ISR executes pure Bresenham with a fixed step rate per segment.
+// No acceleration profiling in ISR - all velocity changes are pre-computed.
+
+#define SEGMENT_BUFFER_SIZE 16  // Ring buffer for small segments
+
+// Stepper Block - Bresenham data for one planner block
+// One st_block per planner block, contains step counts for Bresenham
+typedef struct {
+    uint32_t steps[NUM_AXIS];        // Total steps per axis for this planner block
+    uint32_t step_event_count;       // Total dominant axis steps
+    uint8_t direction_bits;          // Direction bits (1 bit per axis)
+} StepperBlock;
+
+// Step Segment - Small constant-velocity chunk
+// Many segments per planner block, each with fixed PR4 value
+typedef struct {
+    uint16_t n_step;                 // Number of dominant-axis steps in this segment
+    uint32_t step_interval;          // PR4 value (constant for this segment)
+    uint8_t st_block_index;          // Index into stepper block buffer
+} StepSegment;
+
+// Motion Segment Structure (Planner Block)
+// ============================================================================
+// This is what the planner works with - full move with trapezoid profile
 
 typedef struct {
     // Segment type
@@ -64,57 +90,36 @@ typedef struct {
     
     // ✅ ARRAY-BASED: Bresenham parameters (only used for LINEAR/ARC segments)
     int32_t delta[NUM_AXIS];     // Step deltas per axis [X, Y, Z, A]
-    int32_t error[NUM_AXIS];     // Bresenham error accumulators [X, Y, Z, A]
     
     // Dominant axis (pre-calculated during motion planning)
     E_AXIS dominant_axis;        // Axis with largest delta (drives step timing)
     int32_t dominant_delta;      // Largest absolute delta value
     
     // Motion parameters
-    uint32_t steps_remaining;
-    uint32_t steps_completed;
-    uint32_t step_interval;      // Current step interval (for velocity profiling)
+    uint32_t steps_remaining;    // Total steps for this planner block
     uint32_t pulse_width;        // Pulse width in timer ticks
     
     // ✅ Trapezoidal velocity profile parameters (GRBL-style)
-    // These are pre-computed by KINEMATICS in main loop (floating point OK)
-    // ISR uses these for integer-only segment conditioning
-    uint32_t initial_rate;       // Starting step interval (slowest, timer ticks)
-    uint32_t nominal_rate;       // Cruise step interval (fastest, timer ticks)
-    uint32_t final_rate;         // Ending step interval (slowest, timer ticks)
+    // Computed by KINEMATICS, used by segment generator (not ISR)
+    float initial_speed;         // Starting speed (mm/s)
+    float nominal_speed;         // Cruise speed (mm/s)
+    float final_speed;           // Ending speed (mm/s)
     
-    uint32_t accelerate_until;   // Step count to end acceleration phase
-    uint32_t decelerate_after;   // Step count to start deceleration phase
-    
-    int32_t  accel_count;        // Taylor series: step counter n, entry-velocity-corrected starting index
-    int32_t  accel_count_decel;  // Taylor series: starting n for decel phase (negative value, set by kinematics)
-    int32_t  rest;               // Taylor series: integer remainder — prevents float drift (0 at segment start)
+    float accelerate_until;      // Distance to end accel (mm)
+    float decelerate_after;      // Distance to start decel (mm)
 
-    // S-curve jerk control (set by kinematics from $140-$143 jerk setting)
-    uint32_t jerk_steps;         // Power-of-2 number of dominant-axis steps for S-curve ramp (0 = disabled)
-    uint8_t  jerk_steps_log2;    // log2(jerk_steps) — used for fast bit-shift division in ISR
-    uint8_t  jerk_pad[3];        // Alignment padding
-    int32_t  jerk_count;         // ISR running counter for S-curve ramp; reset to 0 at segment and decel start
-
-    // Physics parameters (calculated by kinematics for reference/debugging)
-    float start_velocity;        // Starting velocity for this segment (mm/sec)
-    float max_velocity;          // Maximum velocity for this segment (mm/sec)
-    float end_velocity;          // Ending velocity for this segment (mm/sec)
+    // Physics parameters
     float acceleration;          // Acceleration/deceleration rate (mm/sec²)
+    float millimeters;           // Total segment distance (mm)
 
     // =========================================================================
     // GRBL-exact planner fields (March 2026)
     // =========================================================================
-    // These mirror GRBL's plan_block_t. MOTION_PlannerRecalculate() runs the
-    // standard GRBL reverse+forward pass to settle entry_speed_sqr for every
-    // queued block, then KINEMATICS_RecalculateTrapezoid() converts the settled
-    // speeds back to ISR parameters (initial_rate, final_rate, accel_until …).
-    float unit_vec[NUM_AXIS];           // Normalised direction unit vector (stored for junction calc)
-    float entry_speed_sqr;              // Planned entry speed² (mm/s)² — settled by planner
-    float max_entry_speed_sqr;          // Max allowable entry speed² (junction + neighboring nominals)
-    float max_junction_speed_sqr;       // Junction speed limit from path geometry alone
-    float millimeters;                  // Total segment distance (mm) — used by planner passes
-    bool  speed_locked;                 // true = arc/system segment — planner must not modify
+    float unit_vec[NUM_AXIS];           // Normalised direction unit vector
+    float entry_speed_sqr;              // Planned entry speed² (mm/s)²
+    float max_entry_speed_sqr;          // Max allowable entry speed²
+    float max_junction_speed_sqr;       // Junction speed limit
+    bool  speed_locked;                 // true = planner must not modify
 } MotionSegment;
 
 // ============================================================================
@@ -178,11 +183,39 @@ typedef struct {
     // G-code command queue (with nested motion info for flow control)
     GCODE_CommandQueue gcodeCommandQueue;
     
-    // Motion queue
+    // Motion queue (Planner blocks)
     MotionSegment motionQueue[MAX_MOTION_SEGMENTS];
     uint32_t motionQueueHead;
     uint32_t motionQueueTail;
     uint32_t motionQueueCount;
+    
+    // =========================================================================
+    // GRBL Segment Buffer - Small constant-velocity segments
+    // =========================================================================
+    StepperBlock stepperBlocks[MAX_MOTION_SEGMENTS];  // One per planner block
+    StepSegment segmentBuffer[SEGMENT_BUFFER_SIZE];   // Ring buffer of small segments
+    volatile uint8_t segmentBufferTail;               // ISR reads from tail
+    uint8_t segmentBufferHead;                        // Main loop writes to head
+    uint8_t segmentNextHead;                          // Next head position
+    
+    // Segment preparation state (exact port of GRBL's st_prep_t)
+    uint8_t prep_st_block_index;      // Current stepper block being prepped
+    float prep_mm_remaining;          // unused - kept for ABI compat (pl_block->millimeters used directly)
+    float prep_current_speed;         // Current speed at end of last segment (mm/s)
+    uint8_t prep_ramp_type;           // 0=accel, 1=cruise, 2=decel
+    MotionSegment* prep_pl_block;     // Planner block being segmented
+    // GRBL st_prep_t fields (added to match GRBL's st_prep_buffer exactly)
+    float prep_steps_remaining;       // Float step count remaining (high precision, decrements)
+    float prep_step_per_mm;           // steps/mm for current block
+    float prep_req_mm_increment;      // Min mm to guarantee >= 1 step (1.25/step_per_mm)
+    float prep_dt_remainder;          // Fractional step time carried from previous segment
+    float prep_accelerate_until;      // mm_remaining at end of accel ramp (GRBL notation: counts down)
+    float prep_decelerate_after;      // mm_remaining at start of decel ramp (GRBL notation: counts down)
+    float prep_maximum_speed;         // Peak speed in block (nominal or triangle peak) (mm/s)
+    float prep_mm_complete;           // Target mm_remaining (0.0 = run to end of block)
+    float prep_exit_speed;            // Block exit speed (mm/s)
+    
+    // =========================================================================
     
     // ✅ ARRAY-BASED: Current position tracking (work coordinates) [X, Y, Z, A]
     float current[4];

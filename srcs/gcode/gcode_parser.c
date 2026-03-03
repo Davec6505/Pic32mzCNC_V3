@@ -888,26 +888,36 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 } else if ((T4CON & _T4CON_ON_MASK) != 0) {
                     // Hardware timer running → motion in progress (or about to start)
                     state = "Run";
-                } else if (appData->currentSegment != NULL &&
-                           appData->currentSegment->steps_completed < appData->currentSegment->steps_remaining) {
-                    state = "Run";
                 } else if (appData->motionQueueCount > 0) {
+                    // Motion queue has segments waiting
                     state = "Run";
                 }
 
-                float feedrate_mm_min = (state[0] == 'R') ? appData->modalFeedrate : 0.0f;
-                if (state[0] == 'R' && feedrate_mm_min <= 0.0f) {
-                    feedrate_mm_min = (appData->modalFeedrate > 0.0f) ? appData->modalFeedrate : 600.0f;
-                    appData->modalFeedrate = feedrate_mm_min;
+                // FS feedrate: read actual step_interval from the executing ISR segment.
+                // prep_current_speed tracks the look-ahead preparation cursor, NOT
+                // the segment currently clocking through the ISR, so it lags/leads
+                // the real executing speed.  STEPPER_GetCurrentFeedrateMmMin() reads
+                // the hardware timer ticks directly – zero ambiguity.
+                float feedrate_mm_min = 0.0f;
+                if (state[0] == 'R') {
+                    feedrate_mm_min = STEPPER_GetCurrentFeedrateMmMin();
+                    if (feedrate_mm_min < 1.0f) {
+                        // Fallback: use modal feedrate if step_interval not yet loaded
+                        feedrate_mm_min = (appData->modalFeedrate > 0.0f) ? appData->modalFeedrate : 0.0f;
+                    }
                 }
-                uint32_t spindle_rpm = appData->modalSpindleRPM;
+                // ✅ FIX: XC32 -msingle-float ABI mismatch — printf lib expects 8-byte double
+                // for %f/%g but caller passes 4-byte float.  Convert both to uint32_t and
+                // use %lu so there is zero float/double argument-size ambiguity.
+                uint32_t feed_display   = (uint32_t)(feedrate_mm_min + 0.5f);
+                uint32_t spindle_display = appData->modalSpindleRPM;
 
                 uint32_t response_len = (uint32_t)snprintf((char*)txBuffer, sizeof(txBuffer),
-                    "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%u%s%s>\r\n",
+                    "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%lu,%lu%s%s>\r\n",
                     state, 
                     mpos[AXIS_X], mpos[AXIS_Y], mpos[AXIS_Z], 
                     wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
-                    feedrate_mm_min, (unsigned)spindle_rpm,
+                    (unsigned long)feed_display, (unsigned long)spindle_display,
                     grblCheckMode ? "|Cm:1" : "",
                     "");  // Hold state reported via state string (Hold:0), not separate flag
                 UART3_Write(txBuffer, response_len);
@@ -1051,9 +1061,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             l += sprintf(&state_buffer[l], "G94 ");
             l += sprintf(&state_buffer[l], "M5 ");
             l += sprintf(&state_buffer[l], "M9 ");
-            l += sprintf(&state_buffer[l], "T%u ", appData->modalToolNumber);
-            l += sprintf(&state_buffer[l], "F%.1f ", appData->modalFeedrate);
-            l += sprintf(&state_buffer[l], "S%u", appData->modalSpindleRPM);
+            l += sprintf(&state_buffer[l], "T%lu ", (unsigned long)appData->modalToolNumber);
+            // ✅ FIX: Use integer cast to avoid float/double ABI mismatch in sprintf
+            l += sprintf(&state_buffer[l], "F%lu ", (unsigned long)(uint32_t)(appData->modalFeedrate + 0.5f));
+            l += sprintf(&state_buffer[l], "S%lu", (unsigned long)appData->modalSpindleRPM);
             l += sprintf(&state_buffer[l], "]\r\n");
             UART3_Write((uint8_t*)state_buffer, (uint32_t)l);
             handled = true;

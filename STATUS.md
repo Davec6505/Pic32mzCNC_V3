@@ -1,9 +1,220 @@
-# Pic32mzCNC_V3 - Development Status Tracker
+# Pic32mzCNC_V3 - Development Status Trac
+**PINOUT**: `Enable pin needs to be controled by setting direction bit.
+
 
 **Branch**: `lookahead`  
 **Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
 **Started**: February 10, 2026  
-**Last Updated**: March 2, 2026
+**Last Updated**: March 3, 2026 (FS status display fixes)
+
+---
+
+## ✅ Fix: FS status field — feed rate and spindle display — March 3, 2026 (updated)
+
+**Problem (feedrate)**: `FS:` field reported wrong feedrate (showed X-axis displacement mm, e.g.
+`FS:20` for `G1X20F1000`). Root causes: (1) `prep_current_speed` tracks look-ahead preparation
+cursor speed, not the segment currently executing in the ISR, so it lags/leads actual speed.
+(2) XC32/MIPS variadic ABI: `float` args for `%.0f` may be misread by the printf runtime causing
+wrong values and garbage spindle field.
+
+**Fix (feedrate)**: Added `STEPPER_GetCurrentFeedrateMmMin()` in `stepper.c` that reads
+`current_segment->step_interval` (the live ISR value) and converts via
+`(TMR4_freq / step_interval / steps_per_mm[dominant_axis]) × 60`. Falls back to `modalFeedrate`
+when no segment is loaded (< 1 mm/min).
+
+**Fix (ABI)**: Both `FS:feed` and `FS:spindle` fields converted to `uint32_t` before `snprintf`.
+Format changed from `%.0f,%u` to `%lu,%lu` with `(unsigned long)uint32_t` casts — zero
+float/double ambiguity regardless of ABI.
+
+**Fix ($G report)**: `F%.1f` and `S%u` in `$G` handler now use `%lu` with integer casts.
+
+**Files modified**:
+- `srcs/motion/stepper.c` — added `STEPPER_GetCurrentFeedrateMmMin()` after `STEPPER_GetPositionPointer()`
+- `incs/motion/stepper.h` — declared `STEPPER_GetCurrentFeedrateMmMin()`
+- `srcs/gcode/gcode_parser.c:895-915` — `?` handler — use `STEPPER_GetCurrentFeedrateMmMin()`,
+  convert both feed and spindle to `uint32_t`, format `%lu,%lu`
+- `srcs/gcode/gcode_parser.c:1057-1060` — `$G` handler — T/F/S all use `%lu` + integer cast
+
+---
+
+## ✅ fix: OC register timer wraparound — speed 278× too slow — March 3, 2026
+
+**Problem**: Motor ran at ~9–18 mm/min instead of commanded 5000 mm/min. Position advanced ~0.075mm
+per 500ms UGS poll (6 steps/sec) consistently, indicating PR4 was stuck at 65535.
+
+**Root Cause**: In `OCP1_ISR`, when a segment completes and the next segment is loaded inline, the
+new (smaller, faster) `PR4` is written while TMR4 is already at the OLD `OC1RS` fire point
+(`old_period − 3`). During acceleration `new_period < old_period − 3`, so the timer had already
+**passed** the new PR4 value. The timer then wrapped the full 65535-tick range before resetting
+→ each accel step took 83.9ms = 11.9 steps/sec = 9 mm/min.
+
+**Fix** (`srcs/motion/stepper.c`):
+- `OC1R` and `OC1RS` are now **fixed constants** (2 and 4) instead of `period − 5` / `period − 3`.
+- The ISR always fires at tick 4 of each timer period — always below any valid `PR4 ≥ 7`.
+- Writing a new (smaller) `PR4` in the ISR is always reachable from tick 4 without wrapping.
+- Only `PR4` changes per segment; `OC1R`/`OC1RS` stay at 2/4 permanently.
+- Added `TMR4 = 0u` in `STEPPER_LoadSegment` and `STEPPER_ResumeMotion` for a clean period start.
+
+**Files modified**:
+- `srcs/motion/stepper.c:200` — `STEPPER_LoadSegment`: `OCMP1_CompareValueSet(2u)`, `OCMP1_CompareSecondaryValueSet(4u)`, `TMR4 = 0u` before start
+- `srcs/motion/stepper.c:318` — `STEPPER_ResumeMotion`: same OC fix + `TMR4 = 0u`
+- `srcs/motion/stepper.c:426` — `OCP1_ISR` inline segment load: `OC1R = 2u`, `OC1RS = 4u` (no TMR4 reset required — timer at ~4 always < new PR4)
+
+---
+
+## ✅ fix: F-word modality in G1/G2/G3 — March 3, 2026
+
+**Problem**: `F` (feedrate) was not properly modal for G1/G2/G3 commands.
+- `GCODE_EVENT_SET_FEEDRATE` (standalone `F200` line) was silently discarded — handler returned `true` without storing value.
+- G2/G3 arc moves used `event->data.arcMove.feedrate` directly; if omitted they got feedrate=0 and gave 0 mm/min motion.
+
+**Fixes** (`srcs/motion/motion.c`):
+- `case GCODE_EVENT_SET_FEEDRATE:` — now writes `appData->modalFeedrate = event->data.setFeedrate.feedrate` so standalone `F200` correctly sets the modal feed.
+- Arc path (~line 510): when arc feedrate == 0, falls back to `appData->modalFeedrate` (default 600 if unset); when arc feedrate > 0, updates `appData->modalFeedrate` so subsequent G1/G2/G3 inherit it.
+
+---
+
+## ✅ fix: segment_buffer.c — GRBL-exact do-while rewrite — March 3, 2026
+
+**Problem**: Rectangle motion showed "slow then burst" behaviour — first ~0.4mm crept at ~0.1mm/poll
+then remaining ~19.6mm executed in one poll interval. Root cause: fixed 1ms time slice + forced
+minimum-1-step with mm snap caused positional drift that discharged as a burst when cruise speed
+was reached.
+
+**Root Cause (found from actual GRBL source)**:
+- GRBL's `st_prep_buffer()` extends `dt_max` by `DT_SEGMENT` increments until
+  `mm_remaining ≤ minimum_mm` (guarantees ≥1 step naturally — no forcing).
+- At 2000 mm/s² from rest, first 1ms covers 0.001mm = 0.08 steps.
+  GRBL extends to 7ms to get 1 real step at correct timing.
+- `dt_remainder` carries fractional step time forward so cumulative timing is exact.
+- `step_interval = ceil(timer_freq × (dt + dt_remainder) / n_steps_actual)` — NOT `freq / (speed × spm)`.
+
+**Changes**:
+- `srcs/motion/segment_buffer.c` — **complete rewrite of `SEGMENT_PrepBuffer`**:
+  - GRBL-exact do-while inner loop with `dt_max` extension for slow speeds
+  - New statics: `prep_dt_remainder`, `prep_steps_remaining_f`
+  - Step count: GRBL ceil-difference `ceil(spm×mm_before) - ceil(spm×mm_after)`
+  - `step_interval = ceil(TMR4_freq × (dt + dt_remainder) / n_steps_actual)`
+  - `dt_remainder = (n_steps_remaining_f - step_dist_remaining) × inv_rate` (carried to next seg)
+  - Ramp thresholds: `accel_until_mm = millimeters - accelerate_until`, `decel_after_mm = millimeters - decelerate_after`
+  - New block init: `prep_current_speed = initial_speed`, ramp = ACCEL (or CRUISE if entry ≥ nominal)
+  - Block consumed when `mm_remaining ≤ 0.0f`
+- `srcs/motion/segment_buffer.c:242` — `SEGMENT_Initialize()` simplified: removes stale
+  APP_DATA prep fields, resets `prep_dt_remainder` and `prep_steps_remaining_f` statics
+
+**Result**: Compiled clean (`-Werror -Wall`, no warnings). Ready for hardware test.
+
+---
+
+
+
+## ✅ fix: stepper.c complete rewrite — March 2, 2026 (session 2)
+
+**Problem**: Previous GPT session left stepper.c in a broken state — Taylor ISR code referencing
+deleted struct fields (30+ compile errors), stray code inserted before `#include` statements,
+missing closing braces.
+
+**Fix**: Deleted stepper.c and recreated from scratch (~350 lines, clean compile).
+
+**Changes**:
+- `srcs/motion/stepper.c` — **fully rewritten from scratch**
+  - All Taylor series ISR code deleted (`accel_count`, `rest`, `jerk_count`, `jerk_steps`, `initial_rate`, `nominal_rate`, `final_rate`, `step_interval` on MotionSegment — all gone)
+  - `OCP1_ISR` is now pure GRBL: Bresenham + step count against `current_segment->n_step`, no acceleration math
+  - On segment complete: ISR advances `segmentBufferTail`, loads next StepSegment inline (including updating PR4), or stops TMR4 if buffer empty
+  - `STEPPER_LoadSegment()` pops from `segmentBuffer` ring buffer, initialises Bresenham from `StepperBlock`, sets constant PR4
+  - `_init_bresenham_from_block()` helper isolates GPIO direction writes (main-loop safe) from ISR Bresenham init
+  - All support functions retained: `EnableAll`, `DisableAll`, `StopMotion`, `PauseMotion`, `FinalizeHold`, `ResumeMotion`, `SetDirection`, `GetPosition`, `GetPositionPointer`
+- `srcs/motion/segment_buffer.c:18` — Removed broken `extern const uint32_t g_timer_freq` (was declared `static` in kinematics.c, not linkable); replaced with inline `TMR4_FrequencyGet()` call at line 142
+
+**Build result**: ✅ `bins/CNC_V3.hex` — no errors, 1 expected bootloader warning
+
+---
+
+## 🚀 refactor: GRBL segment buffer architecture - remove Taylor profiling — March 2, 2026
+
+**Problem**: Rectangle G-code exhibited junction stuttering (stutter→rocket→stop pattern at corners)
+due to Taylor series acceleration profiling with large accel_count values producing tiny velocity deltas.
+
+**Root cause**: Firmware attempted to do acceleration math in ISR using Pramod Ranade/Austin formulas.
+After fetching actual GRBL source code, discovered **GRBL has NO acceleration math in ISR at all**.
+
+**GRBL Architecture** (verified from GitHub source):
+- Main loop `st_prep_buffer()` breaks each planner block into many small constant-velocity segments
+- Each segment: N steps at fixed PR4 value (step_interval)
+- ISR executes pure Bresenham with constant rate per segment
+- When segment completes, ISR loads next segment (different PR4 value)
+- All velocity changes are pre-computed as discrete segments
+
+**Implementation** (March 2, 2026):
+
+1. **Data Structures** (`incs/data_structures.h`):
+   - Added `StepperBlock` structure (Bresenham data per planner block)
+   - Added `StepSegment` structure (small constant-velocity chunks)
+   - Added segment ring buffer (16 entries) to APP_DATA
+   - Modified `MotionSegment` to remove Taylor fields:
+     - REMOVED: `accel_count`, `accel_count_decel`, `rest`, `jerk_count`, `jerk_steps`, `jerk_steps_log2`
+     - REMOVED: `initial_rate`, `nominal_rate`, `final_rate`, `step_interval`, `error[]`
+     - KEPT: `initial_speed`, `nominal_speed`, `final_speed` (as floats in mm/s)
+     - KEPT: Planner fields (trapezoid boundaries, acceleration, millimeters, unit_vec)
+
+2. **Segment Generator** (`srcs/motion/segment_buffer.c` - NEW):
+   - Created `SEGMENT_PrepBuffer()` - breaks planner blocks into segments
+   - Uses physics (distance = v*t + 0.5*a*t²) for trapezoid discretization
+   - Converts velocity (mm/s) to PR4 value (timer ticks)
+   - Fills segment ring buffer continuously from main loop
+   - Each segment: n_step count + step_interval (PR4 value)
+
+3. **ISR Simplification** (`srcs/motion/stepper.c`):
+   - REMOVED ALL Taylor profiling code (lines 550-600)
+   - ISR now: Execute step → Increment counter → Load segment when done
+   - PR4 is CONSTANT for each segment (no acceleration math)
+   - Velocity changes happen by loading next segment with different PR4
+
+4. **Motion Module** (`srcs/motion/motion.c`):
+   - Added call to `SEGMENT_PrepBuffer()` at top of MOTION_Tasks
+   - Continuously generates segments from planner blocks
+
+5. **Kinematics Module** (`srcs/motion/kinematics.c` - PENDING CLEANUP):
+   - TODO: Remove all Taylor/Austin calculation code
+   - TODO: Keep only trapezoid profile calculations
+   - TODO: Store speeds as floats (mm/s), remove rate (ticks) calculations
+
+**Benefits**:
+- Smooth motion at all speeds (no Taylor approximation errors)
+- ISR stays simple and fast (no division, no acceleration math)
+- True GRBL architecture adapted for PIC32's dynamic TMR4/PR4 timer
+- Eliminates junction stuttering at corners
+
+**Status**: IN PROGRESS - Data structures complete, ISR simplified, kinematics cleanup pending
+
+---
+
+## 🐛 fix: homing segments run at crawl speed — March 2, 2026
+
+**Root causes** (two independent issues):
+
+1. **SETTINGS_VERSION mismatch forces default seek rate** — lookahead branch bumped
+   `SETTINGS_VERSION` to 3 (jerk + TMC fields), so NVM saved by master (v2) fails the version
+   check and firmware falls back to compile-time defaults: `homing_seek_rate = 500 mm/min` and
+   `homing_feed_rate = 100 mm/min`. Updated defaults to `2000` / `500` mm/min.
+
+2. **`KINEMATICS_LinearMoveSimple` wrong for homing** — all three homing phases (seek, locate,
+   pulloff) called `LinearMoveSimple`, which is an arc-chord helper. It passes `feedrate` (mm/min)
+   as `entry_velocity` / `exit_velocity` (expected mm/s), producing a 60× unit error. This was
+   accidentally harmless for nominal speed (the floor clamp to `nominal_rate` catches it) but
+   caused the GRBL lookahead planner to corrupt the segment if any stale G-code event in the
+   queue triggered `MOTION_ProcessGcodeEvent` → `MOTION_PlannerRecalculate` during homing.
+
+**Fix** — `srcs/motion/homing.c` — `HOMING_StartSeek/Locate/Pulloff`:
+- Replace all three `KINEMATICS_LinearMoveSimple(...)` calls with `KINEMATICS_LinearMove(..., 0.0f, 0.0f)`.
+- Set `segment->speed_locked = true` immediately after each call so `MOTION_PlannerRecalculate`
+  skips these segments in its reverse/forward/trapezoid passes.
+- On homing complete (all axes done), call `KINEMATICS_ResetPlannerState()` so the first
+  post-homing G-code move gets a clean junction (not the homing unit vector).
+
+**Fix** — `srcs/settings/settings.c` — default `CNC_Settings`:
+- `homing_seek_rate`: 500 → 2000 mm/min
+- `homing_feed_rate`: 100 → 500 mm/min
 
 ---
 

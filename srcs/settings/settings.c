@@ -81,8 +81,8 @@ static const CNC_Settings default_settings = {
     .homing_enable = 0x07,         // Bit mask: X=bit0, Y=bit1, Z=bit2, A=bit3 (default: XYZ enabled)
     .homing_dir_mask = 0,
     .padding2 = 0,
-    .homing_feed_rate = 100.0f,
-    .homing_seek_rate = 500.0f,
+    .homing_feed_rate = 500.0f,
+    .homing_seek_rate = 2000.0f,
     .homing_debounce = 25,
     .homing_pull_off = 2.0f,
     

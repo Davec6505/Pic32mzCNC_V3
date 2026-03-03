@@ -41,16 +41,13 @@ bool HOMING_Start(APP_DATA* appData, uint32_t axes_mask) {
         return false;  // Invalid mask
     }
     
-    // Filter axes_mask to only include axes with homing enabled via $22 bit mask
-    // $22 bit mask: bit 0=X, bit 1=Y, bit 2=Z, bit 3=A
-    // This allows $H to work even if some axes don't have limit switches
-    uint8_t homing_enable_mask = *g_homing_settings[0].homing_enable;  // All axes point to same setting
-    uint8_t enabled_axes = axes_mask & homing_enable_mask;  // AND with enable mask
-    
-    // Check if any axes are enabled for homing
-    if (enabled_axes == 0) {
-        return false;  // No axes enabled for homing
+    // $22 is a global boolean (0=disabled, 1=enabled), NOT a per-axis bitmask.
+    // A value of 1 means homing is enabled for all axes — don't AND it with axes_mask.
+    uint8_t homing_globally_enabled = *g_homing_settings[0].homing_enable;
+    if (!homing_globally_enabled) {
+        return false;  // Homing globally disabled ($22=0)
     }
+    uint8_t enabled_axes = (uint8_t)axes_mask;  // All requested axes are eligible
     
     // Initialize homing control
     g_homing.axes_to_home = enabled_axes;  // Use filtered mask
@@ -155,6 +152,9 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
                 HOMING_StartSeek(appData);
             } else {
                 g_homing.state = HOMING_STATE_IDLE;
+                // Reset GRBL planner state so the first G-code move after homing
+                // doesn't inherit the homing segment's unit vector as its junction.
+                KINEMATICS_ResetPlannerState();
             }
             break;
             
@@ -223,10 +223,14 @@ void HOMING_StartSeek(APP_DATA* appData) {
     // Array-based axis targeting (replaces switch statement)
     ADD_COORDINATE_AXIS(&target, g_homing.current_axis, search_distance);
     
-    // Generate motion segment at seek rate
+    // Generate motion segment at seek rate using pure GRBL constant-speed builder.
+    // HomingMove: instant cruise speed, no Taylor profiler, no acceleration ramps.
+    // speed_locked prevents the GRBL lookahead planner from modifying timing.
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMoveSimple(current, target, *g_homing_settings[g_homing.current_axis].homing_seek_rate, segment);
+        KINEMATICS_HomingMove(current, target,
+                             *g_homing_settings[g_homing.current_axis].homing_seek_rate,
+                             segment);
         
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
@@ -243,16 +247,17 @@ void HOMING_StartLocate(APP_DATA* appData) {
     uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
     bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
     
-    // Back off 5mm to clear switch, then approach slowly
-    // $23=0 (MIN) → back off +5mm, then approach -10mm
-    // $23=1 (MAX) → back off -5mm, then approach +10mm
-    // NOTE: $3 (step_direction_invert) only inverts GPIO pin, G-code already handles this
-    float backoff_distance = home_positive ? -5.0f : 5.0f;
-    float locate_distance = home_positive ? 10.0f : -10.0f;  // Re-approach slowly
+    // Back off $27 (pull_off) to just clear the switch, then re-approach slowly.
+    // Using pull_off for backoff ensures we clear the switch regardless of hysteresis.
+    // Re-approach = pull_off * 2 so the switch is guaranteed within range.
+    // $23=0 (MIN) → back off +pull_off, then approach -(pull_off*2)
+    // $23=1 (MAX) → back off -pull_off, then approach +(pull_off*2)
+    float pull_off = *g_homing_settings[g_homing.current_axis].homing_pull_off;
+    float backoff_distance = home_positive ? -pull_off : pull_off;
+    float locate_distance  = home_positive ? (pull_off * 2.0f) : -(pull_off * 2.0f);
     
-    DEBUG_PRINT_MOTION("[HOMING_LOCATE] axis=%d, $23=%d, backoff=%.1f, locate=%.1f\r\n",
-                      g_homing.current_axis, (dir_mask >> g_homing.current_axis) & 0x01, 
-                      backoff_distance, locate_distance);
+    DEBUG_PRINT_MOTION("[HOMING_LOCATE] axis=%d, pull_off=%.1f, backoff=%.1f, locate=%.1f\r\n",
+                      g_homing.current_axis, pull_off, backoff_distance, locate_distance);
     
     // Build target position (back off first)
     CoordinatePoint current = KINEMATICS_GetCurrentPosition();
@@ -261,11 +266,12 @@ void HOMING_StartLocate(APP_DATA* appData) {
     // Array-based axis targeting (replaces switch statement)
     ADD_COORDINATE_AXIS(&target, g_homing.current_axis, backoff_distance);
     
-    // Generate backoff motion segment at slow rate
+    // Generate backoff motion segment at feed rate using pure GRBL constant-speed builder.
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMoveSimple(current, target, *g_homing_settings[g_homing.current_axis].homing_feed_rate, segment);
-        
+        KINEMATICS_HomingMove(current, target,
+                             *g_homing_settings[g_homing.current_axis].homing_feed_rate,
+                             segment);
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
     }
@@ -278,8 +284,9 @@ void HOMING_StartLocate(APP_DATA* appData) {
     
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMoveSimple(current, target, *g_homing_settings[g_homing.current_axis].homing_feed_rate, segment);
-        
+        KINEMATICS_HomingMove(current, target,
+                             *g_homing_settings[g_homing.current_axis].homing_feed_rate,
+                             segment);
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
         
@@ -309,11 +316,12 @@ void HOMING_StartPulloff(APP_DATA* appData) {
     // Array-based axis targeting (replaces switch statement)
     ADD_COORDINATE_AXIS(&target, g_homing.current_axis, pulloff_distance);
     
-    // Generate pulloff motion segment
+    // Generate pulloff motion segment using pure GRBL constant-speed builder.
     if (appData->motionQueueCount < MAX_MOTION_SEGMENTS) {
         MotionSegment* segment = &appData->motionQueue[appData->motionQueueHead];
-        KINEMATICS_LinearMoveSimple(current, target, *g_homing_settings[g_homing.current_axis].homing_feed_rate, segment);
-        
+        KINEMATICS_HomingMove(current, target,
+                             *g_homing_settings[g_homing.current_axis].homing_feed_rate,
+                             segment);
         appData->motionQueueHead = (appData->motionQueueHead + 1) % MAX_MOTION_SEGMENTS;
         appData->motionQueueCount++;
         
@@ -394,6 +402,26 @@ bool HOMING_LimitTriggered(void) {
         g_homing.debouncing = false;
         return false;
     }
+}
+
+// Read instantaneous (non-debounced) limit state for the current homing axis.
+// Called every iteration by app.c to feed UTILS_HomingLimitUpdate() for edge detection.
+// Applies $23 direction (MIN vs MAX switch) and $5 invert mask.
+bool HOMING_IsLimitActiveNow(void) {
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+
+    bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask
+                          >> g_homing.current_axis) & 0x01;
+
+    bool limit_min = LIMIT_GetMin(g_homing.current_axis);
+    bool limit_max = LIMIT_GetMax(g_homing.current_axis);
+    bool limit_state = home_positive ? limit_max : limit_min;
+
+    // Apply invert mask from settings ($5)
+    bool inverted = (settings->limit_pins_invert >> g_homing.current_axis) & 0x01;
+    limit_state ^= inverted;
+
+    return limit_state;
 }
 
 bool HOMING_NextAxis(void) {

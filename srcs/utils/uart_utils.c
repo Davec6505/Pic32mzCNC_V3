@@ -68,9 +68,9 @@ bool UART_SendGrblStatus(const char* state,
         return false;
     }
     int len = snprintf(buffer, sizeof(buffer),
-                       "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%u>\r\n",
+                       "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%.0f,%.0f>\r\n",
                        state, mpos_x, mpos_y, mpos_z, wpos_x, wpos_y, wpos_z,
-                       feedrate, (unsigned)spindle_rpm);
+                       feedrate, (float)spindle_rpm);
     if (len <= 0 || len >= (int)sizeof(buffer)) {
         return false;
     }

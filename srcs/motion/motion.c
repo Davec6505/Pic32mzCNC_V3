@@ -13,6 +13,7 @@
 #include "spindle.h"      // Spindle PWM control
 #include "homing.h"       // Homing system control
 #include "settings.h"
+#include "segment_buffer.h"  // GRBL-style segment buffer system
 #include "utils/utils.h"       // For AxisConfig and UTILS_GetAxisConfig
 #include "utils/uart_utils.h"  // Required for DEBUG_PRINT_XXX macros
 #include "../config/default/peripheral/tmr/plib_tmr4.h"  // TMR4 PLIB access (16-bit timer for OC1)
@@ -29,75 +30,38 @@ void MOTION_Initialize(void) {
 }
 
 void MOTION_Tasks(APP_DATA* appData) {
-    // ===== SIMPLIFIED MOTION CONTROL (NEW ARCHITECTURE) =====
+    // ===== GRBL SEGMENT BUFFER SYSTEM =====
     // This function is called continuously from APP_Tasks (main loop).
-    // It manages segment loading and monitoring - all real-time work happens in OCP1_ISR!
+    // Step 1: Fill segment buffer from planner blocks (GRBL st_prep_buffer equivalent)
+    // Step 2: Load segments into ISR when ready
+    // Step 3: Monitor for segment completion
     
-    // ⚠️ DEBUG REMOVED - was flooding UART, causing system freeze
-    // Only print when actually loading a segment (see below)
+    // ===== 1. SEGMENT PREPARATION (NEW - GRBL architecture) =====
+    // Continuously break planner blocks into small constant-velocity segments
+    // This fills the segment ring buffer from which ISR consumes
+    SEGMENT_PrepBuffer(appData);
     
-    // ===== 1. SEGMENT LOADING =====
-    // Load new segment when currentSegment is NULL and queue has data
-    if(appData->currentSegment == NULL && appData->motionQueueCount > 0) {
-        
-        // DEBUG_PRINT_MOTION("[MOTION_Tasks] Loading segment: queue=%lu\r\n", appData->motionQueueCount);
-        // Get segment from tail of circular buffer
-        appData->currentSegment = &appData->motionQueue[appData->motionQueueTail];
-
-        // If this is a zero-length segment (no steps), skip it gracefully
-        if (appData->currentSegment->steps_remaining == 0) {
-            // Dequeue and move to next segment
-            appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
+    // ===== 2. SEGMENT LOADING =====
+    // GRBL LOOKAHEAD: Wait for at least 2 segments before loading the first one.
+    // This allows the planner to calculate proper junction speeds between segments.
+    // With lookahead, the planner knows "we're going from segment 1 to segment 2",
+    // so it can calculate exit_speed for seg1 based on entry_speed of seg2.
+    // Without lookahead, every segment executes start→cruise→stop from zero junction.
+    // ---- Dwell: pass directly to stepper (no step-segments generated) ------
+    if (!appData->motionActive && appData->motionQueueCount > 0) {
+        MotionSegment* pl = &appData->motionQueue[appData->motionQueueTail];
+        if (pl->type == SEGMENT_TYPE_DWELL) {
+            appData->motionQueueTail = (appData->motionQueueTail + 1u) % MAX_MOTION_SEGMENTS;
             appData->motionQueueCount--;
-            appData->currentSegment = NULL;
-            
-            // ✅ Signal that queue space became available
-            appData->motionSegmentCompleted = true;
-            return;  // Try again next iteration
+            STEPPER_LoadSegment(pl);   // stepper.c handles SEGMENT_TYPE_DWELL via coretimer
+            return;
         }
-        
-        // ✅ Load segment into ISR state (this is where the magic happens!)
-        STEPPER_LoadSegment(appData->currentSegment);
-        
-        // Update dominant axis tracker for ISR
-        appData->dominantAxis = appData->currentSegment->dominant_axis;
-        
-        return;  // Exit and let ISR start stepping
     }
-    
-    // ===== 3. SEGMENT COMPLETION CHECK =====
-    // Check if current segment is done (ISR updates steps_completed)
-    if(appData->currentSegment != NULL) {
-        MotionSegment* seg = appData->currentSegment;
-        
-        if(seg->steps_completed >= seg->steps_remaining) {
-            // ===== DEBUG: Segment Completion =====
-            DEBUG_PRINT_MOTION("[SEGMENT] Complete: %lu >= %lu steps\r\n", 
-                seg->steps_completed, seg->steps_remaining);
 
-            // Segment complete - remove from queue
-            appData->motionQueueTail = (appData->motionQueueTail + 1) % MAX_MOTION_SEGMENTS;
-            appData->motionQueueCount--;
-            
-            // ✅ Signal that queue space became available
-            appData->motionSegmentCompleted = true;
-            
-            // Mark current segment as NULL so next one loads
-            appData->currentSegment = NULL;
-            
-            // Stop TMR4 when ALL motion is complete (motion queue empty)
-            // TMR4 runs continuously across segments for smooth multi-segment motion
-            // Only stop when the complete distance has been reached (no more segments)
-            if(appData->motionQueueCount == 0) {
-                // ✅ FEED HOLD: finalize hold if '!' was pending a segment drain
-                if (g_feed_hold_pending) {
-                    STEPPER_FinalizeHold();  // Hold:1 → Hold:0, stops TMR4/OC1
-                } else {
-                    TMR4_Stop();
-                    appData->motionActive = false;
-                }
-            }
-        }
+    // ---- Kick-start ISR when ring buffer has data and stepper is idle ------
+    if (!appData->motionActive &&
+        appData->segmentBufferHead != appData->segmentBufferTail) {
+        STEPPER_LoadSegment(NULL);   // pops from segmentBuffer ring buffer internally
     }
 }
 
@@ -543,7 +507,15 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
             appData->arcRadius = radius;  // Use compensated average radius
             appData->arcClockwise = event->data.arcMove.clockwise;
             appData->arcPlane = appData->modalPlane;
-            appData->arcFeedrate = event->data.arcMove.feedrate;
+            {
+                float arc_f = event->data.arcMove.feedrate;
+                if (arc_f > 0.0f) {
+                    appData->modalFeedrate = arc_f;  // G2/G3 F word is also modal
+                } else {
+                    arc_f = (appData->modalFeedrate > 0.0f) ? appData->modalFeedrate : 600.0f;
+                }
+                appData->arcFeedrate = arc_f;
+            }
             
             // ✅ REMOVED: Don't reset accumulators - arc segments MUST accumulate fractional steps!
             // Each 0.1mm segment may be <1 step, but fractional steps accumulate across all segments
@@ -630,7 +602,10 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event) {
         }
         
         case GCODE_EVENT_SET_FEEDRATE:
-            // Feedrate is handled in modal state
+            // Update modal feedrate (standalone F word on its own line)
+            if (event->data.setFeedrate.feedrate > 0.0f) {
+                appData->modalFeedrate = event->data.setFeedrate.feedrate;
+            }
             return true;
             
         case GCODE_EVENT_SET_SPINDLE_SPEED:

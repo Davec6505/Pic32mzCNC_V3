@@ -36,6 +36,10 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
 // Backward compatibility wrapper (for single segments without junction planning)
 MotionSegment* KINEMATICS_LinearMoveSimple(CoordinatePoint start, CoordinatePoint end, float feedrate, 
                                           MotionSegment* segment_buffer);
+
+// Pure GRBL constant-speed segment for homing (no Taylor profiler, no acceleration ramps)
+MotionSegment* KINEMATICS_HomingMove(CoordinatePoint start, CoordinatePoint end, float feedrate_mm_min,
+                                     MotionSegment* segment_buffer);
 MotionSegment* KINEMATICS_ArcMove(CoordinatePoint start, CoordinatePoint end, CoordinatePoint center, 
                                  bool clockwise, float feedrate, MotionSegment* segment_buffer);
 

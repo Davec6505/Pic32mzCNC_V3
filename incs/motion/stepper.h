@@ -1,3 +1,4 @@
+
 #ifndef STEPPER_H
 #define STEPPER_H
 
@@ -42,6 +43,7 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward);     // Set direction for a
 void STEPPER_DisableAll(void);                            // Emergency stop
 StepperPosition* STEPPER_GetPosition(void);               // Get current position (snapshot)
 StepperPosition* STEPPER_GetPositionPointer(void);        // Get pointer to live position counters
+float STEPPER_GetCurrentFeedrateMmMin(void);              // Real-time feedrate from step_interval (mm/min)
 
 /* Returns true if steppers currently enabled. */
 bool STEPPER_IsEnabled(void);
