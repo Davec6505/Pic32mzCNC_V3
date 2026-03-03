@@ -9,6 +9,21 @@
 
 ---
 
+## ✅ Fix: G1 high-feedrate motion never starts (prep_mm_remaining not initialised) — March 3, 2026
+
+**Problem**: `G1X100F5000` registered the feedrate but motor never moved. `G0` appeared to work.
+**Root cause**: In `SEGMENT_PrepBuffer` (segment_buffer.c), when a new planner block is loaded,
+`appData->prep_mm_remaining` was never initialised to the block's total distance. It retained
+its init value of `0.0f` from `SEGMENT_Initialize`. The do-while inner loop then started with
+`mm_remaining = 0` instead of `100`, causing a negative `time_var` during the ACCEL→CRUISE
+transition, a near-zero or negative `total_dt`, and therefore `inv_rate → negative →
+step_interval = 0xFFFF` (timer ticks ≈ 0.084 s/step). The motor appeared frozen.
+**Fix**:
+- `srcs/motion/segment_buffer.c` block-load section — added `appData->prep_mm_remaining = appData->prep_pl_block->millimeters;` before the trapezoid-field conversion block.
+- `incs/data_structures.h` — corrected the field comment (it was wrongly marked "unused").
+
+---
+
 ## ✅ Fix: FS status field — feed rate and spindle display — March 3, 2026 (updated)
 
 **Problem (feedrate)**: `FS:` field reported wrong feedrate (showed X-axis displacement mm, e.g.

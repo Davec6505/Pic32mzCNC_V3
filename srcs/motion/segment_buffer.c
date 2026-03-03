@@ -71,6 +71,7 @@ void SEGMENT_PrepBuffer(APP_DATA* appData) {
         appData->prep_dt_remainder    = 0.0f;
         appData->prep_mm_complete     = 0.0f;
         appData->prep_exit_speed      = appData->prep_pl_block->final_speed;
+        appData->prep_mm_remaining    = appData->prep_pl_block->millimeters;  // ✅ FIX: must start at block total distance, not 0
 
         // Convert our trapezoid fields (distance-from-start) to GRBL mm_remaining notation
         // (counts DOWN from total_mm to 0). Stored once at block load so they remain

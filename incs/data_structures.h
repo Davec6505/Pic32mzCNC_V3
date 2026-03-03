@@ -200,7 +200,7 @@ typedef struct {
     
     // Segment preparation state (exact port of GRBL's st_prep_t)
     uint8_t prep_st_block_index;      // Current stepper block being prepped
-    float prep_mm_remaining;          // unused - kept for ABI compat (pl_block->millimeters used directly)
+    float prep_mm_remaining;          // mm remaining in current block (counts DOWN from millimeters to 0); MUST be initialised to millimeters at block load
     float prep_current_speed;         // Current speed at end of last segment (mm/s)
     uint8_t prep_ramp_type;           // 0=accel, 1=cruise, 2=decel
     MotionSegment* prep_pl_block;     // Planner block being segmented
