@@ -437,9 +437,7 @@ MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end,
 // NOTE: This only stores speeds in mm/s. The segment generator (segment_buffer.c)
 // will convert these to PR4 values when breaking the block into segments.
 // ============================================================================
-void KINEMATICS_RecalculateTrapezoid(MotionSegment *seg,
-                                     float entry_mms,
-                                     float exit_mms)
+void KINEMATICS_RecalculateTrapezoid(MotionSegment *seg, float entry_mms, float exit_mms)
 {
     if (!seg || seg->steps_remaining == 0) { return; }
 
