@@ -73,11 +73,11 @@ GCODE_Data gcodeData = {
 static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
 
 // Startup pre-fill gate.
-// On power-on or soft-reset the trajectory queue is empty.  We withhold ALL
-// "ok" responses until the queue reaches the high-water mark (63/64 slots).
-// Once that threshold is crossed for the first time we flip this flag and
-// switch to normal 1-for-1 flow: release one "ok" per freed slot so UGS
-// keeps the queue at high-water indefinitely.
+// On power-on or soft-reset the trajectory queue is empty.  We send "ok"
+// freely (immediately) while the queue is below high-water so UGS keeps
+// pushing commands and the queue fills up.  Once the queue first reaches
+// high-water we flip this flag and enter normal 1-for-1 deferred mode:
+// one "ok" released per freed slot, keeping the queue pinned at 63/64.
 static bool startupPrefillDone = false;
 
 static bool grblCheckMode = false;          /* $C toggle */
@@ -749,17 +749,24 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 {
     uint32_t highWater = Flow_HighWater(q); // MAX - 1 = 63
 
-    if (!startupPrefillDone || appData->motionQueueCount >= highWater) {
-        // Defer: either still in pre-fill phase, or queue is at high-water.
-        // GCODE_CheckDeferredOk() will release this once a slot opens.
-        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (prefillDone=%d queue=%lu >= highWater=%lu, pending=%lu)\r\n",
-                          (int)startupPrefillDone,
+    if (!startupPrefillDone) {
+        // Pre-fill phase: send immediately so UGS keeps pushing commands
+        // and the trajectory queue fills toward high-water as fast as possible.
+        DEBUG_PRINT_GCODE("[PREFILL] Sending immediate ok (queue=%lu, filling to highWater=%lu)\r\n",
+                          (unsigned long)appData->motionQueueCount,
+                          (unsigned long)highWater);
+        (void)UART_SendOK();
+        return;
+    }
+
+    // Normal 1-for-1 phase: defer when queue is at high-water, send when a slot opens.
+    if (appData->motionQueueCount >= highWater) {
+        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu >= highWater=%lu, pending=%lu)\r\n",
                           (unsigned long)appData->motionQueueCount,
                           (unsigned long)highWater,
                           (unsigned long)(okPendingCount + 1));
         okPendingCount++;
     } else {
-        // Queue has a free slot and prefill is done — send immediately.
         DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (queue=%lu < highWater=%lu)\r\n",
                           (unsigned long)appData->motionQueueCount,
                           (unsigned long)highWater);
