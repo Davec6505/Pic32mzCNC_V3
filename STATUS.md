@@ -1,595 +1,858 @@
-# STATUS — scurve_motion branch
-**Last updated**: March 2026 (session 3)
-**Branch**: `scurve_motion` (based on `lookahead`)  
-**Goal**: Replace entire GRBL AVR motion engine with a professional 32-bit architecture:
-- Fixed 100kHz servo tick (TMR4 period-match ISR, replaces OC1 variable-rate ISR)
-- DDS (Direct Digital Synthesis) step generation — 32-bit accumulator per axis
-- S-curve (jerk-limited) velocity profiles computed in main loop on FPU
-- G-code protocol layer (gcode_parser.c, settings.c) kept completely intact
+# Pic32mzCNC_V3 - Development Status Trac
+**PINOUT**: `Enable pin needs to be controled by setting direction bit.
 
-## SESSION 3 PROGRESS — Full build succeeds ✅
 
-| File | Status | Notes |
-|------|--------|-------|
-| `srcs/motion/motion_bridge.c` | ✅ Created | Compatibility shim; old stepper.c/motion.c API → new engine |
-| `srcs/config/default/peripheral/tmr/plib_tmr4.c` | ✅ Modified | Added `TMR4_CallbackRegister` + `TIMER4_ISR` |
-| `incs/config/default/peripheral/tmr/plib_tmr4.h` | ✅ Modified | Declared `TMR4_CallbackRegister` |
-
-**Build result**: `######  BUILD COMPLETE (bins/CNC_V3.hex)  ########` — all .o files compile and link.
-
-### motion_bridge.c — what it provides
-
-**Global volatile flags** (defined here, `extern` in stepper.h):
-- `g_hard_limit_alarm`, `g_suppress_hard_limits`, `g_estop_pending`
-- `g_feed_hold_active`, `g_feed_hold_pending`
-
-**STEPPER_* bridges** (old API → new engine):
-- `STEPPER_Initialize` → `INTERPOLATOR_Initialize()` + `TRAJECTORY_Initialize()`
-- `STEPPER_DisableAll/EnableAll` → `STEPPERS_Disable/Enable()` GPIO macros
-- `STEPPER_StopMotion` → `INTERPOLATOR_Stop()` + `TRAJECTORY_Reset()`
-- `STEPPER_PauseMotion/FinalizeHold/ResumeMotion` → feed-hold flag management + ISR control
-- `STEPPER_GetPosition/GetPositionPointer` → `s_stepper_pos` backed by `*g_axis_settings[axis].step_count`
-- `STEPPER_GetCurrentFeedrateMmMin` → `INTERPOLATOR_GetInstantVelocity() × 60`
-
-**MOTION_* bridges**:
-- `MOTION_Initialize` → `TRAJECTORY_Initialize()`
-- `MOTION_Tasks` → polls `INTERPOLATOR_MoveComplete()`, pops + loads next `SCurveMove`
-- `MOTION_ProcessGcodeEvent` → converts `GCODE_EVENT_LINEAR_MOVE` to `TRAJECTORY_AddMove` + pump
-
-**Remaining for full wiring** (next session):
-1. MCC: reconfigure TMR4 prescaler 1:1, PR4=499 in MPLAB X (hardware machine only)
-2. `data_structures.h`: remove old `StepSegment`, `StepperBlock`, `prep_*` fields, `segmentBuffer[]`
-3. `app.h`: replace `#include "stepper.h"` / `"motion.h"` with new headers once migration is complete
-4. Hardware testing: verify 100kHz ISR fires, DDS produces correct step rates, S-curve profiles run
-5. Arc support: `GCODE_EVENT_ARC_MOVE` → decompose into `TRAJECTORY_AddMove` calls in motion_bridge.c
-
-## SESSION 2 PROGRESS — All source files created ✅
-
-| File | Status | Notes |
-|------|--------|-------|
-| `incs/motion/trajectory.h` | ✅ Created | SCurveMove struct, TRAJ_QUEUE_SIZE=64, full API |
-| `incs/motion/interpolator.h` | ✅ Created | DDS_SCALE=2^30, TICK_RATE=100kHz, feed override |
-| `srcs/motion/trajectory.c` | ✅ Created | 7-phase solver, binary search, reverse+forward junction pass |
-| `srcs/motion/interpolator.c` | ✅ Created | 100kHz DDS ISR, phase-accurate velocity update, feed hold |
-| `srcs/motion/kinematics.c` | ✅ Created | WCS transforms only; old planner API stubbed to NULL |
-| `incs/motion/kinematics.h` | ✅ Updated | Added `SetG92Offset` / `ClearG92Offset` declarations |
+**Branch**: `lookahead`  
+**Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
+**Started**: February 10, 2026  
+**Last Updated**: March 3, 2026 (multi-move position accumulation fix)
 
 ---
 
-## Files Deleted This Session
+## ✅ fix: multi-move position accumulation (diagonal overshoot) — March 3, 2026
 
-Removed from the branch via `git rm`. Do NOT restore them.
+**Problem**: When G-code commands were pipelined faster than execution (UGS streaming),
+`TRAJECTORY_AddMove(start, end)` used `KINEMATICS_GetCurrentPosition()` (the live step counter)
+as `start`. While move 1 was mid-execute the step counter read a mid-move position (e.g. X=5.45mm
+instead of X=20mm), so move 2's `unit_vec` and `millimeters` were computed from the wrong start.
+The interpolator then fired the WRONG step counts in the WRONG axis directions from the CORRECT
+physical position, causing X to overshoot to 35–40mm instead of staying at 20mm.
 
-| Deleted | Reason |
-|---------|--------|
-| `srcs/motion/stepper.c` | OC1 variable-period ISR — replaced by fixed 100kHz TMR4 ISR |
-| `srcs/motion/segment_buffer.c` | GRBL 1ms-slice segment prep — entire approach replaced |
-| `srcs/motion/motion.c` | GRBL 3-pass planner — replaced by new trajectory planner |
-| `srcs/motion/kinematics.c` | Trapezoid profile + AVR junction math — replaced by S-curve solver |
+**Root cause of first attempted fix**: Added `s_planned_position` tracking but guarded on
+`TRAJECTORY_QueueCount() > 0`. After the first move was dequeued to the interpolator the queue
+count dropped to 0, so the second command re-anchored from the step counter — the exact wrong
+behaviour we were trying to avoid.
 
-## Files Kept (do not modify tonight)
+**Fix** (`srcs/motion/motion_bridge.c`):
+- Changed guard condition from `TRAJECTORY_QueueCount() > 0` to
+  `TRAJECTORY_QueueCount() > 0 || INTERPOLATOR_IsActive()` in both `GCODE_EVENT_LINEAR_MOVE`
+  and `GCODE_EVENT_ARC_MOVE` handlers.
+- `s_planned_position` is now used as `start` whenever ANY motion is in-flight (queued OR
+  executing), and anchors to the step counter only when the machine is truly idle.
+- Added `MOTION_SyncPlannedPosition()` in `incs/motion/motion.h` — call after soft-reset or
+  alarm clear so the next command re-anchors from the correct machine position.
 
-| Kept | Why |
-|------|-----|
-| `srcs/motion/homing.c` | Logic is sound — will call new trajectory API once written |
-| `srcs/motion/spindle.c` | Unrelated to motion architecture |
-| `srcs/motion/motion_utils.c` | Limit/safety checking, unchanged |
-| `srcs/motion/tmc5160.c` | SPI driver, unchanged |
-| `srcs/gcode/gcode_parser.c` | KEPT ENTIRELY — do not touch |
-| `srcs/settings/settings.c` | KEPT — jerk settings added later |
-| `srcs/utils/utils.c` | GPIO abstraction — unchanged |
-| `srcs/utils/uart_utils.c` | Unchanged |
-| `srcs/app.c` | Shell kept — motion calls gutted in Step 4 below |
-
----
-
-## TONIGHT'S TASKS — Do In Order
+**Files changed**:
+- `srcs/motion/motion_bridge.c` — `s_planned_position_valid` guard condition (both LINEAR_MOVE and ARC_MOVE)
+- `incs/motion/motion.h` — added `MOTION_SyncPlannedPosition()` declaration
 
 ---
 
-### STEP 1 — MCC Hardware Reconfiguration (MPLAB X)
+## ✅ fix: F-word modality in G1/G2/G3 — March 3, 2026
 
-Open the project in MPLAB X, open MCC (MPLAB Code Configurator).
+**Problem**: `F` (feedrate) was not properly modal for G1/G2/G3 commands.
+- `GCODE_EVENT_SET_FEEDRATE` (standalone `F200` line) was silently discarded — handler returned `true` without storing value.
+- G2/G3 arc moves used `event->data.arcMove.feedrate` directly; if omitted they got feedrate=0 and gave 0 mm/min motion.
 
-#### 1a. Reconfigure TMR4
-- Current config: prescaler **1:64**, PR4 varies per GRBL segment
-- New config: prescaler **1:1**, PR4 = **499** → `50,000,000 / 500 = 100,000 Hz`
-- Enable **TMR4 Period Match interrupt** — this triggers the new servo tick ISR
-- Set interrupt priority **IPL6** (highest in the application)
-
-#### 1b. Remove OC1
-- Disable/remove Output Compare 1 module in MCC
-- OC1 was the GRBL step-rate controller — completely replaced by the DDS ISR
-- Step GPIOs are now driven directly by LATSET/LATCLR inside the ISR (same atomic writes as before)
-
-#### 1c. Remove TMR5
-- TMR5 was a one-shot used to clear step pin ~3µs after OC1 fired
-- At 100kHz fixed tick: step pin is HIGH for exactly 1 tick = **10µs**
-- 10µs satisfies DRV8825 (min 1µs) and TMC5160 (min 100ns) — no separate pulse timer needed
-
-#### 1d. Regenerate
-- Click Generate in MCC
-- `plib_tmr4.c` updated with new frequency
-- `plib_ocmp1.c` removed
-- `plib_tmr5.c` removed
-- **Verify**: open `plib_tmr4.c` and confirm `TMR4_FrequencyGet()` returns `100000`
-- **IMPORTANT**: Check that UART3 TX buffer is still 1024 bytes after regeneration (MCC sometimes reverts it to 256 — the $$ command needs 1024)
+**Fixes** (`srcs/motion/motion.c`):
+- `case GCODE_EVENT_SET_FEEDRATE:` — now writes `appData->modalFeedrate = event->data.setFeedrate.feedrate` so standalone `F200` correctly sets the modal feed.
+- Arc path (~line 510): when arc feedrate == 0, falls back to `appData->modalFeedrate` (default 600 if unset); when arc feedrate > 0, updates `appData->modalFeedrate` so subsequent G1/G2/G3 inherit it.
 
 ---
 
-### STEP 2 — Create New Header Files
+## ✅ fix: segment_buffer.c — GRBL-exact do-while rewrite — March 3, 2026
 
-#### 2a. Create `incs/motion/trajectory.h`
+**Problem**: Rectangle motion showed "slow then burst" behaviour — first ~0.4mm crept at ~0.1mm/poll
+then remaining ~19.6mm executed in one poll interval. Root cause: fixed 1ms time slice + forced
+minimum-1-step with mm snap caused positional drift that discharged as a burst when cruise speed
+was reached.
 
+**Root Cause (found from actual GRBL source)**:
+- GRBL's `st_prep_buffer()` extends `dt_max` by `DT_SEGMENT` increments until
+  `mm_remaining ≤ minimum_mm` (guarantees ≥1 step naturally — no forcing).
+- At 2000 mm/s² from rest, first 1ms covers 0.001mm = 0.08 steps.
+  GRBL extends to 7ms to get 1 real step at correct timing.
+- `dt_remainder` carries fractional step time forward so cumulative timing is exact.
+- `step_interval = ceil(timer_freq × (dt + dt_remainder) / n_steps_actual)` — NOT `freq / (speed × spm)`.
+
+**Changes**:
+- `srcs/motion/segment_buffer.c` — **complete rewrite of `SEGMENT_PrepBuffer`**:
+  - GRBL-exact do-while inner loop with `dt_max` extension for slow speeds
+  - New statics: `prep_dt_remainder`, `prep_steps_remaining_f`
+  - Step count: GRBL ceil-difference `ceil(spm×mm_before) - ceil(spm×mm_after)`
+  - `step_interval = ceil(TMR4_freq × (dt + dt_remainder) / n_steps_actual)`
+  - `dt_remainder = (n_steps_remaining_f - step_dist_remaining) × inv_rate` (carried to next seg)
+  - Ramp thresholds: `accel_until_mm = millimeters - accelerate_until`, `decel_after_mm = millimeters - decelerate_after`
+  - New block init: `prep_current_speed = initial_speed`, ramp = ACCEL (or CRUISE if entry ≥ nominal)
+  - Block consumed when `mm_remaining ≤ 0.0f`
+- `srcs/motion/segment_buffer.c:242` — `SEGMENT_Initialize()` simplified: removes stale
+  APP_DATA prep fields, resets `prep_dt_remainder` and `prep_steps_remaining_f` statics
+
+**Result**: Compiled clean (`-Werror -Wall`, no warnings). Ready for hardware test.
+
+---
+
+
+
+## ✅ fix: stepper.c complete rewrite — March 2, 2026 (session 2)
+
+**Problem**: Previous GPT session left stepper.c in a broken state — Taylor ISR code referencing
+deleted struct fields (30+ compile errors), stray code inserted before `#include` statements,
+missing closing braces.
+
+**Fix**: Deleted stepper.c and recreated from scratch (~350 lines, clean compile).
+
+**Changes**:
+- `srcs/motion/stepper.c` — **fully rewritten from scratch**
+  - All Taylor series ISR code deleted (`accel_count`, `rest`, `jerk_count`, `jerk_steps`, `initial_rate`, `nominal_rate`, `final_rate`, `step_interval` on MotionSegment — all gone)
+  - `OCP1_ISR` is now pure GRBL: Bresenham + step count against `current_segment->n_step`, no acceleration math
+  - On segment complete: ISR advances `segmentBufferTail`, loads next StepSegment inline (including updating PR4), or stops TMR4 if buffer empty
+  - `STEPPER_LoadSegment()` pops from `segmentBuffer` ring buffer, initialises Bresenham from `StepperBlock`, sets constant PR4
+  - `_init_bresenham_from_block()` helper isolates GPIO direction writes (main-loop safe) from ISR Bresenham init
+  - All support functions retained: `EnableAll`, `DisableAll`, `StopMotion`, `PauseMotion`, `FinalizeHold`, `ResumeMotion`, `SetDirection`, `GetPosition`, `GetPositionPointer`
+- `srcs/motion/segment_buffer.c:18` — Removed broken `extern const uint32_t g_timer_freq` (was declared `static` in kinematics.c, not linkable); replaced with inline `TMR4_FrequencyGet()` call at line 142
+
+**Build result**: ✅ `bins/CNC_V3.hex` — no errors, 1 expected bootloader warning
+
+---
+
+## 🚀 refactor: GRBL segment buffer architecture - remove Taylor profiling — March 2, 2026
+
+**Problem**: Rectangle G-code exhibited junction stuttering (stutter→rocket→stop pattern at corners)
+due to Taylor series acceleration profiling with large accel_count values producing tiny velocity deltas.
+
+**Root cause**: Firmware attempted to do acceleration math in ISR using Pramod Ranade/Austin formulas.
+After fetching actual GRBL source code, discovered **GRBL has NO acceleration math in ISR at all**.
+
+**GRBL Architecture** (verified from GitHub source):
+- Main loop `st_prep_buffer()` breaks each planner block into many small constant-velocity segments
+- Each segment: N steps at fixed PR4 value (step_interval)
+- ISR executes pure Bresenham with constant rate per segment
+- When segment completes, ISR loads next segment (different PR4 value)
+- All velocity changes are pre-computed as discrete segments
+
+**Implementation** (March 2, 2026):
+
+1. **Data Structures** (`incs/data_structures.h`):
+   - Added `StepperBlock` structure (Bresenham data per planner block)
+   - Added `StepSegment` structure (small constant-velocity chunks)
+   - Added segment ring buffer (16 entries) to APP_DATA
+   - Modified `MotionSegment` to remove Taylor fields:
+     - REMOVED: `accel_count`, `accel_count_decel`, `rest`, `jerk_count`, `jerk_steps`, `jerk_steps_log2`
+     - REMOVED: `initial_rate`, `nominal_rate`, `final_rate`, `step_interval`, `error[]`
+     - KEPT: `initial_speed`, `nominal_speed`, `final_speed` (as floats in mm/s)
+     - KEPT: Planner fields (trapezoid boundaries, acceleration, millimeters, unit_vec)
+
+2. **Segment Generator** (`srcs/motion/segment_buffer.c` - NEW):
+   - Created `SEGMENT_PrepBuffer()` - breaks planner blocks into segments
+   - Uses physics (distance = v*t + 0.5*a*t²) for trapezoid discretization
+   - Converts velocity (mm/s) to PR4 value (timer ticks)
+   - Fills segment ring buffer continuously from main loop
+   - Each segment: n_step count + step_interval (PR4 value)
+
+3. **ISR Simplification** (`srcs/motion/stepper.c`):
+   - REMOVED ALL Taylor profiling code (lines 550-600)
+   - ISR now: Execute step → Increment counter → Load segment when done
+   - PR4 is CONSTANT for each segment (no acceleration math)
+   - Velocity changes happen by loading next segment with different PR4
+
+4. **Motion Module** (`srcs/motion/motion.c`):
+   - Added call to `SEGMENT_PrepBuffer()` at top of MOTION_Tasks
+   - Continuously generates segments from planner blocks
+
+5. **Kinematics Module** (`srcs/motion/kinematics.c` - PENDING CLEANUP):
+   - TODO: Remove all Taylor/Austin calculation code
+   - TODO: Keep only trapezoid profile calculations
+   - TODO: Store speeds as floats (mm/s), remove rate (ticks) calculations
+
+**Benefits**:
+- Smooth motion at all speeds (no Taylor approximation errors)
+- ISR stays simple and fast (no division, no acceleration math)
+- True GRBL architecture adapted for PIC32's dynamic TMR4/PR4 timer
+- Eliminates junction stuttering at corners
+
+**Status**: IN PROGRESS - Data structures complete, ISR simplified, kinematics cleanup pending
+
+---
+
+## 🐛 fix: homing segments run at crawl speed — March 2, 2026
+
+**Root causes** (two independent issues):
+
+1. **SETTINGS_VERSION mismatch forces default seek rate** — lookahead branch bumped
+   `SETTINGS_VERSION` to 3 (jerk + TMC fields), so NVM saved by master (v2) fails the version
+   check and firmware falls back to compile-time defaults: `homing_seek_rate = 500 mm/min` and
+   `homing_feed_rate = 100 mm/min`. Updated defaults to `2000` / `500` mm/min.
+
+2. **`KINEMATICS_LinearMoveSimple` wrong for homing** — all three homing phases (seek, locate,
+   pulloff) called `LinearMoveSimple`, which is an arc-chord helper. It passes `feedrate` (mm/min)
+   as `entry_velocity` / `exit_velocity` (expected mm/s), producing a 60× unit error. This was
+   accidentally harmless for nominal speed (the floor clamp to `nominal_rate` catches it) but
+   caused the GRBL lookahead planner to corrupt the segment if any stale G-code event in the
+   queue triggered `MOTION_ProcessGcodeEvent` → `MOTION_PlannerRecalculate` during homing.
+
+**Fix** — `srcs/motion/homing.c` — `HOMING_StartSeek/Locate/Pulloff`:
+- Replace all three `KINEMATICS_LinearMoveSimple(...)` calls with `KINEMATICS_LinearMove(..., 0.0f, 0.0f)`.
+- Set `segment->speed_locked = true` immediately after each call so `MOTION_PlannerRecalculate`
+  skips these segments in its reverse/forward/trapezoid passes.
+- On homing complete (all axes done), call `KINEMATICS_ResetPlannerState()` so the first
+  post-homing G-code move gets a clean junction (not the homing unit vector).
+
+**Fix** — `srcs/settings/settings.c` — default `CNC_Settings`:
+- `homing_seek_rate`: 500 → 2000 mm/min
+- `homing_feed_rate`: 100 → 500 mm/min
+
+---
+
+## 🐛 fix: KINEMATICS_RecalculateTrapezoid unit mismatch — high feedrate frozen (F8000) — March 2, 2026
+
+**Root cause**: `KINEMATICS_RecalculateTrapezoid()` stored `initial_rate`, `nominal_rate`, and
+`final_rate` in **steps/sec** (rate units), but the ISR and `STEPPER_LoadSegment` treat these
+fields as **timer-tick periods**. After the lookahead planner recalculated any segment's trapezoid,
+the ISR's `nominal_rate` floor clamped `step_interval` to e.g. 10 666 ticks (≈ 73 Hz/step ≈
+55 mm/min) instead of the correct 73 ticks (≈ 10 666 Hz/step = 8 000 mm/min) — making the motor
+appear frozen at anything above ~F500.
+
+**Fix applied** — `srcs/motion/kinematics.c` — `KINEMATICS_RecalculateTrapezoid()`:
+- Convert entry/nominal/exit step rates to timer-tick periods (`g_timer_freq / rate`) before
+  storing to `seg->initial_rate`, `seg->nominal_rate`, `seg->final_rate`.
+- Apply same `MAX_START_RATIO=4` and 7-tick hardware-minimum clamps as `KINEMATICS_LinearMove`.
+- Recompute `seg->accel_count` (Austin n_entry) and `seg->accel_count_decel` (n_exit) from the
+  corrected tick periods so the Taylor ramp starts at the right index.
+- Set `seg->step_interval = seg->initial_rate` so `STEPPER_LoadSegment` loads the correct period.
+
+---
+
+## ✅ feat: GRBL-exact lookahead planner (reverse+forward pass + junction speed) — March 3, 2026
+
+Complete replacement of the custom look-ahead system with an exact port of GRBL v1.1's
+`plan_buffer_line()` / `planner_recalculate()` two-pass algorithm.
+
+### `incs/data_structures.h`
+- `MotionSegment` look-ahead section (was `entry_speed_mms`, `exit_speed_mms`, `speed_locked`):
+  - Replaced with GRBL-exact fields: `unit_vec[NUM_AXIS]`, `entry_speed_sqr`,
+    `max_entry_speed_sqr`, `max_junction_speed_sqr`, `millimeters`, `speed_locked`
+
+### `srcs/motion/kinematics.c`
+- Added `pl_previous_unit_vec[NUM_AXIS]` and `pl_previous_nominal_speed` static planner state.
+- Added `convert_to_unit_vector()` — normalises a vector in-place, returns magnitude (mm).
+  Equivalent to GRBL's `convert_delta_vector_to_unit_vector()`.
+- Added `limit_acceleration_by_axis()` — axis-limited combined acceleration.
+  Equivalent to GRBL's `limit_value_by_axis_maximum(settings.acceleration, unit_vec)`.
+- Added `limit_rate_by_axis()` — axis-limited combined feed rate (mm/s).
+  Equivalent to GRBL's `limit_value_by_axis_maximum(settings.max_rate, unit_vec)`.
+- Added `KINEMATICS_ResetPlannerState()` — zeroes planner static state; called at init and soft reset.
+- `KINEMATICS_Initialize()` — added `KINEMATICS_ResetPlannerState()` call at end.
+- `KINEMATICS_LinearMove()` — replaced `limiting_axis` approach with GRBL-exact unit-vector +
+  axis-limited accel/rate; writes `unit_vec`, `millimeters`, `max_junction_speed_sqr`,
+  `max_entry_speed_sqr`, `entry_speed_sqr` (conservative), and updates `pl_previous_*` state.
+  Junction speed uses GRBL centripetal approximation (dot-product, no trig).
+- Added `KINEMATICS_RecalculateTrapezoid(seg, entry_mms, exit_mms)` — exact port of GRBL's
+  `calculate_trapezoid_for_block()`. Writes `initial_rate`, `nominal_rate`, `final_rate`,
+  `accelerate_until`, `decelerate_after`, `step_interval` from planned entry/exit speeds.
+
+### `srcs/motion/motion.c`
+- **Removed** `MOTION_RecomputeExit()` static function (~55 lines) — superseded by planner.
+- `MOTION_ProcessGcodeEvent()` G0/G1 handler:
+  - **Removed** the entire junction-calc + `KINEMATICS_CalculateJunctionSpeed()` block (~70 lines).
+  - **Removed** the manual backward pass (`while (i != tail)`) block (~40 lines).
+  - Replaced with: `KINEMATICS_LinearMove(start, end, feedrate, segment, 0, 0)`
+    + enqueue + `MOTION_PlannerRecalculate(appData)`.
+- `MOTION_ProcessGcodeEvent()` arc handler:
+  - **Removed** the `MOTION_RecomputeExit` arc-entry patch block.
+  - GRBL junction calculation in `KINEMATICS_LinearMove` handles G1→arc entry automatically.
+- Added `MOTION_PlannerRecalculate(APP_DATA*)` — static function implementing GRBL's
+  `planner_recalculate()` three-pass algorithm:
+  1. **Reverse pass**: newest→oldest, propagate decel constraints backward.
+  2. **Forward pass**: oldest→newest, propagate accel constraints forward.
+  3. **Trapezoid pass**: calls `KINEMATICS_RecalculateTrapezoid` on every plannable segment.
+
+### `incs/motion/kinematics.h`
+- Added `KINEMATICS_RecalculateTrapezoid(MotionSegment*, float entry_mms, float exit_mms)` declaration.
+- Added `KINEMATICS_ResetPlannerState(void)` declaration.
+
+---
+
+## ✅ Optimisation: Cache TMR4 frequency at init — March 2, 2026
+
+- `srcs/motion/kinematics.c:13` — Removed dead `TIMER_TICKS_PER_SECOND_DYNAMIC()` macro (no longer used).
+- `srcs/motion/kinematics.c:16` — Added `static float g_timer_freq` file-scope variable.
+- `srcs/motion/kinematics.c:20` — `KINEMATICS_Initialize()` — Added `g_timer_freq = (float)TMR4_FrequencyGet()` to cache the value once at startup. TMR4 prescaler is fixed by MCC configuration and never changes at runtime.
+- `srcs/motion/kinematics.c:225` — `KINEMATICS_LinearMove()` — Removed pointless `const float TIMER_FREQ = g_timer_freq` local alias; all four use-sites now reference `g_timer_freq` directly. Eliminates an unnecessary register copy on every call.
+
+---
+
+## ✅ Optimisation: Merge mm→steps and dominant-axis loops — March 2, 2026
+
+- `srcs/motion/kinematics.c:162` — `KINEMATICS_LinearMove()` — Merged two sequential `for (E_AXIS …)` loops into one. The accumulation (`step_accumulator` → `delta[axis]`) and dominant-axis search (`abs(delta[axis]) > max_delta`) now execute in a single pass over `NUM_AXIS`. Halves loop overhead and improves cache locality — `delta[axis]` is read by the dominant-axis check immediately after being written, while it is still hot in cache. No behavioural change.
+
+---
+
+## ✅ Fix: Remove [CHECK] debug flood in motion.c — March 1, 2026
+
+- `srcs/motion/motion.c:68` — `MOTION_Tasks()` — Removed the throttled `[CHECK] steps_completed/steps_remaining` debug print. Even throttled at 5000 iterations, at 200MHz the main loop fires it roughly once per step (~800 prints per 10mm move at F100), saturating UART during motion. Serial test confirmed motion works correctly (800/800 steps complete). The `[SEGMENT] Complete` print at segment end is retained.
+
+---
+
+## ✅ Fix: Zero-step early-exit in KINEMATICS_LinearMove — March 1, 2026
+
+- `srcs/motion/kinematics.c:197` — `KINEMATICS_LinearMove()` — Added early-exit guard immediately after `max_delta` is computed: when all axes produce 0 steps, set `steps_remaining = 0` and return without running the Taylor/trapezoid physics (avoids wasted computation and spurious `[KIN]` debug lines for bare `G0` / feedrate-only `G1 Fxxx` commands). Caller in `motion.c` already has a `steps_remaining == 0` check that discards the segment and updates position correctly.
+
+---
+
+## ✅ Fix: Taylor series MIN_STEP_HZ clamp + consistent n derivation — March 1, 2026
+
+- `srcs/motion/kinematics.c` — Replaced previous `safe_start*3` block and `n_entry=0` approach:
+  - Added `MIN_STEP_HZ = 200.0f`: physics `c₀` clamped so motor never steps slower than 200 Hz — prevents stall on first step at low acceleration / high microstepping settings
+  - `n_entry` / `n_exit` now derived **from the actual `initial_rate`/`final_rate` stored** via `v_eff = TIMER_FREQ/(rate·spm)`, `n = 2·v_eff²·spm/a − 1` — eliminates the (rate, n) inconsistency that caused frozen/creeping acceleration
+  - When `c₀` is not clamped the formula gives `n=0` exactly (true from-rest start); when clamped it gives `n>0`, consistently reflecting the mid-ramp start speed
+  - Same symmetric fix applied to decel exit side (`n_exit`, `final_rate`)
+
+---
+
+## ✅ Feature: S-curve jerk control — March 1, 2026
+
+**What was built**: In-ISR S-curve acceleration shaping using a linear ramp applied to the
+existing Taylor series. The Taylor recurrence still computes the exact constant-acceleration
+step delta each ISR call; a new jerk counter gates how much of that delta is applied.
+
+**Effect**: Acceleration builds from zero to A_max over `jerk_steps` dominant-axis steps
+(S-curve ramp-in), then A_max is maintained for the rest of the accel phase. Same S-curve
+applies at the start of the decel phase (ramp-in from cruise to full decel). Result: no
+instantaneous jump from zero to A_max at accel/decel phase boundaries — mechanically smooth.
+
+**Formula**: `jerk_steps = round_down_pow2( min( A_max * spm / jerk_setting , accel_steps/2 ) )`
+- Low jerk setting → more steps in S-curve ramp → very smooth, slightly slower ramp-up
+- High jerk setting → fewer steps → approaches pure trapezoidal (legacy behaviour)
+- `jerk_steps` forced power-of-2 so ISR division is a single arithmetic right-shift (zero cost)
+
+**Files changed**:
+- `incs/settings/settings.h:32` — Added `float jerk[4]` field after `max_travel[4]`, bumped `SETTINGS_VERSION` (DRV8825: 2→3, TMC5160: 3→4)
+- `srcs/settings/settings.c:65` — Added `.jerk = {500.0f, 500.0f, 200.0f, 500.0f}` to `default_settings`
+- `srcs/settings/settings.c:285` — `SETTINGS_ProcessParameter()` — added cases 140-143 (set)
+- `srcs/settings/settings.c:400` — `SETTINGS_GetParameter()` — added cases 140-143 (get)
+- `srcs/settings/settings.c:512` — `SETTINGS_PrintAll()` — added `$140`-`$143` output lines
+- `incs/data_structures.h:98` — `MotionSegment` struct: added `jerk_steps`, `jerk_steps_log2`, `jerk_count` fields
+- `srcs/motion/kinematics.c:300` — `KINEMATICS_LinearMove()` — compute and store `jerk_steps` / `jerk_steps_log2` / `jerk_count` from `settings->jerk[cfg_axis]`
+- `srcs/motion/stepper.c:565` — `OCP1_ISR` — reset `jerk_count = 0` at decel phase entry
+- `srcs/motion/stepper.c:578` — `OCP1_ISR` — accel phase: apply S-curve scaling via bit-shift
+- `srcs/motion/stepper.c:600` — `OCP1_ISR` — decel phase: apply S-curve scaling via bit-shift
+
+**ISR cost**: 1 comparison + 1 multiply + 1 bit-shift per step during jerk ramp only. Zero cost during cruise and after jerk ramp completes (condition `jerk_count >= jerk_steps` exits early).
+
+**New GRBL parameters**:
+- `$140` — X jerk (default 500.0)
+- `$141` — Y jerk (default 500.0)
+- `$142` — Z jerk (default 200.0)
+- `$143` — A jerk (default 500.0)
+
+**Build**: clean, no warnings.
+
+---
+
+## ✅ Bug Fix: G0 rapids running at modal feedrate instead of max_rate — March 1, 2026
+
+**Root cause**: `GCODE_EVENT_LINEAR_MOVE` had no `isRapid` flag. Both G0 and G1 produced
+the same event. In `motion.c`, when `feedrate == 0` (no F word on G0), the code substituted
+`modalFeedrate` (e.g. F500) instead of the per-axis `max_rate` settings. All G0 moves crawled
+at the last programmed feed rate, adding up to a perceived "30-second pause" after any G-code
+program containing rapids.
+
+**Fix**:
+- `incs/gcode/gcode_parser.h:61` — Added `bool isRapid` to `linearMove` event struct
+- `srcs/gcode/gcode_parser.c:479` — Set `ev->data.linearMove.isRapid = (gnum == 0)` in parser
+- `srcs/motion/motion.c:337` — When `isRapid`, compute vector feedrate from per-axis `max_rate`
+  using GRBL inverse-time approach: `feedrate = total_dist / max(delta[axis] / max_rate[axis])`.
+  G0 does **not** update `modalFeedrate` (G0 speed is not persistent).
+
+**Effect**: G0 rapids now run at up to 5000 mm/min (X/Y default max_rate) instead of F500.
+The "30-second" two-square test should now complete in ~15 seconds (10s G1 motion + fast G0s).
+
+---
+
+## ✅ Bug Fix: INT3R wrong PPS value — E-Stop ISR never fired — March 1, 2026
+
+**Root cause**: `INT3R = 3` in `srcs/config/default/peripheral/gpio/plib_gpio.c` mapped
+the INT3 external interrupt input to the wrong peripheral pin via PPS (Peripheral Pin Select).
+RF4 (E-Stop pin) requires `INT3R = 2`. With value 3, INT3 was connected to a different
+pin entirely so the ISR never fired regardless of button state.
+
+**Fix**: Changed by user in `srcs/config/default/peripheral/gpio/plib_gpio.c:103`:
 ```c
-#ifndef TRAJECTORY_H
-#define TRAJECTORY_H
-
-#include "data_structures.h"
-#include <stdint.h>
-#include <stdbool.h>
-
-// Lookahead queue depth — 64 moves (was 16 in GRBL)
-#define TRAJ_QUEUE_SIZE     64
-
-// DDS fixed-point scale (use top half of 32-bit range for signed accumulator)
-#define DDS_SCALE           0x80000000UL
-
-// S-curve move — one per G-code linear segment.
-// Stores the 7-phase jerk-limited profile as a math object.
-// NOT a list of pre-computed step intervals (that was the old segment buffer approach).
-typedef struct {
-    float t[8];              // cumulative phase end times (s). t[0]=0 always, t[7]=total duration.
-    float v[8];              // velocity at each phase boundary (mm/s)
-    float a[8];              // acceleration at each phase boundary (mm/s^2)
-    float j;                 // jerk magnitude (mm/s^3). 0 = constant-velocity stub.
-    float a_max;             // peak acceleration actually reached (mm/s^2)
-    float millimeters;       // total move distance (mm)
-    float unit_vec[NUM_AXIS];// normalised direction per axis. Sign = direction.
-    float nominal_speed;     // clamped cruise speed (mm/s)
-    float acceleration;      // combined axis-limited acceleration (mm/s^2)
-    float entry_speed_sqr;   // planner: entry speed squared (for junction blending)
-    float max_entry_speed_sqr;
-    bool  speed_locked;      // planner: skip this block in reverse pass
-} SCurveMove;
-
-// Public API
-void  TRAJECTORY_Initialize(void);
-void  TRAJECTORY_Reset(void);
-
-// Add a move to the lookahead queue. Returns false if queue full.
-bool  TRAJECTORY_AddMove(CoordinatePoint start, CoordinatePoint end,
-                         float feedrate_mm_min, float entry_v, float exit_v);
-
-// Junction blending pass — call after adding each move.
-void  TRAJECTORY_Recalculate(void);
-
-// Pop the next ready move for the interpolator. Returns false if queue empty.
-bool  TRAJECTORY_GetNextMove(SCurveMove *out);
-
-// S-curve evaluation (used by interpolator for per-tick velocity)
-float TRAJECTORY_VelocityAt(const SCurveMove *move, float t);
-float TRAJECTORY_PositionAt(const SCurveMove *move, float t);
-
-#endif // TRAJECTORY_H
+INT3R = 2;    /* INT3 → RPF4 (RF4) for E-Stop — must be 2, not 3 */
 ```
 
-#### 2b. Create `incs/motion/interpolator.h`
+**Key lesson**: When an ISR never fires, **check PPS mapping first** (`INT3R`, `U3RXR` etc.)
+before looking at edge polarity, priority, or code logic. A wrong PPS value silently
+misroutes the interrupt source to a different pin.
 
+**Wrong analysis (reverted)**: `INTCONSET→INTCONCLR` change in `plib_evic.c` was
+incorrect and has been reverted — `INTCONSET = _INTCON_INT3EP_MASK` is correct for
+falling-edge on this device.
+
+---
+
+## ⚠️ Post-Mortem: Homing broken by unnecessary code changes — March 1, 2026 (REVERTED)
+
+**What happened**: User reported "Y won't home after Z" after a firmware flash. Rather than
+first verifying whether the issue was a settings/hardware problem, changes were made directly
+to production homing code based on analysis of a conversation summary that described
+*earlier-session* bugs (some of which had already been fixed in code). Specifically:
+
+- `HOMING_NextAxis()` in `srcs/motion/homing.c` was rewritten (adding `return true`, `break`,
+  `UTILS_HomingSetCurrentAxis`, `UTILS_HomingLimitReset`) — these changes introduced unexpected
+  timing behaviour and broke the working state machine
+- `HOMING_IsLimitActiveNow()` was added to `homing.c` + `homing.h` — the function already
+  existed as `HOMING_LimitTriggered()` and the stale summary had mislabelled the issue
+- `STATUS.md` was updated prematurely to record these as completed fixes
+
+**Root cause of the bad session**: The conversation summary described three "candidate bugs" from
+earlier analysis. At least one (the $22 mask issue) had already been fixed in committed code.
+Changes were applied without first reading the current file contents to confirm the bugs still
+existed, violating the workspace rule to always read before editing.
+
+**Resolution**: All changes reverted with `git restore`. The Y homing issue was resolved by
+the user correcting flash settings (steps/mm, rates). No code change was needed.
+
+**Lesson**: When homing reports a symptom after a settings change, **check settings first**
+(`$$`), build with `DEBUG_MOTION` to observe state transitions, before touching working code.
+
+---
+
+## ✅ Bug Fix: LinearMoveSimple unit mismatch — homing crept at ~387 mm/min regardless of $24/$25 — March 1, 2026
+
+**Root cause**: `KINEMATICS_LinearMoveSimple()` compared `sqrtf(arc_accel * chord_mm)` (mm/s)
+directly against `feedrate` (mm/min) in a `fminf()`. The sqrt result (~387 mm/s for typical
+accel/distance) is always much smaller than the feedrate (e.g. 20000 mm/min), so `fminf` always
+selected the sqrt value and passed it to `KINEMATICS_LinearMove` which then treated it as mm/min.
+Result: homing ran at ~387 mm/min no matter what $24/$25 were set to.
+
+**Fix**: `srcs/motion/kinematics.c:536` — `KINEMATICS_LinearMoveSimple()` — Multiply v_peak by
+`60.0f` to convert mm/s → mm/min before the `fminf` comparison:
 ```c
-#ifndef INTERPOLATOR_H
-#define INTERPOLATOR_H
-
-#include "data_structures.h"
-#include "motion/trajectory.h"
-#include <stdint.h>
-#include <stdbool.h>
-
-// Must match TMR4 PR4 configuration: 50MHz / 500 = 100,000 Hz
-#define INTERPOLATOR_TICK_RATE_HZ   100000UL
-
-void INTERPOLATOR_Initialize(APP_DATA *appData);
-void INTERPOLATOR_LoadMove(const SCurveMove *move);
-void INTERPOLATOR_Stop(void);
-void INTERPOLATOR_EnableAllAxes(void);
-void INTERPOLATOR_DisableAllAxes(void);
-bool INTERPOLATOR_IsActive(void);
-bool INTERPOLATOR_MoveComplete(void);   // poll from main loop; auto-clears on read
-
-// Registered with TMR4_CallbackRegister — do NOT call directly
-void INTERPOLATOR_Tick(uint32_t status, uintptr_t context);
-
-#endif // INTERPOLATOR_H
+float v_peak_mm_min = sqrtf(arc_accel * chord_mm) * 60.0f;
+float arc_cruise = fminf(feedrate, v_peak_mm_min);
 ```
+Homing now runs at the full $25 seek rate and $24 feed rate as commanded.
+
+**Commit**: `5db7318`
 
 ---
 
-### STEP 3 — Create `srcs/motion/interpolator.c`
+## ✅ Bug Fix: rate_delta ceiling division — motor never reached cruise speed — March 1, 2026
 
-The 100kHz fixed-rate servo tick. Pure integer in ISR — no float.
-
+**Root cause**: `KINEMATICS_LinearMove()` computed `rate_delta` using floor (integer) division:
 ```c
-#include "motion/interpolator.h"
-#include "utils/utils.h"
-#include "app.h"
-#include "peripheral/tmr/plib_tmr4.h"
-#include <math.h>
-#include <string.h>
-
-// ISR-visible state — all volatile
-static volatile int32_t  dds_acc[NUM_AXIS];
-static volatile int32_t  dds_inc[NUM_AXIS];      // fixed-point: fraction of DDS_SCALE per tick
-static volatile int8_t   dds_dir[NUM_AXIS];      // +1 or -1
-static volatile uint32_t ticks_remaining;
-static volatile bool     interp_active  = false;
-static volatile bool     move_complete  = false;
-
-static APP_DATA *g_appData = NULL;
-
-void INTERPOLATOR_Initialize(APP_DATA *appData) {
-    g_appData = appData;
-    memset((void*)dds_acc, 0, sizeof(dds_acc));
-    memset((void*)dds_inc, 0, sizeof(dds_inc));
-    for (int i = 0; i < NUM_AXIS; i++) dds_dir[i] = 1;
-    ticks_remaining = 0;
-    interp_active   = false;
-    move_complete   = false;
-    TMR4_CallbackRegister(INTERPOLATOR_Tick, (uintptr_t)NULL);
-}
-
-void INTERPOLATOR_LoadMove(const SCurveMove *move) {
-    float total_time = move->t[7];
-    if (total_time < 1e-9f) return;
-
-    uint32_t total_ticks = (uint32_t)(total_time * (float)INTERPOLATOR_TICK_RATE_HZ + 0.5f);
-    if (total_ticks == 0) return;
-
-    // Stop ISR during setup
-    interp_active = false;
-
-    float v = move->v[1];   // mm/s — constant velocity stub (v[1] = first phase speed)
-
-    for (int axis = 0; axis < NUM_AXIS; axis++) {
-        float axis_steps_per_sec = v
-                                   * fabsf(move->unit_vec[axis])
-                                   * (*(g_axis_settings[axis].steps_per_mm));
-        // DDS increment = (steps_per_sec / tick_rate) * DDS_SCALE
-        float inc_f = (axis_steps_per_sec / (float)INTERPOLATOR_TICK_RATE_HZ)
-                      * (float)DDS_SCALE;
-        dds_inc[axis] = (int32_t)(inc_f + 0.5f);
-        dds_acc[axis] = 0;
-        dds_dir[axis] = (move->unit_vec[axis] >= 0.0f) ? 1 : -1;
-
-        if (dds_dir[axis] > 0) { AXIS_DirSet(axis); }
-        else                   { AXIS_DirClear(axis); }
-    }
-
-    ticks_remaining = total_ticks;
-    move_complete   = false;
-    interp_active   = true;
-
-    if (!TMR4_IsStarted()) TMR4_Start();
-}
-
-// THE 100kHz ISR — budget 10µs = 2000 CPU cycles at 200MHz
-// Actual: ~200 cycles worst case
-void INTERPOLATOR_Tick(uint32_t status, uintptr_t context) {
-    if (!interp_active) return;
-
-    // 1. Clear step pins from last tick (pulse lasted 10µs — always long enough)
-    for (int axis = 0; axis < NUM_AXIS; axis++) {
-        AXIS_StepClear(axis);
-    }
-
-    // 2. DDS accumulate → emit step on overflow
-    for (int axis = 0; axis < NUM_AXIS; axis++) {
-        if (dds_inc[axis] == 0) continue;
-        dds_acc[axis] += dds_inc[axis];
-        if ((uint32_t)dds_acc[axis] >= (uint32_t)DDS_SCALE) {
-            dds_acc[axis] -= (int32_t)DDS_SCALE;
-            AXIS_StepSet(axis);
-            if (dds_dir[axis] > 0) { AXIS_IncrementSteps(axis); }
-            else                   { AXIS_DecrementSteps(axis); }
-        }
-    }
-
-    // 3. Countdown
-    if (ticks_remaining > 0) ticks_remaining--;
-    if (ticks_remaining == 0) {
-        interp_active = false;
-        move_complete = true;   // ring main loop
-        TMR4_Stop();
-        for (int axis = 0; axis < NUM_AXIS; axis++) AXIS_StepClear(axis);
-    }
-}
-
-bool INTERPOLATOR_MoveComplete(void) {
-    if (move_complete) {
-        move_complete = false;
-        return true;
-    }
-    return false;
-}
-
-bool INTERPOLATOR_IsActive(void) { return interp_active; }
-
-void INTERPOLATOR_Stop(void) {
-    interp_active = false;
-    ticks_remaining = 0;
-    TMR4_Stop();
-    for (int axis = 0; axis < NUM_AXIS; axis++) AXIS_StepClear(axis);
-}
-
-void INTERPOLATOR_EnableAllAxes(void)  { enable_all_set(); }
-void INTERPOLATOR_DisableAllAxes(void) { enable_all_clear(); }
+rate_delta = (initial_rate - nominal_rate) / accel_steps;   // floor → too small
 ```
+Because floor rounds down, `rate_delta × accel_steps < (initial_rate - nominal_rate)`.  
+The ISR's snap-to-nominal condition (`step_interval <= nominal_rate + rate_delta`) was never
+triggered within `accel_steps` iterations, so the motor exited the accel phase still above
+`nominal_rate` — permanently stuck at a lower-than-commanded cruise speed.
 
----
+**Example with defaults (F2000, steps/mm=156, accel=500)**:
+- `initial_rate=601`, `nominal_rate=150`, `accel_steps=173`
+- `rate_delta = 451/173 = 2` (floor)
+- After 173 steps: interval = `601 − 2×173 = 255` ticks → ~19 mm/s (not 33.3 mm/s)
 
-### STEP 4 — Create `srcs/motion/trajectory.c` (constant-velocity stub tonight)
-
-Full S-curve math comes next session. Tonight's stub validates that DDS output is correct.
-
+**Fix**: Ceiling division ensures `rate_delta × accel_steps ≥ range`, so the snap fires before accel ends:
 ```c
-#include "motion/trajectory.h"
-#include "utils/utils.h"
-#include <math.h>
-#include <string.h>
+uint32_t accel_range = segment_buffer->initial_rate - segment_buffer->nominal_rate;
+segment_buffer->rate_delta = (accel_range + accel_steps - 1) / accel_steps;  // ceil
+```
+Same fix applied to `decel_rate_delta` and the copy in `MOTION_RecomputeExit()`.
 
-static SCurveMove traj_queue[TRAJ_QUEUE_SIZE];
-static uint32_t   traj_head  = 0;
-static uint32_t   traj_tail  = 0;
-static uint32_t   traj_count = 0;
+**Files changed**:
+- `srcs/motion/kinematics.c` — `KINEMATICS_LinearMove()`: ceiling for `rate_delta` and `decel_rate_delta`
+- `srcs/motion/motion.c` — `MOTION_RecomputeExit()`: ceiling for `decel_rate_delta`
 
-void TRAJECTORY_Initialize(void) {
-    traj_head = traj_tail = traj_count = 0;
-    memset(traj_queue, 0, sizeof(traj_queue));
-}
+---
 
-void TRAJECTORY_Reset(void) { TRAJECTORY_Initialize(); }
+## ✅ Bug Fix: MOTION_Arc stop/go jitter — March 2, 2026
 
-bool TRAJECTORY_GetNextMove(SCurveMove *out) {
-    if (traj_count == 0) return false;
-    *out = traj_queue[traj_tail];
-    traj_tail = (traj_tail + 1) % TRAJ_QUEUE_SIZE;
-    traj_count--;
-    return true;
-}
+**Root cause**: `MOTION_Arc()` generated exactly one arc segment per main-loop call. The ISR consumed segments in microseconds; the main loop was too slow to refill → queue drained to 0 between arc segments → motor stopped and restarted on every segment.
 
-// STUB: constant velocity, no acceleration ramp.
-// Purpose: validate DDS step output on hardware before adding profile math.
-bool TRAJECTORY_AddMove(CoordinatePoint start, CoordinatePoint end,
-                        float feedrate_mm_min, float entry_v, float exit_v) {
-    if (traj_count >= TRAJ_QUEUE_SIZE) return false;
+**Fix**: Changed to a `while(arcGenState == ARC_GEN_ACTIVE && motionQueueCount < MAX_MOTION_SEGMENTS)` loop that fills the entire 16-slot queue in one call.
 
-    SCurveMove *m = &traj_queue[traj_head];
-    memset(m, 0, sizeof(SCurveMove));
+- `srcs/motion/motion.c:162` — `MOTION_Arc()`: one-segment per call → fill-queue loop
 
-    // Geometry
-    float dist_sq = 0.0f;
-    for (int i = 0; i < NUM_AXIS; i++) {
-        float d = end.coordinate[i] - start.coordinate[i];
-        m->unit_vec[i] = d;
-        dist_sq += d * d;
-    }
-    float dist = sqrtf(dist_sq);
-    if (dist < 1e-6f) return false;
-    m->millimeters = dist;
-    for (int i = 0; i < NUM_AXIS; i++) m->unit_vec[i] /= dist;
+---
 
-    // Clamp feedrate to per-axis limits
-    float v_mm_s = feedrate_mm_min / 60.0f;
-    for (int i = 0; i < NUM_AXIS; i++) {
-        float uv = fabsf(m->unit_vec[i]);
-        if (uv > 1e-6f) {
-            float limit = *(g_axis_settings[i].max_rate) / 60.0f;
-            if (v_mm_s * uv > limit) v_mm_s = limit / uv;
-        }
-    }
 
-    float duration = dist / v_mm_s;
 
-    // Constant velocity: fill all phases with same speed
-    for (int ph = 0; ph < 8; ph++) {
-        m->t[ph] = (ph == 0) ? 0.0f : duration;
-        m->v[ph] = v_mm_s;
-        m->a[ph] = 0.0f;
-    }
-    m->j             = 0.0f;
-    m->a_max         = 0.0f;
-    m->nominal_speed = v_mm_s;
-    m->acceleration  = *(g_axis_settings[AXIS_X].acceleration);
+**Root cause**: SETTINGS_VERSION was bumped from 2 → 3 when TMC5160 fields were added to `CNC_Settings`. Since all axes are currently `DRIVER_DRV8825`, `HAS_TMC5160_AXIS` is NOT defined, so those fields do not exist in the struct — the binary layout is identical to version 2. However the hard-coded `#define SETTINGS_VERSION 3` caused the version check in `SETTINGS_LoadFromFlash` to fail, so the firmware silently fell back to defaults (`steps_per_mm=156, max_rate Z=2000`) instead of loading calibrated flash values. Symptom: correct acc/dec shape but wrong absolute speed.
 
-    traj_head = (traj_head + 1) % TRAJ_QUEUE_SIZE;
-    traj_count++;
-    return true;
-}
+**Fix**: Made `SETTINGS_VERSION` conditional on `HAS_TMC5160_AXIS`:
+- `incs/settings/settings.h:88` — `#define SETTINGS_VERSION 2` when DRV8825-only (struct unchanged); `#define SETTINGS_VERSION 3` when `HAS_TMC5160_AXIS` (TMC fields present → struct differs from v2)
 
-// No junction blending in stub
-void  TRAJECTORY_Recalculate(void) { }
+**Rule going forward**: Only bump `SETTINGS_VERSION` when the `CNC_Settings` struct binary layout actually changes (i.e. when unconditional fields are added/reordered, not when `#ifdef`-guarded fields are added).
 
-float TRAJECTORY_VelocityAt(const SCurveMove *m, float t) { return m->v[1]; }
-float TRAJECTORY_PositionAt(const SCurveMove *m, float t) { return m->v[1] * t; }
+---
+## ✅ Documentation: UML + README Updated for lookahead Architecture — March 1, 2026
+
+Updated all architecture documentation to reflect current `lookahead` branch implementation. Removed all references to the deleted Priority Phase System and old TMR2/OC2/OC3/OC4 per-axis ISR architecture.
+
+- `docs/plantuml/02_segment_clock.puml` — **Complete rewrite**: Now documents period-based TMR4/OC1/TMR5 single-ISR architecture, M14K shadow register swap, switch/Harmony macro GPIO pattern, direct-SFR Timer/OC, Bresenham inside ISR, velocity profiling inside ISR, pulse-width TMR5 callback, race window note
+- `docs/plantuml/01_system_overview.puml` — **Complete rewrite**: Removed TMR2 free-running, OC2/OC3/OC4 per-axis ISRs, Priority Phase enum. Added `OCP1_ISR` single-ISR with shadow regs, look-ahead planner in kinematics, arc incremental generator
+- `docs/plantuml/03_arc_linear_interpolation.puml` — **Targeted fix**: Replaced `[Priority Phase\nSystem]` note with `[MOTION_Tasks Segment Queue]`. Replaced `[Hardware Timers OC1/OC2/OC3/OC4]` with `[OCP1_ISR TMR4/OC1/TMR5]`
+- `README.md:9` — Branch updated: `tmc5160` → `lookahead`
+- `README.md:11` — Last build date updated: February 28, 2026 → March 1, 2026
+- `README.md:19` — Feature table: Added "Look-ahead backward-pass planner (junction velocity) ✅ Complete"
+- `README.md:112` — Call hierarchy: "motion.c — motion queue, phase system" → "motion.c — segment queue, look-ahead planner"
+- `README.md:128–143` — **Deleted** "### Priority Phase System" section (5-phase enum no longer exists in codebase)
+- `README.md:128` — **Added** "### ISR Architecture" section: M14K shadow regs, switch/Harmony macro rationale, GPIO vs Timer/OC split, 8-step ISR sequence, TMR5 callback
+- `README.md` — **Added** "### Look-Ahead Planner" section: backward-pass junction velocity, pre-computed per-segment integer deltas
+
+---
+
+## ✅ Look-Ahead Single-Step Retroactive Planner — February 28, 2026
+
+Implements single-step retroactive velocity planning across `data_structures.h`, `kinematics.c`, and `motion.c`.
+
+**Core change**: when segment N arrives, the planner retroactively patches segment N-1's exit profile to the computed junction speed instead of always decelerating to safe-start (8.33 mm/s).
+
+- `incs/data_structures.h` — `MotionSegment`: Added `decel_rate_delta` (separate accel/decel deltas), `entry_speed_mms`, `exit_speed_mms`, `speed_locked`
+- `srcs/motion/kinematics.c` — `KINEMATICS_LinearMove()`: Initialise all new fields; compute `decel_rate_delta = (final_rate - nominal_rate) / decel_steps` independently from `rate_delta`
+- `srcs/motion/motion.c` — Decel phase: use `seg->decel_rate_delta` instead of `abs(seg->rate_delta)` (correct for asymmetric entry/exit speeds)
+- `srcs/motion/motion.c` — Added `MOTION_RecomputeExit()`: patches `final_rate`, `decelerate_after`, `decel_rate_delta` from a new exit speed
+- `srcs/motion/motion.c` — `MOTION_ProcessGcodeEvent()` G1 handler: hoisted `junction_speed`; after queuing N, calls `MOTION_RecomputeExit(N-1, junction_speed)` — retroactive patch guarded by `motionQueueTail` and `speed_locked`
+- `srcs/motion/motion.c` — `MOTION_Arc()`: sets `segment->speed_locked = true` on every arc segment
+- `srcs/motion/motion.c` — `GCODE_EVENT_ARC_MOVE` handler: computes `arc_cruise = min(feedrate, sqrt(accel * mm_per_arc_segment))` and patches preceding G1 exit to `arc_cruise` for smooth G1→arc entry
+
+**Effect**:
+- Consecutive same-direction G1 moves glide through without decelerating
+- Corner G1 moves decelerate to the correct angle-computed junction speed
+- G1→arc: preceding G1 decelerates to arc cruise speed not to near-stop
+- Arc segments remain speed-locked, immune to further patching
+
+---
+
+## ✅ Arc Cruise Speed Fix — February 28, 2026
+
+- `srcs/motion/kinematics.c:500` — `KINEMATICS_LinearMoveSimple()` — Replaced hardcoded `8.33 mm/s` entry/exit velocity with computed triangle-peak cruise speed: `arc_cruise = min(feedrate, sqrt(min_accel_xy * chord_mm))`. Passes `arc_cruise` as feedrate AND entry/exit so `nominal=initial=final` — trapezoidal profiler is fully inactive for arc segments. Consecutive arc segments run back-to-back at constant speed with no inter-segment deceleration. Fixes circles running at ~11 mm/min instead of commanded feedrate.
+
+---
+
+## ✅ Velocity Profiling Restored — February 28, 2026
+
+Restores the GRBL-style trapezoidal acceleration that was disabled in commit `07939e8`.
+All three fixes applied simultaneously to avoid race conditions.
+
+- `srcs/motion/kinematics.c:258` — `KINEMATICS_LinearMove()` — Fix 1: `min_steps_per_sec` now computed as GRBL safe-start `sqrtf(2*a/steps_per_mm)` clamped to `[1, cruise]`. Replaces incorrect `= steps_per_sec` that forced `rate_delta=0`.
+- `srcs/motion/kinematics.c:299` — `KINEMATICS_LinearMove()` — Fix 2: `step_interval = initial_rate` (safe-start speed). Removes `⚠️ TEMPORARY` that hardwired cruise from step 1.
+- `srcs/motion/stepper.c:291` — `STEPPER_SetStepRate()` — Fix 3: Removed `TMR4_PeriodSet` / `OCMP1_CompareValueSet` / `OCMP1_CompareSecondaryValueSet` from main loop. ISR already writes these registers every step from `step_interval` — sole hardware writer is now the ISR, eliminating the race condition that caused X/Y noise in prior attempts.
+
+**Tag before changes**: `v1.1h-20260228-pre-accel`
+
+---
+
+## ✅ Full GRBL Feed Hold / Resume (Graceful Drain) — February 28, 2026
+
+Full GRBL v1.1 compliant `!` (feed hold) / `~` (cycle start) with **two-flag graceful drain** —
+in-flight segments complete naturally before the hardware is stopped.
+
+### Two-Flag Architecture (defined in `stepper.c`, declared in `stepper.h`)
+
+| Flag | Meaning | GRBL Status | Hardware |
+|------|---------|-------------|----------|
+| `g_feed_hold_pending` | `!` received, queue draining | `Hold:1` | TMR4/OC1 running |
+| `g_feed_hold_active` | queue empty, fully parked | `Hold:0` | TMR4/OC1 stopped |
+
+### Changed files
+
+- `srcs/motion/stepper.c:413` — `STEPPER_PauseMotion()` — if queue non-empty sets `g_feed_hold_pending` only (drain); if queue already 0 goes straight to `g_feed_hold_active` (immediate stop)
+- `srcs/motion/stepper.c:447` — `STEPPER_FinalizeHold()` — NEW: clears pending, sets active, stops TMR4/OC1/TMR5; called by `MOTION_Tasks` when `motionQueueCount` hits 0
+- `srcs/motion/stepper.c:461` — `STEPPER_ResumeMotion()` — cancels `g_feed_hold_pending` (motion continues) OR clears `g_feed_hold_active` and restarts TMR4/OC1
+- `incs/motion/stepper.h:30` — Added `extern volatile bool g_feed_hold_pending` and `void STEPPER_FinalizeHold(void)`
+- `srcs/motion/motion.c:300` — `MOTION_Tasks()` — at queue-drain (`motionQueueCount == 0`) calls `STEPPER_FinalizeHold()` if pending, else normal `TMR4_Stop()`
+- `srcs/gcode/gcode_parser.c:876` — status `?` returns `Hold:1` when pending, `Hold:0` when active
+- `srcs/gcode/gcode_parser.c:915` — `~` calls `STEPPER_ResumeMotion()` when either flag set
+- `srcs/gcode/gcode_parser.c:174` — soft reset clears both flags
+- `srcs/app.c:326` — `MOTION_Tasks` gated on `!g_feed_hold_active` only (runs during drain)
+- `srcs/app.c:344` — arc generation gated on `!g_feed_hold_pending` (inside the active gate)
+- `srcs/app.c:434` — event processing gated on `!g_feed_hold_active && !g_feed_hold_pending`
+
+**Soft reset (`Ctrl+X`)**: clears `g_feed_hold_active` without resuming motion (calls `STEPPER_StopMotion` separately)
+
+**Files changed**:
+- `srcs/motion/stepper.c:67` — Added `volatile bool g_feed_hold_active = false;`
+- `incs/motion/stepper.h:30` — Added `extern volatile bool g_feed_hold_active;`
+- `srcs/motion/stepper.c:407` — `STEPPER_PauseMotion()` sets flag before stopping hardware
+- `srcs/motion/stepper.c:426` — `STEPPER_ResumeMotion()` clears flag + handles NULL-segment resume
+- `srcs/gcode/gcode_parser.c:69` — Removed `static bool feedHoldActive`; replaced all 5 refs with `g_feed_hold_active`
+- `srcs/app.c:322` — `if (!g_feed_hold_active)` gates `MOTION_Tasks` + arc generation
+- `srcs/app.c:432` — `if(appData.state != APP_ALARM && !g_feed_hold_active)` gates event processing
+
+Build result: ✅ **BUILD COMPLETE** (`bins/CNC_V3.hex`)
+
+---
+
+## 🔧 Linker Fix: `g_estop_pending` moved to stepper.c — February 28, 2026
+
+After `make clean`, the linker reported `undefined reference to 'g_estop_pending'` from
+`gcode_parser.c:161`. Root cause: `g_estop_pending` was defined in `app.c` but the linker
+(with `--gc-sections` + `-fdata-sections`) failed to resolve it across the `app.o` → `gcode_parser.o`
+dependency. Fixed by moving the definition to `stepper.c` to match the established pattern
+used by `g_hard_limit_alarm` and `g_suppress_hard_limits` (both defined in `stepper.c`,
+declared in `stepper.h`, which is directly included by all consumers).
+
+- `srcs/motion/stepper.c:63` — Added `volatile bool g_estop_pending = false;`
+- `incs/motion/stepper.h:26` — Added `extern volatile bool g_estop_pending;`
+- `srcs/app.c:59` — Removed definition (replaced with comment referencing stepper.c)
+- `incs/app.h:22` — Removed `extern volatile bool g_estop_pending;` (now in stepper.h)
+
+Build result: ✅ **BUILD COMPLETE** (`bins/CNC_V3.hex`)
+
+---
+
+## ✅ E-Stop Hardware Interrupt — February 27, 2026
+
+E-Stop button on **RF4** (Change Notice Port F, IPL7) — highest priority ISR, beats OC1 at IPL5.
+
+**MCC Configuration**:
+- RF4 = digital input, internal pullup enabled, CN-F interrupt, IPL7SRS
+- SPI2 = IPL1 (lowest — only used at startup/idle, never during motion)
+- Interrupt vector: `CHANGE_NOTICE_F_Handler` → `CHANGE_NOTICE_F_InterruptHandler()` → `ESTOP_Callback()`
+
+**Changes**:
+- `incs/data_structures.h:191` — `alarmCode` comment updated; added `volatile bool eStopTriggered`
+- `srcs/app.c:57` — Added `ESTOP_Callback()` static function: disables steppers, stops TMR4, flushes motion queue, sets `alarmCode=10`, transitions to `APP_ALARM`
+- `srcs/app.c` (APP_CONFIG) — Registered `GPIO_PinInterruptCallbackRegister(ESTOP_PIN, ESTOP_Callback, NULL)` + `ESTOP_InterruptEnable()`
+- `srcs/app.c` (APP_ALARM) — Reports `ALARM:10\r\n` once on E-Stop; recovery via Ctrl+X soft reset from host
+
+**Recovery sequence**: Button released → host sends `Ctrl+X` → soft reset → `APP_IDLE`
+
+
+
+## 🔧 UART3 TX Buffer Restored — February 26, 2026
+
+MCC regeneration (during SPI2/TMC5160 addition) reverted `UART3_WRITE_BUFFER_SIZE` from 1024 back
+to 256. This caused UGS to disconnect immediately after sending `$$` — the settings response
+(~400-500 bytes) overflowed the 256-byte TX ring buffer.
+
+- `srcs/config/default/peripheral/uart/plib_uart3.c:60` — `UART3_WRITE_BUFFER_SIZE` restored to `1024U`
+- `srcs/config/default/peripheral/uart/plib_uart3.c:61` — `UART3_WRITE_BUFFER_SIZE_9BIT` restored to `1024U >> 1`
+
+> ⚠️ After **any** MCC regeneration always verify `UART3_WRITE_BUFFER_SIZE = 1024U` in this file.
+
+---
+
+## 🔧 Build System Flattened — February 26, 2026
+
+Removed `Debug`/`Release` subdirectory split from the build system. Single output path for all
+builds — no hardware JTAG debugger is available so the distinction was meaningless.
+
+**Output change**:
+- Before: `bins/Release/CNC_V3.hex`, `objs/Release/`, `other/Release/`, `libs/Release/`
+- After:  `bins/CNC_V3.hex`, `objs/`, `other/`, `libs/`
+
+**Deleted directories**: `bins/Release`, `bins/Debug`, `objs/Release`, `objs/Debug`,
+`other/Release`, `other/Debug`, `libs/Release`, `libs/Debug`
+
+**Files modified**:
+- `Makefile` — Removed `BUILD_CONFIG ?= Release`, all `$(BUILD_CONFIG)` references,
+  `clean_all` target; `build` target now does `cd bins && xc32-bin2hex`
+- `srcs/Makefile` — Removed `BUILD_CONFIG ?= Default`; `BIN_DIR/OBJ_DIR/OUT_DIR/LIB_DIR`
+  now flat; replaced `ifeq Debug/Release/error` block with single `OPT_FLAGS := -g -O$(OPT_LEVEL)`;
+  `build_dir` no longer creates `bins/Debug` and `bins/Release`; map file is `CS23.map`
+
+**Serial debug output** still controlled by `DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"` — same
+compile-time zero-overhead mechanism, just no longer tied to a build config name.
+
+**Build verified**: `bins/CNC_V3.hex` (262637 bytes), only pre-existing bootloader pragma warning.
+
+---
+
+## 🔧 TMC5160 Runtime Settings via $= — February 26, 2026
+
+Added `$200–$253` parameter range for TMC5160 runtime motor tuning. Parameters persist in NVM
+flash and take effect immediately (re-configures the driver via SPI without rebooting).
+All code is guarded `#ifdef HAS_TMC5160_AXIS` — DRV8825-only builds compile identically to before.
+
+**Parameter Map** (values are applied per-axis: 0=X, 1=Y, 2=Z, 3=A):
+
+| Param  | Axis | Description                                               | Default |
+|--------|------|-----------------------------------------------------------|---------|
+| $200–$203 | X–A | Chopper mode: 1=StealthChop 2=SpreadCycle 3=Mixed 4=CoolStep | 1 |
+| $210–$213 | X–A | Run current 0–31 (linear % of Vref)                      | 20      |
+| $220–$223 | X–A | Hold current 0–31                                         | 10      |
+| $230–$233 | X–A | Microstep resolution (0=256 … 8=full-step)                | 4 (16µ) |
+| $240–$243 | X–A | TPWMTHRS — StealthChop→SpreadCycle crossover (Mixed mode) | 500     |
+| $250–$253 | X–A | TCOOLTHRS — CoolStep lower velocity threshold             | 0       |
+
+**Files changed:**
+
+- `incs/settings/settings.h:7` — Added `#include "common.h"` so `HAS_TMC5160_AXIS` is visible
+- `incs/settings/settings.h:58–65` — Added `#ifdef HAS_TMC5160_AXIS` block with 6 arrays inside `CNC_Settings`
+- `incs/settings/settings.h:SETTINGS_VERSION` — Bumped 2 → 3 (struct changed; old flash data is invalid and triggers defaults)
+- `srcs/settings/settings.c:default_settings` — Added `#ifdef HAS_TMC5160_AXIS` block with sensible defaults matching `g_default_cfg` in `tmc5160.c`
+- `srcs/settings/settings.c:SETTINGS_SetValue()` — Added `case 200–253` inside `#ifdef HAS_TMC5160_AXIS`
+- `srcs/settings/settings.c:SETTINGS_GetValue()` — Added `case 200–253` inside `#ifdef HAS_TMC5160_AXIS`
+- `srcs/settings/settings.c:SETTINGS_PrintAll()` — Added 24 `sprintf` lines for `$200–$253` inside `#ifdef HAS_TMC5160_AXIS`
+- `incs/motion/tmc5160.h:24` — Added `#include "settings/settings.h"` for `CNC_Settings` type
+- `incs/motion/tmc5160.h:TMC5160_ApplySettings()` — New public API function declaration
+- `srcs/motion/tmc5160.c:TMC5160_ApplySettings()` — Implementation: validates axis is TMC5160, builds `TMC5160_AxisConfig` from settings arrays, calls `TMC5160_ConfigAxis()`
+- `srcs/gcode/gcode_parser.c:includes` — Added `#ifdef HAS_TMC5160_AXIS` guard around `#include "motion/tmc5160.h"`
+- `srcs/gcode/gcode_parser.c:$n=v handler` — Added hook: when param in [200,253], calls `TMC5160_ApplySettings((E_AXIS)(param % 10), s)` immediately after flash save
+
+**Build**: ✅ Clean Release — `bins/Release/CS23.hex` (316 KB, February 26, 2026)
+
+---
+
+## 🔧 Per-Axis Mixed Driver System — February 26, 2026
+
+### Correction: enable wrappers must delegate to enable_all_set/clear
+- `srcs/utils/utils.c:enable_x/y/z/a_set/clear` - Fixed: per-axis DRV8825 enable wrappers now call `enable_all_set()` / `enable_all_clear()` (the user-defined single-pin wrapper) instead of calling `EnXYZA_Set/Clear` directly. This respects the existing `enable_all_*` abstraction layer and keeps all future EN pin changes in one place.
+- `incs/common.h:DRIVER_DRV8825 comment` - Updated comment to note shared `EnXYZA` pin (no per-axis EN on this PCB)
+- `.github/copilot-instructions.md` - Added **🔴 CRITICAL: PCB Hardware Constraints** section at top documenting the single shared `EnXYZA` (RE6) enable pin, the absence of `EnX/EnY/EnZ/EnA` macros, and the per-axis driver define system — so this is never accidentally broken again
+
+Replaced the global `STEPPER_DRIVER_TMC5160` / `STEPPER_DRIVER_LEGACY` compile switch with a
+fully configurable per-axis driver assignment system supporting mixed TMC5160 + DRV8825 on the
+same board (e.g. 2+2 or 3+1). All selection is compile-time; zero runtime overhead.
+
+- `incs/common.h:17-60` - **Replaced** global driver `#define` with:
+  - `DRIVER_TMC5160 1` / `DRIVER_DRV8825 2` — driver type tokens
+  - `AXIS_X_DRIVER` / `AXIS_Y_DRIVER` / `AXIS_Z_DRIVER` / `AXIS_A_DRIVER` — per-axis assignment (edit to match wiring)
+  - `HAS_TMC5160_AXIS` — auto-derived; defined if ≥1 axis is TMC5160; gates all SPI code
+  - `HAS_DRV8825_AXIS` — auto-derived; defined if ≥1 axis is DRV8825; gates per-axis enable arrays
+  - `TMC5160_AXIS_MASK` — compile-time bitmask (bit N = axis N is TMC5160); used by mixed-driver enable inlines
+- `incs/motion/tmc5160.h:22,119` - Changed `#ifdef STEPPER_DRIVER_TMC5160` guard → `#ifdef HAS_TMC5160_AXIS`
+- `srcs/motion/tmc5160.c:17` - Changed file-level guard → `#ifdef HAS_TMC5160_AXIS`
+- `srcs/motion/tmc5160.c:TMC5160_Initialize()` - Replaced 4-axis loop with per-axis `#if (AXIS_x_DRIVER == DRIVER_TMC5160)` blocks; CS deassert and ConfigAxis only called for assigned TMC5160 axes
+- `srcs/motion/tmc5160.c:TMC5160_Tasks()` - Replaced 4-axis loop with per-axis `#if` blocks using `POLL_TMC_AXIS()` local macro; DRV8825 axes never polled over SPI
+- `srcs/motion/tmc5160.c:268` - Updated closing `#endif` comment
+- `incs/utils/utils.h:27-31` - Changed enable extern guard `#ifndef STEPPER_DRIVER_TMC5160` → `#ifdef HAS_DRV8825_AXIS`
+- `incs/utils/utils.h:STEPPERS_Enable/Disable` - **Replaced** binary TMC5160/legacy block with mixed-driver implementation: TMC5160 block (`#ifdef HAS_TMC5160_AXIS`) + DRV8825 per-axis `#if` blocks (`#ifdef HAS_DRV8825_AXIS`)
+- `incs/utils/utils.h:AXIS_EnableSet/Clear` - **Replaced** with three-way `#if defined(HAS_TMC5160_AXIS) && defined(HAS_DRV8825_AXIS)` / `elif TMC5160` / `else DRV8825`; mixed path uses `TMC5160_AXIS_MASK` bitmask for single-compare runtime dispatch (compiler dead-strips one branch for pure configs)
+- `srcs/utils/utils.c:enable wrappers` - Changed guard `#ifndef STEPPER_DRIVER_TMC5160` → `#ifdef HAS_DRV8825_AXIS`
+- `srcs/utils/utils.c:axis_enable_set[] arrays` - Changed guard `#ifndef STEPPER_DRIVER_TMC5160` → `#ifdef HAS_DRV8825_AXIS`; full 4-entry arrays always compiled when DRV8825 present (TMC5160 entries unreachable via bitmask)
+- `srcs/app.c:APP_CONFIG` - Changed `#ifdef STEPPER_DRIVER_TMC5160` → `#ifdef HAS_TMC5160_AXIS`
+- `srcs/app.c:APP_IDLE` - Changed `#ifdef STEPPER_DRIVER_TMC5160` → `#ifdef HAS_TMC5160_AXIS`
+
+**Example configurations** (edit `AXIS_x_DRIVER` lines in `incs/common.h`):
+```
+X+Y=TMC5160, Z+A=DRV8825:  AXIS_X=TMC5160 AXIS_Y=TMC5160 AXIS_Z=DRV8825 AXIS_A=DRV8825
+X+Y+Z=TMC5160, A=DRV8825:  AXIS_X=TMC5160 AXIS_Y=TMC5160 AXIS_Z=TMC5160 AXIS_A=DRV8825
+All TMC5160:                all four = DRIVER_TMC5160
+All DRV8825:                all four = DRIVER_DRV8825  (previous STEPPER_DRIVER_LEGACY behaviour)
 ```
 
 ---
 
-### STEP 5 — Create new `srcs/motion/kinematics.c`
+## 🔧 Infrastructure Changes - February 23, 2026
 
-Rewrite from scratch — WCS coordinate math ONLY. No velocity, no trapezoid, no planner state.
+### TMC5160 SPI Driver - Infrastructure Setup
 
-Keep ONLY these functions from the old file:
-- `KINEMATICS_Initialize()` — remove `g_timer_freq`, remove `pl_previous_unit_vec[]`, remove `pl_previous_nominal_speed`
-- `KINEMATICS_WorkToMachine()` / `KINEMATICS_MachineToWork()`
-- `KINEMATICS_WorkToMachineWithWCS()` / `KINEMATICS_MachineToWorkWithWCS()`
-- `KINEMATICS_SetWorkOffset()` / `KINEMATICS_GetActiveWCSOffset()`
-- `KINEMATICS_SetWorkCoordinates()` / `KINEMATICS_GetCurrentPosition()`
-- `KINEMATICS_SetAxisMachinePosition()`
-- `KINEMATICS_GetWorkCoordinates()`
+- **MCC**: SPI2 peripheral added and configured (SPI Master mode)
+- `srcs/config/config/default/peripheral/spi/spi_master/plib_spi2_master.c` - MCC generated SPI2 PLIB (source)
+- `incs/config/config/default/peripheral/spi/spi_master/plib_spi2_master.h` - MCC generated SPI2 PLIB (header, moved to incs)
+- `incs/config/config/default/peripheral/spi/spi_master/plib_spi_master_common.h` - MCC common SPI types (header, moved to incs)
 
-**Delete entirely:**
-- `g_timer_freq`, `pl_previous_unit_vec[]`, `pl_previous_nominal_speed` (statics)
-- `limit_acceleration_by_axis()` → moves to `trajectory.c`
-- `limit_rate_by_axis()` → moves to `trajectory.c`
-- `convert_to_unit_vector()` → moves to `trajectory.c`
-- `KINEMATICS_LinearMove()` → replaced by `TRAJECTORY_AddMove()`
-- `KINEMATICS_RecalculateTrapezoid()` → deleted
-- `KINEMATICS_ArcMove()` → arc generation handled in trajectory layer
-- `KINEMATICS_PlanArc()` → same
-- `KINEMATICS_ResetPlannerState()` → not needed
-- `KINEMATICS_CalculateJunctionSpeed()` → moves to `trajectory.c`
-- `KINEMATICS_LinearMoveSimple()` → replaced by `TRAJECTORY_AddMove()`
-- `KINEMATICS_HomingMove()` → replaced by `TRAJECTORY_AddMove()`
-- `KINEMATICS_ResetAccumulators()` → stub/delete
-- `static float step_accumulator[NUM_AXIS]` → deleted
+### Build System Fixes
+
+- `Makefile:124` - `build_dir` target now forwards `DRY_RUN=$(DRY_RUN)` to inner make
+- `srcs/Makefile:380` - `SRC_DIRS` wildcard extended from 4 to 6 levels deep (covers `spi/spi_master/` nesting)
 
 ---
 
-### STEP 6 — Update `app.c`
+## ✅ LitePlacer GRBL Probe Implementation — February 10, 2026
 
-Replace all deleted function calls. Search for each of these and fix:
-
-| Search for | Replace with |
-|------------|--------------|
-| `STEPPER_LoadSegment` | `INTERPOLATOR_LoadMove` |
-| `STEPPER_DisableAll()` | `INTERPOLATOR_DisableAllAxes()` |
-| `STEPPER_EnableAll()` | `INTERPOLATOR_EnableAllAxes()` |
-| `STEPPER_IsEnabled()` | `INTERPOLATOR_IsActive()` |
-| `MOTION_Tasks(` | remove call |
-| `SEGMENT_PrepBuffer(` | remove call |
-| `KINEMATICS_LinearMove(` | `TRAJECTORY_AddMove(` |
-| `KINEMATICS_HomingMove(` | `TRAJECTORY_AddMove(` |
-| `motionActive` flag | `INTERPOLATOR_IsActive()` |
-| `motionSegmentCompleted` flag | `INTERPOLATOR_MoveComplete()` |
-
-New `APP_IDLE` loop structure:
-```c
-case APP_IDLE:
-    // G-code parsing and event dispatch
-    GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
-
-    // Feed moves to interpolator when it becomes free
-    if (!INTERPOLATOR_IsActive()) {
-        SCurveMove next;
-        if (TRAJECTORY_GetNextMove(&next)) {
-            INTERPOLATOR_LoadMove(&next);
-        }
-    }
-
-    // Check deferred OK (flow control unchanged)
-    if (INTERPOLATOR_MoveComplete()) {
-        GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
-    }
-    break;
-```
-
-Add includes at top of `app.c`:
-```c
-#include "motion/interpolator.h"
-#include "motion/trajectory.h"
-```
-
-In `APP_Initialize()`:
-```c
-INTERPOLATOR_Initialize(&appData);
-TRAJECTORY_Initialize();
-```
+G38.2/3/4/5 probe commands. Planning: [LITEPLACER_GRBL_IMPLEMENTATION.md](docs/readme/LITEPLACER_GRBL_IMPLEMENTATION.md)
 
 ---
 
-### STEP 7 — Update `data_structures.h`
+## 🔧 Code Changes - February 10, 2026
 
-Remove these fields from `APP_DATA`:
+### Phase 1: Probe Event Types (Initial Implementation)
 
-```c
-// DELETE all of these:
-MotionSegment motionQueue[MAX_MOTION_SEGMENTS];
-uint32_t      motionQueueHead, motionQueueTail, motionQueueCount;
-StepperBlock  stepperBlocks[MAX_MOTION_SEGMENTS];
-StepSegment   segmentBuffer[SEGMENT_BUFFER_SIZE];
-volatile uint8_t segmentBufferTail;
-uint8_t       segmentBufferHead, segmentNextHead;
-uint8_t       prep_st_block_index;
-float         prep_mm_remaining, prep_current_speed;
-uint8_t       prep_ramp_type;
-MotionSegment *prep_pl_block;
-float         prep_steps_remaining, prep_step_per_mm;
-float         prep_req_mm_increment, prep_dt_remainder;
-float         prep_accelerate_until, prep_decelerate_after;
-float         prep_maximum_speed, prep_mm_complete, prep_exit_speed;
-bool          motionActive;
-bool          motionSegmentCompleted;
-E_AXIS        dominantAxis;
-MotionSegment *currentSegment;
-int32_t       bresenham_error[NUM_AXIS];
-```
+#### File: `incs/gcode/gcode_parser.h`
 
-Also delete the `StepSegment` and `StepperBlock` struct definitions from the file — they are no longer used.
+**Line 35** - `GCODE_EventType enum`  
+- **Added**: `GCODE_EVENT_PROBE_TOWARD` - Event type for G38.2, G38.3 probe toward commands
+- **Added**: `GCODE_EVENT_PROBE_AWAY` - Event type for G38.4, G38.5 probe away commands
 
-The trajectory queue lives inside `trajectory.c` as a static (no need to put it in `APP_DATA`).
+**Line 100** - `GCODE_Event data union`  
+- **Added**: `probe` struct member with fields:
+  - `float x, y, z, a` - Target coordinates for probe move
+  - `float feedrate` - Probe feedrate
+  - `bool alarm_on_fail` - true for G38.2/G38.4, false for G38.3/G38.5
+  - `bool probe_toward` - true = toward (G38.2/G38.3), false = away (G38.4/G38.5)
 
----
+### Phase 2: Parser Implementation ✅ COMPLETE
 
-### STEP 8 — Build and Test
+#### File: `srcs/gcode/gcode_parser.c`
 
-```powershell
-# From repo root
-make clean
-make 2>&1 | Select-String "error:" | Select-Object -First 30
-```
-
-Fix all errors. Then:
-
-```powershell
-# Full build
-make
-```
-
-Flash `bins/CNC_V3.hex`. Connect UGS at 115200. Send:
-
-```gcode
-G21 G90
-G1 X10 F1000
-```
-
-**Expected behaviour tonight:**
-- Motor moves 10mm at constant 1000mm/min — NO ramp (stub)
-- Step pin on oscilloscope: uniform pulse stream, constant frequency (~3,333 Hz for 200 steps/mm at 1000mm/min)
-- UGS: motion completes, "ok" returned, `?` shows updated position
-
-If this works — DDS architecture is validated. S-curve profile math goes in next session.
+**Line 418** - `parse_command_to_event()` function  
+- **Added**: G38.x probe command parsing block (57 lines)
+- Parses G38.2, G38.3, G38.4, G38.5 with decimal subcode detection
+- Determines probe direction: toward (G38.2/G38.3) or away (G38.4/G38.5)
+- Sets alarm behavior: true for G38.2/G38.4, false for G38.3/G38.5
+- Parses XYZAF parameters with unit scaling (mm/inches)
+- Returns `GCODE_EVENT_PROBE_TOWARD` or `GCODE_EVENT_PROBE_AWAY`
+- Debug logging for probe parameters
 
 ---
 
-## Next Session (After Hardware Validation)
+## 📝 Pending Implementation
 
-1. Replace constant-velocity stub in `TRAJECTORY_AddMove` with real 7-phase S-curve solver
-2. Update `INTERPOLATOR_LoadMove` / `INTERPOLATOR_Tick` to re-evaluate `v(t)` per tick from current phase
-3. Add jerk settings `$110`–`$113` to `settings.c` (mm/s³ per axis)
-4. Add lookahead junction blending in `TRAJECTORY_Recalculate()`
-5. Restore arc support via `TRAJECTORY_AddMove` chord generation
-6. Restore homing using `TRAJECTORY_AddMove`
+### Phase 3: Probe State Machine (80% COMPLETE ✅)
+- [x] `incs/data_structures.h:145` - Add `ProbeState` enum (IDLE, MOVING, TRIGGERED, FAILED)
+- [x] `incs/data_structures.h:210` - Add probe state fields to APP_DATA (probeState, probeSuccess, probeAlarmOnFail, probePosition)
+- [x] `srcs/motion/motion.c:812` - `MOTION_ProcessGcodeEvent()` - Add GCODE_EVENT_PROBE_TOWARD/AWAY handling (68 lines)
+  - Builds start/end coordinates from probe event data
+  - Calls `KINEMATICS_LinearMove()` with probe_speed (8.33 mm/s)
+  - Initializes `appData->probeState = PROBE_STATE_MOVING`
+- [x] `srcs/app.c:278` - `APP_Tasks()` - Add probe trigger monitoring (70 lines)
+  - Checks `LIMIT_GetMax(AXIS_Z)` during PROBE_STATE_MOVING
+  - Applies $6 probe invert setting
+  - On trigger: stops motion, saves position to probePosition, sets PROBE_STATE_TRIGGERED
+  - On completion without trigger: sets PROBE_STATE_FAILED
+- [x] `srcs/app.c:290` - Add probe result reporting for PROBE_STATE_TRIGGERED
+  - Sends `[PRB:x,y,z,a:1]` and "ok"
+- [x] `srcs/app.c:302` - Add probe failure handling for PROBE_STATE_FAILED
+  - If probeAlarmOnFail: triggers `ALARM:5`, enters APP_ALARM state
+  - Else: sends `[PRB:x,y,z,a:0]` and "ok"
+
+### Phase 4: Hardware Configuration (100% COMPLETE ✅)
+- [x] `incs/utils/utils.h:155` - Add `PROBE_Get()` inline function
+  - Uses Z-max limit switch as probe input (GRBL standard)
+  - Applies $6 probe invert setting (NO/NC switch configuration)
+  - Returns true when probe contact made
+- [x] `srcs/app.c:283` - Updated probe trigger detection to use `PROBE_Get()`
+  - Replaced manual `LIMIT_GetMax(AXIS_Z)` + invert logic
+  - Now uses hardware abstraction layer for cleaner code
+
+### Phase 5: Testing (PENDING)
+- [ ] Test G38.2 probe with trigger detection
+- [ ] Test G38.3 probe without alarm on failure
+- [ ] Verify `[PRB:...]` response format
+- [ ] Test position preservation at trigger point
 
 ---
 
-## Architecture Reference
+## 🏷️ Git History
 
-```
-[UGS / G-code sender via UART]
-           ↓
-[gcode_parser.c]          KEPT UNCHANGED — do not touch
-           ↓  GCODE_Event queue
-[app.c + trajectory.c]    S-curve profile math, lookahead queue (64 moves)
-           ↓  SCurveMove
-[interpolator.c]          100kHz fixed ISR, DDS 32-bit accumulator per axis
-           ↓  LATSET / LATCLR
-[DRV8825 / TMC5160 drivers → stepper motors]
-```
+### Commits
 
-**Key numbers:**
-- TMR4: 50MHz / 500 = **100,000 Hz fixed**
-- ISR budget: 10µs = **2000 CPU cycles** at 200MHz
-- ISR actual cost: ~200 cycles worst case → **10% of budget used**
-- Max step rate: 50,000 steps/sec per axis (DDS Nyquist at 100kHz tick)
-- Lookahead queue: 64 moves (was 16 in GRBL)
-- All acceleration math: main loop FPU, zero float in ISR
+**Tag**: `v1.1h-20260210-pre-probe` - Stable build before LitePlacer probe implementation
+
+**Commit**: `c37eca6` - "Add LitePlacer GRBL probe implementation plan and initial event types"
+- Added comprehensive implementation document
+- Added GCODE_EVENT_PROBE_TOWARD and GCODE_EVENT_PROBE_AWAY event types
+- Added probe data structure to GCODE_Event union
+
+---
+
+## 📊 Implementation Progress
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| Phase 1: Event Types | ✅ Complete | `GCODE_EVENT_PROBE_TOWARD/AWAY` added to parser.h |
+| Phase 2: Parser | ✅ Complete | G38.2/3/4/5 parsing in gcode_parser.c |
+| Phase 3: State Machine | ✅ Complete | `MOTION_ProcessGcodeEvent`, probe monitoring in APP_Tasks |
+| Phase 4: Hardware Config | ✅ Complete | `PROBE_Get()` inline, Z-max as probe input, $6 invert |
+| Phase 5: Testing | ⬜ Pending | Flash to dev rig and verify [PRB:...] response |
+
+**Total Progress**: 80% (4/5 phases complete — Phase 5 hardware test pending)
+
+---
+
+## 📚 Reference Documents
+
+- [LITEPLACER_GRBL_IMPLEMENTATION.md](docs/readme/LITEPLACER_GRBL_IMPLEMENTATION.md) - Complete implementation plan
+- [SETTINGS_REFERENCE.md](docs/readme/SETTINGS_REFERENCE.md) - GRBL settings reference
+- [ARCHITECTURE.md](docs/readme/ARCHITECTURE.md) - System architecture overview
+
+---
+
+**Note**: This file tracks all code changes. Planning documents are separate in `docs/readme/`. No other change tracking files should be created.

@@ -28,6 +28,7 @@
 #include "motion/kinematics.h"
 #include "settings/settings.h"
 #include "utils/utils.h"
+#include "utils/uart_utils.h"
 #include "data_structures.h"
 #include "gcode/gcode_parser.h"
 #include <string.h>
@@ -50,6 +51,19 @@ volatile bool g_feed_hold_pending   = false;
 // so these arrays stay in sync automatically.
 
 static StepperPosition s_stepper_pos;
+
+// ─── Modal state ─────────────────────────────────────────────────────────────
+// Remembers the last programmed feedrate across G-code lines (F-word is modal).
+static float s_modal_feedrate_mm_min = 0.0f;
+
+// ─── Planned position ────────────────────────────────────────────────────────
+// Tracks the logical end position of the last move queued to the trajectory.
+// This is used as the `start` for the next queued move rather than the live
+// step-counter position, because UGS/senders typically pipeline many commands
+// before the first one executes.  Updated each time TRAJECTORY_AddMove succeeds.
+// Reset to the live step-counter position on soft-reset or queue drain.
+static CoordinatePoint s_planned_position;
+static bool            s_planned_position_valid = false;
 
 // ─── STEPPER API bridges ──────────────────────────────────────────────────────
 
@@ -191,7 +205,12 @@ void MOTION_Tasks(APP_DATA *appData)
 
     // If interpolator just finished a move, pop the next one and signal
     // app.c so it triggers GCODE_CheckDeferredOk() immediately.
-    if (INTERPOLATOR_MoveComplete()) {
+    // Also handles the kickstart case: interpolator idle but queue has entries
+    // (first move after a command, or after a feed hold clear).
+    bool move_done = INTERPOLATOR_MoveComplete();
+    bool needs_kickstart = !INTERPOLATOR_IsActive() && (TRAJECTORY_QueueCount() > 0u);
+
+    if (move_done || needs_kickstart) {
         SCurveMove next_move;
         if (TRAJECTORY_GetNextMove(&next_move)) {
             INTERPOLATOR_LoadMove(&next_move);
@@ -199,7 +218,9 @@ void MOTION_Tasks(APP_DATA *appData)
         // Fire even if queue is now empty — the count sync above already
         // reflects the new (lower) occupancy, so CheckDeferredOk will
         // see the freed slot and release the next "ok" to UGS.
-        appData->motionSegmentCompleted = true;
+        if (move_done) {
+            appData->motionSegmentCompleted = true;
+        }
     }
 }
 
@@ -296,19 +317,67 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
     switch (event->type) {
 
         case GCODE_EVENT_LINEAR_MOVE: {
-            // Build start and end CoordinatePoints from machine-space positions.
-            CoordinatePoint start = KINEMATICS_GetCurrentPosition();
-            CoordinatePoint end;
-            // gcode_parser linearMove uses named fields x,y,z,a (not an array)
-            end.coordinate[AXIS_X] = event->data.linearMove.x;
-            end.coordinate[AXIS_Y] = event->data.linearMove.y;
-            end.coordinate[AXIS_Z] = event->data.linearMove.z;
-            end.coordinate[AXIS_A] = event->data.linearMove.a;
+            // Build start/end in MACHINE coordinates.
+            // Use the planned (queued) end position as start so that back-to-back
+            // commands chained by the sender don't accumulate position before the
+            // motor has moved (step-counter hasn't updated yet between commands).
+            // When the trajectory queue is empty the step-counter IS authoritative,
+            // so re-anchor from it in that case (covers soft-reset / queue drain).
+            // Use the planned (logical) end of the last queued move as start.
+            // This is correct even when the interpolator is mid-execute and the
+            // trajectory queue has already been drained to feed the interpolator.
+            // Re-anchor from the step counter only when all motion has stopped.
+            CoordinatePoint start;
+            if (s_planned_position_valid &&
+                (TRAJECTORY_QueueCount() > 0 || INTERPOLATOR_IsActive())) {
+                start = s_planned_position;
+            } else {
+                start = KINEMATICS_GetCurrentPosition();
+                s_planned_position_valid = false;  // will be set true on first AddMove
+            }
+            // Build end in work space first, defaulting to current work position
+            CoordinatePoint start_work = KINEMATICS_MachineToWork(start);
+            CoordinatePoint end_work   = start_work;
+
+            float ex = event->data.linearMove.x;
+            float ey = event->data.linearMove.y;
+            float ez = event->data.linearMove.z;
+            float ea = event->data.linearMove.a;
+            if (!isnan(ex)) end_work.coordinate[AXIS_X] = ex;
+            if (!isnan(ey)) end_work.coordinate[AXIS_Y] = ey;
+            if (!isnan(ez)) end_work.coordinate[AXIS_Z] = ez;
+            if (!isnan(ea)) end_work.coordinate[AXIS_A] = ea;
+
+            // Convert work-space end to machine space
+            CoordinatePoint end = KINEMATICS_WorkToMachine(end_work);
+
+            // G0 rapid: use axis max_rate; G1 feed: use programmed F-word (modal)
             float fr = event->data.linearMove.feedrate;
-            if (fr < 1.0f) fr = s->max_rate[0];  // fallback
+            bool  rapid = event->data.linearMove.isRapid;
+            // Save non-zero feedrate as modal state
+            if (fr >= 1.0f) s_modal_feedrate_mm_min = fr;
+            // Use modal feedrate if current event has none
+            if (!rapid && fr < 1.0f && s_modal_feedrate_mm_min >= 1.0f)
+                fr = s_modal_feedrate_mm_min;
+            if (rapid || fr < 1.0f) {
+                // Rapid: pick the most-restrictive axis max_rate for all moving axes
+                fr = 1e30f;
+                for (int i = 0; i < NUM_AXIS; i++) {
+                    if (fabsf(end.coordinate[i] - start.coordinate[i]) > 1e-6f) {
+                        if (s->max_rate[i] < fr) fr = s->max_rate[i];
+                    }
+                }
+                if (fr > 1e29f) fr = s->max_rate[0];  // no axis moved — fallback
+            }
 
             // Add to trajectory queue; Recalculate blends junction speeds.
-            if (TRAJECTORY_AddMove(start, end, fr, 0.0f, 0.0f)) {
+            bool added = TRAJECTORY_AddMove(start, end, fr, 0.0f, 0.0f);
+            if (added) {
+                // Advance the planned position to this move's end so the next
+                // queued command uses the correct absolute start coordinate.
+                s_planned_position       = end;
+                s_planned_position_valid = true;
+
                 TRAJECTORY_Recalculate();
                 // Pump the first move if interpolator is idle
                 if (!INTERPOLATOR_IsActive()) {
@@ -326,7 +395,16 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             // Guard: only one arc at a time
             if (appData->arcGenState == ARC_GEN_ACTIVE) return false;
 
-            CoordinatePoint start = KINEMATICS_GetCurrentPosition();
+            // Use planned position (same logic as LINEAR_MOVE) so arcs chained
+            // after queued linear moves start from the correct position.
+            CoordinatePoint start;
+            if (s_planned_position_valid &&
+                (TRAJECTORY_QueueCount() > 0 || INTERPOLATOR_IsActive())) {
+                start = s_planned_position;
+            } else {
+                start = KINEMATICS_GetCurrentPosition();
+                s_planned_position_valid = false;
+            }
 
             // Center in absolute coordinates (I/J are always relative to start per GRBL)
             float cx = start.coordinate[AXIS_X] + event->data.arcMove.centerX;
@@ -396,20 +474,39 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             appData->arcSegmentCurrent               = 0;
             appData->arcSegmentTotal                 = n_seg;
             appData->arcGenState                     = ARC_GEN_ACTIVE;
+
+            // Advance planned position to arc end so the next queued command
+            // chains from the correct position even before MOTION_Arc() runs.
+            s_planned_position.coordinate[AXIS_X] = ex;
+            s_planned_position.coordinate[AXIS_Y] = ey;
+            s_planned_position.coordinate[AXIS_Z] = ez;
+            s_planned_position.coordinate[AXIS_A] = ea;
+            s_planned_position_valid = true;
+
             return true;
         }
+
+        case GCODE_EVENT_SET_FEEDRATE:
+            // Save standalone F-word as modal feedrate
+            if (event->data.setFeedrate.feedrate >= 1.0f)
+                s_modal_feedrate_mm_min = event->data.setFeedrate.feedrate;
+            return true;
 
         case GCODE_EVENT_SPINDLE_ON:
         case GCODE_EVENT_SPINDLE_OFF:
         case GCODE_EVENT_COOLANT_ON:
         case GCODE_EVENT_COOLANT_OFF:
-        case GCODE_EVENT_SET_FEEDRATE:
         case GCODE_EVENT_SET_SPINDLE_SPEED:
         case GCODE_EVENT_SET_ABSOLUTE:
         case GCODE_EVENT_SET_RELATIVE:
         case GCODE_EVENT_SET_WORK_OFFSET:
         case GCODE_EVENT_SET_WCS:
-            // Modal-state changes handled in app.c before this point; nothing to do here
+        case GCODE_EVENT_SET_TOOL:
+        case GCODE_EVENT_PROGRAM_END:
+        case GCODE_EVENT_HOMING:
+        case GCODE_EVENT_PROBE_TOWARD:
+        case GCODE_EVENT_PROBE_AWAY:
+            // Modal-state / system events handled elsewhere; consume silently
             return true;
 
         case GCODE_EVENT_DWELL:
@@ -417,8 +514,21 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             return true;
 
         default:
-            return false;
+            // Unknown event — consume it to prevent infinite replay
+            return true;
     }
+}
+
+// ─── PLANNED POSITION SYNC ────────────────────────────────────────────────────
+
+// Re-anchor the planned position to the live step-counter (machine position).
+// Must be called after a soft reset, feed hold + queue drain, or any event that
+// discards queued trajectory moves without executing them, so that the next
+// queued command starts from the correct machine position.
+void MOTION_SyncPlannedPosition(void)
+{
+    s_planned_position       = KINEMATICS_GetCurrentPosition();
+    s_planned_position_valid = true;
 }
 
 // ─── HOMING BRIDGE ────────────────────────────────────────────────────────────

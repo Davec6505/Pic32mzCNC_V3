@@ -24,4 +24,9 @@ bool MOTION_ProcessGcodeEvent(APP_DATA* appData, GCODE_Event* event);
 bool MOTION_HomingMove(APP_DATA* appData, CoordinatePoint start,
                        CoordinatePoint end, float feedrate_mm_min);
 
+// Re-anchor the planned-position tracker to the live step-counter.
+// Call after soft-reset, alarm clear, or any event that discards the trajectory
+// queue so the next queued move starts from the correct machine position.
+void MOTION_SyncPlannedPosition(void);
+
 #endif /* MOTION_H */

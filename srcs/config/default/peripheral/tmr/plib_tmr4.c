@@ -53,10 +53,8 @@
 #include "plib_tmr4.h"
 #include "interrupts.h"
 
-// Callback object (registered by INTERPOLATOR_Initialize)
-static TMR_TIMER_OBJECT tmr4CallbackObj;
 
-
+static volatile TMR_TIMER_OBJECT tmr4Obj;
 
 
 void TMR4_Initialize(void)
@@ -66,18 +64,20 @@ void TMR4_Initialize(void)
 
     /*
     SIDL = 0
-    TCKPS =6
+    TCKPS =0
     T32   = 0
     TCS = 0
     */
-    T4CONSET = 0x60;
+    T4CONSET = 0x0;
 
     /* Clear counter */
     TMR4 = 0x0;
 
     /*Set period */
-    PR4 = 155U;
+    PR4 = 499U;
 
+    /* Enable TMR Interrupt */
+    IEC0SET = _IEC0_T4IE_MASK;
 
 }
 
@@ -111,33 +111,39 @@ uint16_t TMR4_CounterGet(void)
 
 uint32_t TMR4_FrequencyGet(void)
 {
-    return (781250);
+    return (50000000);
 }
 
 
-
-bool TMR4_PeriodHasExpired(void)
+void __attribute__((used)) TIMER_4_InterruptHandler (void)
 {
-    bool status;
-        status = (IFS0bits.T4IF != 0U);
-        IFS0CLR = _IFS0_T4IF_MASK;
+    uint32_t status  = 0U;
+    status = IFS0bits.T4IF;
+    IFS0CLR = _IFS0_T4IF_MASK;
 
-    return status;
+    if((tmr4Obj.callback_fn != NULL))
+    {
+        uintptr_t context = tmr4Obj.context;
+        tmr4Obj.callback_fn(status, context);
+    }
 }
 
-void TMR4_CallbackRegister(TMR_CALLBACK callback, uintptr_t context)
+
+void TMR4_InterruptEnable(void)
 {
-    tmr4CallbackObj.callback_fn = callback;
-    tmr4CallbackObj.context     = context;
-    // Enable TMR4 interrupt in the EVIC now that a callback is registered
     IEC0SET = _IEC0_T4IE_MASK;
 }
 
-void __ISR(_TIMER_4_VECTOR, IPL6SRS) TIMER4_ISR(void)
+
+void TMR4_InterruptDisable(void)
 {
-    IFS0CLR = _IFS0_T4IF_MASK;   // clear flag
-    if (tmr4CallbackObj.callback_fn != NULL)
-    {
-        tmr4CallbackObj.callback_fn(0U, tmr4CallbackObj.context);
-    }
+    IEC0CLR = _IEC0_T4IE_MASK;
+}
+
+
+void TMR4_CallbackRegister( TMR_CALLBACK callback_fn, uintptr_t context )
+{
+    /* Save callback_fn and context in local memory */
+    tmr4Obj.callback_fn = callback_fn;
+    tmr4Obj.context = context;
 }

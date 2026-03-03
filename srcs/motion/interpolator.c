@@ -89,6 +89,11 @@ static volatile bool      interp_active  = false; // ISR is running
 static volatile bool      move_complete  = false; // move finished flag
 static volatile bool      feed_hold      = false; // pause without losing state
 
+// Step-accuracy tracking: pre-computed expected steps vs steps actually fired.
+// On the final tick any shortfall is force-emitted so position is exact.
+static volatile int32_t   expected_steps[NUM_AXIS]; // total steps this move (signed)
+static volatile int32_t   steps_fired[NUM_AXIS];    // steps fired so far (signed)
+
 // Pre-computed per-axis scale: (steps_per_mm / TICK_RATE) × DDS_SCALE
 // A float is fine here — recomputed by LoadMove, read but not written by ISR.
 static float axis_scale[NUM_AXIS];
@@ -148,8 +153,10 @@ static void INTERPOLATOR_Tick(uint32_t status, uintptr_t context)
             AXIS_StepSet((E_AXIS)i);
             if (dds_dir[i] >= 0) {
                 AXIS_IncrementSteps((E_AXIS)i);
+                steps_fired[i]++;
             } else {
                 AXIS_DecrementSteps((E_AXIS)i);
+                steps_fired[i]--;
             }
         }
     }
@@ -158,9 +165,26 @@ static void INTERPOLATOR_Tick(uint32_t status, uintptr_t context)
     if (ticks_remaining > 0u) {
         ticks_remaining--;
     }
+    if (ticks_remaining == 1u) {
+        // Penultimate tick: flush any steps the DDS missed due to v→0 rounding.
+        // Step pins set here are cleared by step-1 of the NEXT (final) tick,
+        // guaranteeing a full 10µs pulse width before the timer stops.
+        for (int i = 0; i < NUM_AXIS; i++) {
+            int32_t deficit = expected_steps[i] - steps_fired[i];
+            for (int32_t s = 0; s < deficit; s++) {
+                AXIS_StepSet((E_AXIS)i);
+                AXIS_IncrementSteps((E_AXIS)i);
+                steps_fired[i]++;
+            }
+            for (int32_t s = 0; s > deficit; s--) {
+                AXIS_StepSet((E_AXIS)i);
+                AXIS_DecrementSteps((E_AXIS)i);
+                steps_fired[i]--;
+            }
+        }
+    }
     if (ticks_remaining == 0u) {
-        // One final tick: ensure step pins are cleared next opportunity.
-        // Mark complete and stop.
+        // Flush step pins were cleared at the top of this tick (step 1). Stop now.
         interp_active = false;
         move_complete = true;
         TMR4_Stop();
@@ -174,6 +198,8 @@ void INTERPOLATOR_Initialize(void)
     memset((void*)dds_acc, 0, sizeof(dds_acc));
     memset((void*)dds_inc, 0, sizeof(dds_inc));
     memset((void*)dds_dir, 0, sizeof(dds_dir));
+    memset((void*)expected_steps, 0, sizeof(expected_steps));
+    memset((void*)steps_fired, 0, sizeof(steps_fired));
     ticks_remaining = 0;
     interp_active   = false;
     move_complete   = false;
@@ -224,14 +250,26 @@ void INTERPOLATOR_LoadMove(const SCurveMove *move)
     // ── Reset accumulators ─────────────────────────────────────────────────
     for (int i = 0; i < NUM_AXIS; i++) dds_acc[i] = 0;
 
+    // ── Pre-compute expected steps per axis (for end-of-move flush) ───────
+    for (int i = 0; i < NUM_AXIS; i++) {
+        float spm = *g_axis_settings[i].steps_per_mm;
+        float steps_f = move->millimeters * fabsf(move->unit_vec[i]) * spm;
+        expected_steps[i] = (int32_t)(steps_f + 0.5f);
+        // Sign follows direction
+        if (move->unit_vec[i] < 0.0f) expected_steps[i] = -expected_steps[i];
+        steps_fired[i] = 0;
+    }
+
     // ── Compute initial DDS increments from entry velocity ────────────────
     recompute_increments(move->v_entry);
 
     // ── Tick count for total move duration ────────────────────────────────
     float total_s = move->t[7];
-    if (total_s < 1e-9f) return;   // zero-duration — skip
-    ticks_remaining = (uint32_t)(total_s * (float)INTERPOLATOR_TICK_RATE_HZ + 0.5f);
-    if (ticks_remaining == 0u) return;
+    uint32_t ticks_calc = (total_s >= 1e-9f)
+        ? (uint32_t)(total_s * (float)INTERPOLATOR_TICK_RATE_HZ + 0.5f) : 0u;
+    if (total_s < 1e-9f) return;
+    ticks_remaining = ticks_calc + 2u;
+    if (ticks_remaining <= 2u) return;
 
     // ── Arm and start ──────────────────────────────────────────────────────
     move_complete = false;

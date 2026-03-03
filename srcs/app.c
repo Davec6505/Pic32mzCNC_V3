@@ -354,7 +354,6 @@ void APP_Tasks ( void )
                     
                     // Stop all motion
                     TMR4_Stop();
-                    OCMP1_Disable();
                     STEPPER_DisableAll();
                     
                     // Clear motion queue
@@ -509,7 +508,6 @@ void APP_Tasks ( void )
                         
                         // Stop current motion immediately
                         TMR4_Stop();
-                        OCMP1_Disable();
                         
                         // Clear motion queue
                         appData.motionQueueHead = 0;
@@ -525,7 +523,6 @@ void APP_Tasks ( void )
                         
                         // Stop current motion immediately
                         TMR4_Stop();
-                        OCMP1_Disable();
                         
                         // Clear motion queue
                         appData.motionQueueHead = 0;
