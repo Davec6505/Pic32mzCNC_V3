@@ -55,13 +55,15 @@ static StepperPosition s_stepper_pos;
 
 void STEPPER_Initialize(APP_DATA *appData)
 {
-    (void)appData;
     memset(&s_stepper_pos, 0, sizeof(s_stepper_pos));
     // Initialise steps_per_mm from settings (same as old stepper.c did)
     const CNC_Settings *s = SETTINGS_GetCurrent();
     for (int i = 0; i < NUM_AXIS; i++) {
         s_stepper_pos.steps_per_mm[i] = s->steps_per_mm[i];
     }
+    // Tell the G-code flow-controller the real queue depth so water marks
+    // (HIGH/LOW_WATER) are calculated against 64 slots, not the old 16.
+    appData->gcodeCommandQueue.maxMotionSegments = TRAJ_QUEUE_SIZE;
     TRAJECTORY_Initialize();
     INTERPOLATOR_Initialize();
 }
@@ -178,17 +180,26 @@ void MOTION_Initialize(void)
 // Polls the interpolator; when a move finishes, loads the next one.
 void MOTION_Tasks(APP_DATA *appData)
 {
-    (void)appData;
+    // Sync the queue depth visible to the G-code flow controller.
+    // gcode_parser.c reads appData->motionQueueCount to decide when to
+    // send deferred "ok" — it must reflect the trajectory queue, not the
+    // old 16-slot segment buffer.
+    appData->motionQueueCount = TRAJECTORY_QueueCount();
 
     // Feed-hold gating
     if (g_feed_hold_active) return;
 
-    // If interpolator just finished a move, pop the next one
+    // If interpolator just finished a move, pop the next one and signal
+    // app.c so it triggers GCODE_CheckDeferredOk() immediately.
     if (INTERPOLATOR_MoveComplete()) {
         SCurveMove next_move;
         if (TRAJECTORY_GetNextMove(&next_move)) {
             INTERPOLATOR_LoadMove(&next_move);
         }
+        // Fire even if queue is now empty — the count sync above already
+        // reflects the new (lower) occupancy, so CheckDeferredOk will
+        // see the freed slot and release the next "ok" to UGS.
+        appData->motionSegmentCompleted = true;
     }
 }
 

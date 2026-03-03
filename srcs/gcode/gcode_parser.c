@@ -48,9 +48,16 @@
 // Dual-threshold flow control for UGS compatibility
 // HIGH_WATER: Start deferring "ok" when queue reaches this (almost full)
 // LOW_WATER: Resume sending "ok" when queue drains to this (some space freed)
-// With MAX=16: Defer at 15 (1 free), Resume at 12 (4 drained)
-#define MOTION_BUFFER_HIGH_WATER 1    // Defer when (MAX - 1) = 15 segments used
-#define MOTION_BUFFER_LOW_WATER  4    // Resume when (MAX - 4) = 12 segments used
+//
+// With TRAJ_QUEUE_SIZE=64:
+//   Defer at 63 (1 free slot)  — HIGH_WATER=1 → highWater = 64-1 = 63
+//   Send  at 63 (1 free slot)  — LOW_WATER=1  → lowWater  = 64-1 = 63
+//
+// This means UGS receives "ok" the instant ONE slot opens, so the next
+// G2/G3 command arrives and starts building chord segments while the ISR
+// is still consuming the current arc — the trajectory queue stays full.
+#define MOTION_BUFFER_HIGH_WATER 1    // Defer when only 1 slot remains free
+#define MOTION_BUFFER_LOW_WATER  1    // Send ok the moment 1 slot is freed
 
 /* -------------------------------------------------------------------------- */
 /* Static Buffers / State                                                     */
