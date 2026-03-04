@@ -7,7 +7,39 @@
 
 ---
 
-## ✅ FIXED: Arc-then-G0 ordering race condition — March 4, 2026
+## ✅ FIXED: Flow control UART buffer overflow causing long-file stop — March 4, 2026
+
+**Symptom**: `07_complex_long_run_fast.gcode` stopped mid-run at wrong position `(30,10)` instead of
+returning to origin `(0,0)`. Final idle at `FS:5000` level confirms it reached section 11 but
+didn't complete.
+
+**Root cause — two compounding bugs**:
+
+*Bug 1:* `motionQueueCount = TRAJECTORY_QueueCount()` — when the last trajectory segment is popped
+into the interpolator, `QueueCount()` drops to 0 and ok fires immediately while the move is still
+physically executing. The streamer receives ok before the physical move finishes.
+
+*Bug 2:* `startupPrefillDone` flag never became `true`. Pre-fill exits only when
+`motionQueueCount >= highWater = 63`. Arcs however cap trajectory at `TRAJ_QUEUE_SIZE-2 = 62`
+ia the MOTION_Arc() backoff guard. So the count never reached 63. The system stayed in pre-fill
+forever, sending ALL oks immediately. With sequential streaming (~100 commands, ~1500 bytes),
+this exceeded the 512-byte UART receive ring buffer and dropped incoming characters, corrupting
+gcode commands mid-file and causing wrong positions or early stop.
+
+**Fixes** (`srcs/motion/motion_bridge.c` + `srcs/gcode/gcode_parser.c`):
+
+1. Count the active interpolator move: `motionQueueCount = TRAJECTORY_QueueCount() + (INTERPOLATOR_IsActive() ? 1u : 0u)`
+   - Long arcs now hold count at `62+1=63 == highWater` → ok deferred until arc nearly complete
+   - Linear moves hold count at `1+1=2 < 63` → ok still immediate (pipelining preserved)
+
+2. `startupPrefillDone = true` from the start — removes the pre-fill phase entirely.
+   Pre-fill was designed for UGS-style pipelined senders; for a sequential streamer it caused
+   all oks to be immediate, defeating flow control.
+
+**Result**: Clean build `BUILD COMPLETE (bins/CNC_V3.hex)`. Board needs reflash and re-test.
+
+---
+
 
 **Symptom**: `tests/04_arc_test.gcode` — the final arc (`G2 X20 Y10 I10 J0 F500`, Test 5) traces
 into deeply negative X (~−20mm) at Z=5 instead of the expected CW semicircle at Z=0.

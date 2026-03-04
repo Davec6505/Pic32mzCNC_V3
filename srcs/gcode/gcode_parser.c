@@ -56,8 +56,8 @@
 // This means UGS receives "ok" the instant ONE slot opens, so the next
 // G2/G3 command arrives and starts building chord segments while the ISR
 // is still consuming the current arc — the trajectory queue stays full.
-#define MOTION_BUFFER_HIGH_WATER 1    // Defer when only 1 slot remains free
-#define MOTION_BUFFER_LOW_WATER  1    // Send ok the moment 1 slot is freed
+#define MOTION_BUFFER_HIGH_WATER 1    // Defer when only 1 slot remains free (highWater = TRAJ_QUEUE_SIZE-1 = 63)
+#define MOTION_BUFFER_LOW_WATER  1    // Send ok the moment 1 slot is freed  (lowWater  = TRAJ_QUEUE_SIZE-1 = 63)
 
 /* -------------------------------------------------------------------------- */
 /* Static Buffers / State                                                     */
@@ -78,7 +78,10 @@ static uint32_t okPendingCount = 0;         // Flow control: count of deferred "
 // pushing commands and the queue fills up.  Once the queue first reaches
 // high-water we flip this flag and enter normal 1-for-1 deferred mode:
 // one "ok" released per freed slot, keeping the queue pinned at 63/64.
-static bool startupPrefillDone = false;
+// Pre-fill phase removed: it was designed for UGS-style pipelined senders.
+// With a sequential streamer (wait-for-ok) and the interpolator now counted
+// in motionQueueCount, normal 1-for-1 flow control is correct immediately.
+static bool startupPrefillDone = true;  // always start in normal flow mode
 
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
@@ -189,7 +192,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     
     /* 9. Reset G-code parser state */
     okPendingCount = 0;       // Clear all deferred ok responses
-    startupPrefillDone = false; // Re-arm pre-fill gate after soft reset
+    startupPrefillDone = true;  // no pre-fill — use normal flow immediately
     grblCheckMode = false;
     g_feed_hold_active  = false;  // Clear hold (defined in stepper.c / stepper.h)
     g_feed_hold_pending = false;  // Cancel any in-flight pending hold
@@ -220,7 +223,7 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
     okPendingCount = 0;       // Clear all deferred ok responses
-    startupPrefillDone = false; // Arm pre-fill gate on first init
+    startupPrefillDone = true;  // no pre-fill — use normal flow immediately
     gcodeData.state = GCODE_STATE_IDLE;
     unitsInches = false;
     grblCheckMode = false;

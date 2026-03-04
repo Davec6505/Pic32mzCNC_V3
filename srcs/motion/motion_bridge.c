@@ -198,7 +198,12 @@ void MOTION_Tasks(APP_DATA *appData)
     // gcode_parser.c reads appData->motionQueueCount to decide when to
     // send deferred "ok" — it must reflect the trajectory queue, not the
     // old 16-slot segment buffer.
-    appData->motionQueueCount = TRAJECTORY_QueueCount();
+    // +1 for the move currently executing in the interpolator so that ok
+    // is not sent while a move is physically in progress (prevents UART
+    // buffer overflow from immediate-ok firing that lets the streamer
+    // send all remaining commands before the trajectory has drained).
+    appData->motionQueueCount = TRAJECTORY_QueueCount()
+                              + (INTERPOLATOR_IsActive() ? 1u : 0u);
 
     // Feed-hold gating
     if (g_feed_hold_active) return;
