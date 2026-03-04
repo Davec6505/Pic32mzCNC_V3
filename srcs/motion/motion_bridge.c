@@ -477,11 +477,29 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
                 if (sweep <= 0.0f) sweep += 2.0f * 3.14159265358979f;
             }
 
-            // Number of linear segments
+            // Number of linear segments — GRBL-compatible chord-deviation formula.
+            // $12 (mm_per_arc_segment) is the MAX ALLOWED chord deviation in mm,
+            // NOT the segment length.  Using it as segment length (the former bug)
+            // produced 63 segments for a R=20 quarter-arc, filling the 64-slot
+            // trajectory queue to high-water and stalling flow control.
+            //
+            // Exact formula (one segment spans half-angle θ):
+            //   θ/2 = acos(1 - tol/r)
+            //   seg_len = 2·r·sin(θ/2)
+            //
+            // Example: tol=0.5mm, r=20mm → seg_len=8.94mm → 4 segs per quarter-arc.
             float arc_length = radius * sweep;
-            float mm_per_seg = s->mm_per_arc_segment;
-            if (mm_per_seg < 0.001f) mm_per_seg = 0.1f;
-            uint32_t n_seg = (uint32_t)ceilf(arc_length / mm_per_seg);
+            float tol = s->mm_per_arc_segment;
+            if (tol < 0.001f) tol = 0.001f;
+            float seg_len;
+            if (tol >= radius) {
+                seg_len = arc_length;   // tolerance ≥ radius: whole arc in one segment
+            } else {
+                float half_angle = acosf(1.0f - tol / radius);
+                seg_len = 2.0f * radius * sinf(half_angle);
+                if (seg_len < 0.001f) seg_len = 0.001f;
+            }
+            uint32_t n_seg = (uint32_t)ceilf(arc_length / seg_len);
             if (n_seg < 1) n_seg = 1;
 
             float theta_inc = cw ? -(sweep / (float)n_seg)
