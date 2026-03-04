@@ -31,6 +31,7 @@
 #include "utils/uart_utils.h"
 #include "data_structures.h"
 #include "gcode/gcode_parser.h"
+#include "../config/default/peripheral/coretimer/plib_coretimer.h"
 #include <string.h>
 #include <math.h>
 
@@ -65,6 +66,12 @@ static float s_modal_feedrate_mm_min = 0.0f;
 static CoordinatePoint s_planned_position;
 static bool            s_planned_position_valid = false;
 
+// ─── G4 Dwell state ──────────────────────────────────────────────────────────
+// Two-phase: (1) wait for motion drain, (2) count down CoreTimer ticks.
+// CoreTimer runs at CPU/2 = 100 MHz → 100,000,000 ticks = 1 second.
+static bool     s_dwell_active    = false;
+static uint32_t s_dwell_end_ticks = 0;
+
 // ─── STEPPER API bridges ──────────────────────────────────────────────────────
 
 void STEPPER_Initialize(APP_DATA *appData)
@@ -78,6 +85,8 @@ void STEPPER_Initialize(APP_DATA *appData)
     // Tell the G-code flow-controller the real queue depth so water marks
     // (HIGH/LOW_WATER) are calculated against 64 slots, not the old 16.
     appData->gcodeCommandQueue.maxMotionSegments = TRAJ_QUEUE_SIZE;
+    s_dwell_active    = false;  // Cancel any in-progress dwell on init/reset
+    s_dwell_end_ticks = 0;
     TRAJECTORY_Initialize();
     INTERPOLATOR_Initialize();
 }
@@ -267,9 +276,9 @@ void MOTION_Arc(APP_DATA *appData)
         next.coordinate[AXIS_A] = sa + (ea - sa) * progress;
     }
 
-    // DEBUG: Log first segment only (compact)
+    // DEBUG: Log first segment only (compile-time controlled)
     if (appData->arcSegmentCurrent == 1) {
-        UART_Printf("[SEG1] n=%lu f=(%.2f,%.2f) t=(%.2f,%.2f)\r\n",
+        DEBUG_PRINT_MOTION("[SEG1] n=%lu f=(%.2f,%.2f) t=(%.2f,%.2f)\r\n",
             (unsigned long)appData->arcSegmentTotal,
             appData->arcCurrent.coordinate[AXIS_X], appData->arcCurrent.coordinate[AXIS_Y],
             next.coordinate[AXIS_X], next.coordinate[AXIS_Y]);
@@ -283,7 +292,7 @@ void MOTION_Arc(APP_DATA *appData)
 
         if (is_last) {
             appData->arcGenState = ARC_GEN_IDLE;
-            UART_Printf("DONE:(%.2f,%.2f,%.2f)\r\n",
+            DEBUG_PRINT_MOTION("DONE:(%.2f,%.2f,%.2f)\r\n",
                 next.coordinate[AXIS_X], next.coordinate[AXIS_Y], next.coordinate[AXIS_Z]);
         }
 
@@ -478,14 +487,15 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             float theta_inc = cw ? -(sweep / (float)n_seg)
                                  :  (sweep / (float)n_seg);
 
-            // DEBUG: compact arc summary (printed AFTER all values are computed)
+            // DEBUG: compact arc summary (compile-time controlled — silent in Release)
             static uint32_t s_arc_seq = 0;
             s_arc_seq++;
-            UART_Printf("A%lu:%s st=(%.2f,%.2f) c=(%.2f,%.2f) e=(%.2f,%.2f) r=%.2f n=%lu\r\n",
+            DEBUG_PRINT_MOTION("A%lu:%s st=(%.2f,%.2f) c=(%.2f,%.2f) e=(%.2f,%.2f) r=%.2f n=%lu\r\n",
                 (unsigned long)s_arc_seq,
                 used_planned ? "P" : "S",
                 start.coordinate[AXIS_X], start.coordinate[AXIS_Y],
                 cx, cy, ex, ey, radius, (unsigned long)n_seg);
+            (void)used_planned;  // suppress unused-variable warning in Release builds
 
             // Store arc state into APP_DATA — MOTION_Arc() will consume it
             appData->arcCenter.coordinate[AXIS_X]    = cx;
@@ -546,9 +556,32 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             // Modal-state / system events handled elsewhere; consume silently
             return true;
 
-        case GCODE_EVENT_DWELL:
-            // TODO: implement dwell via CoreTimer delay; for now just drain queue
-            return true;
+        case GCODE_EVENT_DWELL: {
+            // Phase 1: wait for all queued motion to finish before the dwell starts.
+            if (!s_dwell_active) {
+                if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) {
+                    return false;  // Still executing — retry next iteration
+                }
+                // All motion idle — arm the timer.
+                // CoreTimer = 100 MHz; clamp minimum to 1 ms to avoid zero-tick race.
+                float secs = event->data.dwell.seconds;
+                if (secs < 0.001f) secs = 0.001f;
+                uint32_t ticks = (uint32_t)(secs * 100000000.0f);
+                s_dwell_end_ticks = CORETIMER_CounterGet() + ticks;
+                s_dwell_active    = true;
+                DEBUG_PRINT_MOTION("[DWELL] start %.3f s (%lu ticks)\r\n",
+                    (double)secs, (unsigned long)ticks);
+                return false;  // Come back next iteration to check timer
+            }
+            // Phase 2: timer armed — check expiry.
+            // Signed comparison handles 32-bit CoreTimer wrapping cleanly.
+            if ((int32_t)(CORETIMER_CounterGet() - s_dwell_end_ticks) >= 0) {
+                s_dwell_active = false;
+                DEBUG_PRINT_MOTION("[DWELL] complete\r\n");
+                return true;   // Dwell done — consume the event
+            }
+            return false;      // Still counting
+        }
 
         default:
             // Unknown event — consume it to prevent infinite replay

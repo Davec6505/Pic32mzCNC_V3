@@ -239,7 +239,13 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
 /* -------------------------------------------------------------------------- */
 static inline void queue_command(GCODE_CommandQueue* q, const char* src, size_t len){
     if (len == 0 || len >= GCODE_BUFFER_SIZE) return;
-    if (q->count >= GCODE_MAX_COMMANDS) return;  // queue full — drop (flow control should prevent this)
+    if (q->count >= GCODE_MAX_COMMANDS) {
+        // Flow control should prevent this — if it fires, the sender got an ok
+        // before the command queue had a free slot, which means a command is
+        // silently dropped.  Emit a UART error so it shows up in trace output.
+        UART_Printf("error:20\r\n");  // error:20 = gcode queue overflow
+        return;
+    }
     memcpy(q->commands[q->head].command, src, len);
     q->commands[q->head].command[len] = '\0';
     q->head = (q->head + 1) % GCODE_MAX_COMMANDS;
@@ -728,7 +734,9 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
     // Release one "ok" per freed slot: as long as the queue is below high-water
     // (i.e. any slot is free) drain one pending ok at a time so UGS immediately
     // refills that slot and the queue stays near 63/64.
-    while (okPendingCount > 0 && appData->motionQueueCount < lowWater) {
+    while (okPendingCount > 0
+           && appData->motionQueueCount < lowWater
+           && q->count < GCODE_MAX_COMMANDS) {
         DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue=%lu < lowWater=%lu, pending=%lu)\r\n",
                           (unsigned long)appData->motionQueueCount, (unsigned long)lowWater,
                           (unsigned long)okPendingCount);
@@ -763,8 +771,10 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
         return;
     }
 
-    // Normal 1-for-1 phase: defer when queue is at high-water, send when a slot opens.
-    if (appData->motionQueueCount >= highWater) {
+    // Normal 1-for-1 phase: defer when trajectory queue is at high-water OR the gcode
+    // command queue is full (prevents silent command drops in pipelined senders like UGS).
+    bool cmdQueueFull = (q->count >= GCODE_MAX_COMMANDS);
+    if (appData->motionQueueCount >= highWater || cmdQueueFull) {
         DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu >= highWater=%lu, pending=%lu)\r\n",
                           (unsigned long)appData->motionQueueCount,
                           (unsigned long)highWater,
