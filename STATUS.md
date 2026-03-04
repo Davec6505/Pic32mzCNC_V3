@@ -7,7 +7,24 @@
 
 ---
 
-## 🔴 IN PROGRESS: Arc4 wrong-start bug (March 4, 2026)
+## ✅ fix: stepper.c duplicate-symbol linker error excluded from build — March 2026
+
+**Problem**: After `make clean && make`, linker reported multiple definitions of `STEPPER_Initialize`,
+`STEPPER_LoadSegment`, `STEPPER_StopMotion`, `g_feed_hold_pending`, etc.
+`srcs/motion/stepper.c` (old OC1/Bresenham engine, dead code) was being compiled alongside
+`srcs/motion/motion_bridge.c` (the S-curve bridge that replaced it), producing duplicate symbols.
+
+**Fix**: Added `stepper.c` to `EXCLUDED_FILES` in `srcs/Makefile` line 135:
+```makefile
+EXCLUDED_FILES := $(SRC_DIR)/gcode_test_app.c $(SRC_DIR)/gcode_test_framework.c $(SRC_DIR)/gcode_parser_dma.c \
+                  $(SRC_DIR)/motion/stepper.c
+```
+
+**Result**: Clean build — `BUILD COMPLETE (bins/CNC_V3.hex)`.
+
+---
+
+## ✅ RESOLVED: Arc4 wrong-start bug (March 4, 2026)
 
 **Symptom**: Running `tests/04_arc_test.gcode` — arcs 1–3 trace correctly but arc4
 (`G2 X20 Y10 I10 J0 F500`, a CW semicircle, start=(0,10), center=(10,10), end=(20,10))
@@ -36,12 +53,11 @@ The observed path is consistent with center=(**−10**, 10), i.e. start.X=−20 
   causing UART_Printf to block/drop in unexpected ways. The compact `A<N>:` format should
   survive the buffer. **Next step: flash and read the A3/A4 lines.**
 
-**Next steps to continue**:
-1. Flash current `bins/CNC_V3` (already built, no rebuild needed).
-2. Run `tests/04_arc_test.gcode` in UGS.
-3. Look for `A3:` and `A4:` lines in serial output — confirm arc4's `st=` value.
-4. If `st=` is wrong → trace how `s_planned_position` is corrupted between arc3 and arc4.
-5. If `st=` is correct (0,10) → the bug is in the arc geometry calculation (sweep direction).
+**Resolution**: Arc4 confirmed fixed by the multi-move position accumulation fix (`src=plan`).
+Isolated test `arc4_isolated.gcode` confirmed: `[ARC_DONE] end=(20.000,10.000,0.000)`, `MPos:20.025,10.000`. 
+Full `04_arc_test.gcode` (all 4 arcs) ran clean on COM11 without errors.
+
+**Next steps**: Test homing, then live machine validation.
 
 **Files modified for debug** (to be reverted/cleaned when bug is fixed):
 - `srcs/motion/motion_bridge.c` — compact arc debug prints added
