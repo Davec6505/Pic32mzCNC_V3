@@ -607,6 +607,17 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
     }
 }
 
+// ─── DWELL ACTIVE QUERY ──────────────────────────────────────────────────────
+
+// Returns true while a G4 dwell is active (either draining motion or counting
+// the CoreTimer).  Used by the flow-control layer in gcode_parser.c to suppress
+// "ok" release while the dwell is in progress, so UGS does not mistake the
+// empty trajectory queue for "file complete" and send a soft reset prematurely.
+bool MOTION_IsDwellActive(void)
+{
+    return s_dwell_active;
+}
+
 // ─── PLANNED POSITION SYNC ────────────────────────────────────────────────────
 
 // Re-anchor the planned position to the live step-counter (machine position).

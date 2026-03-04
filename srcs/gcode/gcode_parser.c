@@ -709,6 +709,16 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
     uint32_t highWater = Flow_HighWater(&appData->gcodeCommandQueue); // MAX - 1 = 63
     uint32_t lowWater  = Flow_LowWater(&appData->gcodeCommandQueue);  // MAX - 1 = 63
 
+    // Do NOT release deferred oks while a G4 dwell is in progress.
+    // During the dwell the trajectory queue is empty (motionQueueCount=0) which
+    // would normally trigger a flood of deferred oks.  UGS would then receive
+    // oks for all remaining commands, conclude the file is done, and send a
+    // soft-reset — discarding commands still sitting in the gcode command queue.
+    if (MOTION_IsDwellActive()) {
+        DEBUG_PRINT_GCODE("[FLOW] Dwell active — suppressing deferred ok release\r\n");
+        return;
+    }
+
     if (!startupPrefillDone) {
         // ── Pre-fill phase ────────────────────────────────────────────────────
         // Hold ALL "ok" responses until the trajectory queue is at high-water.
@@ -760,6 +770,17 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
 static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 {
     uint32_t highWater = Flow_HighWater(q); // MAX - 1 = 63
+
+    // While a G4 dwell is active, always defer — never send immediately.
+    // The trajectory queue is empty during the dwell (motionQueueCount=0) so
+    // without this guard every new incoming command would get an instant ok,
+    // letting UGS exhaust its credit window and declare the file complete
+    // before the queued commands have actually executed.
+    if (MOTION_IsDwellActive()) {
+        DEBUG_PRINT_GCODE("[FLOW] Dwell active — deferring ok\r\n");
+        okPendingCount++;
+        return;
+    }
 
     if (!startupPrefillDone) {
         // Pre-fill phase: send immediately so UGS keeps pushing commands
