@@ -7,6 +7,42 @@
 
 ---
 
+## ✅ FIXED: Arc fills trajectory queue to high-water → UGS credit stall → machine stops mid-file — March 4, 2026
+
+**Commit**: `f5a3c2e`
+**File**: `srcs/motion/motion_bridge.c` → `MOTION_ProcessGcodeEvent`, GCODE_EVENT_ARC_MOVE handler
+
+**Symptom**: `07_complex_long_run_fast.gcode` always stopped at `MPos:30.038,10.050` — end of Section 6
+arc 5 (CW east→south, G2 X30 Y10 I-20 J0). Sections 7–11 never executed. Machine went `<Idle>` without
+returning to origin.
+
+**Root cause**: `$12 = 0.500mm` was used as **direct segment length** (mm per segment), not as chord
+deviation. A R=20 quarter-arc generated `ceil(31.42/0.5) = 63 segments` — exactly filling the 64-slot
+trajectory queue to its high-water mark of 63 (highWater = TRAJ_QUEUE_SIZE − 1). Once the queue hit
+high-water, `SendOrDeferOk` deferred every subsequent `ok`, exhausting UGS's 1024-byte credit window.
+UGS stopped sending after only arc 7 was buffered (arcs 8 and sections 7–11 were never transmitted).
+When the gcode queue drained (arcs 5, 6, 7 consumed), the machine idled at arc 5's endpoint with nothing
+more to execute.
+
+**Fix**: [srcs/motion/motion_bridge.c](srcs/motion/motion_bridge.c) — switched from direct-length to
+GRBL-compatible **chord-deviation** formula:
+```
+half_angle = acos(1 - tol / radius)
+seg_len    = 2 * radius * sin(half_angle)
+n_seg      = ceil(arc_length / seg_len)
+```
+With $12 = 0.500mm chord tolerance: R=20 quarter-arc → 4 segments (seg_len ≈ 8.94mm). The trajectory
+queue never approaches high-water, so `ok` responses flow without deferral and UGS streams the full file.
+
+**Segment count comparison** (with $12=0.500mm):
+| Arc | Old (seg-length) | New (chord-dev) |
+|----|-----------------|-----------------|
+| R=10 quarter | 16 segs | 3 segs |
+| R=20 quarter | 63 segs ← stall | 4 segs ✓ |
+| R=30 semicircle | 189 segs | 9 segs ✓ |
+
+---
+
 ## ✅ FIXED: Flow control UART buffer overflow causing long-file stop — March 4, 2026
 
 **Symptom**: `07_complex_long_run_fast.gcode` stopped mid-run at wrong position `(30,10)` instead of
