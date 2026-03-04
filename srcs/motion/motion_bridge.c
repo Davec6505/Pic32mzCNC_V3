@@ -327,6 +327,14 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
     switch (event->type) {
 
         case GCODE_EVENT_LINEAR_MOVE: {
+            // Guard: do not inject linear moves into the trajectory queue while an
+            // arc is still being generated.  Arc segments are added one-per-loop by
+            // MOTION_Arc(); if we let a linear move sneak in before any segment has
+            // been added the move lands ahead of the arc in the FIFO and executes
+            // first, leaving subsequent arc segments to run from the wrong physical
+            // position (they are absolute-start moves, not pure deltas).
+            if (appData->arcGenState == ARC_GEN_ACTIVE) return false;
+
             // Build start/end in MACHINE coordinates.
             // Use the planned (queued) end position as start so that back-to-back
             // commands chained by the sender don't accumulate position before the

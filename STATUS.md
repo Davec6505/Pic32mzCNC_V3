@@ -7,6 +7,45 @@
 
 ---
 
+## ✅ FIXED: Arc-then-G0 ordering race condition — March 4, 2026
+
+**Symptom**: `tests/04_arc_test.gcode` — the final arc (`G2 X20 Y10 I10 J0 F500`, Test 5) traces
+into deeply negative X (~−20mm) at Z=5 instead of the expected CW semicircle at Z=0.
+The Z=5 give-away proved `G0 Z5` (which follows the arc in the file) executed *before* the arc.
+
+**Root cause (move-ordering race)**:
+
+1. `GCODE_EVENT_ARC_MOVE` is processed → `arcGenState = ARC_GEN_ACTIVE`, `s_planned_position =
+   (20,10,0)`, **zero trajectory segments added yet** (MOTION_Arc() is incremental, one per loop).
+2. Immediately after, `GCODE_EVENT_LINEAR_MOVE` (G0 Z5) is processed.  Trajectory queue is empty,
+   interpolator is idle → falls back to step counter at (0,10,0) → queues **G0Z5 first**.
+3. `MOTION_Arc()` then *appends* arc segments behind G0Z5 in the FIFO.
+4. Execution order: Z-raise → return-to-origin → arc segments executing from wrong physical position
+   → bizarre negative-X path.
+
+**Fix (two-layer guard)**:
+
+*Layer 1 — `srcs/app.c` (already present in current code)*:
+```c
+bool should_process = (appData.arcGenState != ARC_GEN_ACTIVE);
+```
+Blocks all G-code event processing while arc is generating segments.
+
+*Layer 2 — `srcs/motion/motion_bridge.c` (added this session, defence-in-depth)*:
+```c
+case GCODE_EVENT_LINEAR_MOVE: {
+    if (appData->arcGenState == ARC_GEN_ACTIVE) return false;  // defer until arc done
+    ...
+```
+When `ProcessGcodeEvent` returns false the event stays in the G-code queue and is retried next loop.
+
+**Also fixed**: `stepper.c` had been re-added to the build (EXCLUDED_FILES entry was dropped).
+Re-excluded in `srcs/Makefile` line 134.
+
+**Result**: Clean build `BUILD COMPLETE (bins/CNC_V3.hex)`. Board needs reflash to validate.
+
+---
+
 ## ✅ fix: stepper.c duplicate-symbol linker error excluded from build — March 2026
 
 **Problem**: After `make clean && make`, linker reported multiple definitions of `STEPPER_Initialize`,
