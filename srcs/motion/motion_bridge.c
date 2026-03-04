@@ -262,13 +262,12 @@ void MOTION_Arc(APP_DATA *appData)
         next.coordinate[AXIS_A] = sa + (ea - sa) * progress;
     }
 
-    // DEBUG: Log first and last segment
+    // DEBUG: Log first segment only (compact)
     if (appData->arcSegmentCurrent == 1) {
-        UART_Printf("[ARC_SEG1] total=%lu from=(%.3f,%.3f) to=(%.3f,%.3f) theta=%.4f\r\n",
+        UART_Printf("[SEG1] n=%lu f=(%.2f,%.2f) t=(%.2f,%.2f)\r\n",
             (unsigned long)appData->arcSegmentTotal,
             appData->arcCurrent.coordinate[AXIS_X], appData->arcCurrent.coordinate[AXIS_Y],
-            next.coordinate[AXIS_X], next.coordinate[AXIS_Y],
-            appData->arcTheta);
+            next.coordinate[AXIS_X], next.coordinate[AXIS_Y]);
     }
 
     // Attempt to add the segment to the trajectory queue
@@ -279,7 +278,7 @@ void MOTION_Arc(APP_DATA *appData)
 
         if (is_last) {
             appData->arcGenState = ARC_GEN_IDLE;
-            UART_Printf("[ARC_DONE] end=(%.3f,%.3f,%.3f)\r\n",
+            UART_Printf("DONE:(%.2f,%.2f,%.2f)\r\n",
                 next.coordinate[AXIS_X], next.coordinate[AXIS_Y], next.coordinate[AXIS_Z]);
         }
 
@@ -429,16 +428,6 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             float ez = event->data.arcMove.z;
             float ea = event->data.arcMove.a;
 
-            // DEBUG: Log arc setup
-            UART_Printf("[ARC_SETUP] src=%s start=(%.3f,%.3f,%.3f) ev.xy=(%.3f,%.3f) ij=(%.3f,%.3f) ctr=(%.3f,%.3f) traj=%lu isr=%d\r\n",
-                used_planned ? "plan" : "step",
-                start.coordinate[AXIS_X], start.coordinate[AXIS_Y], start.coordinate[AXIS_Z],
-                ex, ey,
-                event->data.arcMove.centerX, event->data.arcMove.centerY,
-                cx, cy,
-                (unsigned long)TRAJECTORY_QueueCount(),
-                (int)INTERPOLATOR_IsActive());
-
             float fr = event->data.arcMove.feedrate;
             if (fr < 1.0f) fr = s->max_rate[AXIS_X];
 
@@ -475,6 +464,15 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
 
             float theta_inc = cw ? -(sweep / (float)n_seg)
                                  :  (sweep / (float)n_seg);
+
+            // DEBUG: compact arc summary (printed AFTER all values are computed)
+            static uint32_t s_arc_seq = 0;
+            s_arc_seq++;
+            UART_Printf("A%lu:%s st=(%.2f,%.2f) c=(%.2f,%.2f) e=(%.2f,%.2f) r=%.2f n=%lu\r\n",
+                (unsigned long)s_arc_seq,
+                used_planned ? "P" : "S",
+                start.coordinate[AXIS_X], start.coordinate[AXIS_Y],
+                cx, cy, ex, ey, radius, (unsigned long)n_seg);
 
             // Store arc state into APP_DATA — MOTION_Arc() will consume it
             appData->arcCenter.coordinate[AXIS_X]    = cx;

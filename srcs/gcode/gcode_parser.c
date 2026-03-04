@@ -236,6 +236,7 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
 /* -------------------------------------------------------------------------- */
 static inline void queue_command(GCODE_CommandQueue* q, const char* src, size_t len){
     if (len == 0 || len >= GCODE_BUFFER_SIZE) return;
+    if (q->count >= GCODE_MAX_COMMANDS) return;  // queue full — drop (flow control should prevent this)
     memcpy(q->commands[q->head].command, src, len);
     q->commands[q->head].command[len] = '\0';
     q->head = (q->head + 1) % GCODE_MAX_COMMANDS;

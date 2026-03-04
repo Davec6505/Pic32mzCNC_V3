@@ -2,9 +2,54 @@
 **PINOUT**: `Enable pin needs to be controled by setting direction bit.
 
 
-**Branch**: `lookahead`  
-**Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver  
-**Started**: February 10, 2026  
+**Branch**: `scurve_motion`
+**Last Updated**: March 4, 2026
+
+---
+
+## 🔴 IN PROGRESS: Arc4 wrong-start bug (March 4, 2026)
+
+**Symptom**: Running `tests/04_arc_test.gcode` — arcs 1–3 trace correctly but arc4
+(`G2 X20 Y10 I10 J0 F500`, a CW semicircle, start=(0,10), center=(10,10), end=(20,10))
+traces deeply into negative-X (~−20mm) and returns to (0,0) rather than (20,10).
+The observed path is consistent with center=(**−10**, 10), i.e. start.X=−20 instead of 0.
+
+**Current debug instrumentation** (`srcs/motion/motion_bridge.c`):
+- Per-arc compact print (fires once per `GCODE_EVENT_ARC_MOVE` consumed):
+  `A<N>:P/S st=(x,y) c=(cx,cy) e=(ex,ey) r=R n=<segments>`
+  where P=planned-position used, S=step-counter used.
+- First-segment print: `[SEG1] n=N f=(fx,fy) t=(tx,ty)`
+- Last-segment print: `DONE:(x,y,z)`
+
+**Two test runs confirmed**:
+- Only arcs 1 and 2 debug prints reach the serial terminal — arcs 3 and 4's `A3:`/`A4:` lines
+  are silently dropped because the UART TX buffer (1024 bytes) is saturated by the time arc3
+  generates. The `ok` flood from UGS pipelining fills the buffer before arc setup can print.
+- arc4's actual `start` is unknown — can't read it from the log yet.
+
+**Hypothesis (unconfirmed)**:
+- `s_planned_position` after arc3 should be (0, 10, 0). After the G4P0.5 dwell (no-op),
+  with arc3 fully executed and interpolator idle, arc4's guard falls to
+  `KINEMATICS_GetCurrentPosition()`. If the step counter reads correctly (0,10,0) the geometry
+  is still correct. The −20mm X implies center≈(−10,10), meaning `start.X ≈ −20` at arc4 setup.
+- Possible cause: the `[APP] Event type=` print (now removed) was flooding the TX buffer,
+  causing UART_Printf to block/drop in unexpected ways. The compact `A<N>:` format should
+  survive the buffer. **Next step: flash and read the A3/A4 lines.**
+
+**Next steps to continue**:
+1. Flash current `bins/CNC_V3` (already built, no rebuild needed).
+2. Run `tests/04_arc_test.gcode` in UGS.
+3. Look for `A3:` and `A4:` lines in serial output — confirm arc4's `st=` value.
+4. If `st=` is wrong → trace how `s_planned_position` is corrupted between arc3 and arc4.
+5. If `st=` is correct (0,10) → the bug is in the arc geometry calculation (sweep direction).
+
+**Files modified for debug** (to be reverted/cleaned when bug is fixed):
+- `srcs/motion/motion_bridge.c` — compact arc debug prints added
+- `srcs/app.c` — removed `arcJustFinished` stale init, removed `[APP] Event type=` flood print
+
+**Branch**: `scurve_motion`
+**Feature**: LitePlacer G38.x Probe + TMC5160 SPI Driver
+**Started**: February 10, 2026
 **Last Updated**: March 3, 2026 (multi-move position accumulation fix)
 
 ---
