@@ -262,6 +262,15 @@ void MOTION_Arc(APP_DATA *appData)
         next.coordinate[AXIS_A] = sa + (ea - sa) * progress;
     }
 
+    // DEBUG: Log first and last segment
+    if (appData->arcSegmentCurrent == 1) {
+        UART_Printf("[ARC_SEG1] total=%lu from=(%.3f,%.3f) to=(%.3f,%.3f) theta=%.4f\r\n",
+            (unsigned long)appData->arcSegmentTotal,
+            appData->arcCurrent.coordinate[AXIS_X], appData->arcCurrent.coordinate[AXIS_Y],
+            next.coordinate[AXIS_X], next.coordinate[AXIS_Y],
+            appData->arcTheta);
+    }
+
     // Attempt to add the segment to the trajectory queue
     if (TRAJECTORY_AddMove(appData->arcCurrent, next, appData->arcFeedrate, 0.0f, 0.0f)) {
         TRAJECTORY_Recalculate();
@@ -270,6 +279,8 @@ void MOTION_Arc(APP_DATA *appData)
 
         if (is_last) {
             appData->arcGenState = ARC_GEN_IDLE;
+            UART_Printf("[ARC_DONE] end=(%.3f,%.3f,%.3f)\r\n",
+                next.coordinate[AXIS_X], next.coordinate[AXIS_Y], next.coordinate[AXIS_Z]);
         }
 
         // Pre-fill gate: only release the interpolator once the queue is deep enough
@@ -398,9 +409,11 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             // Use planned position (same logic as LINEAR_MOVE) so arcs chained
             // after queued linear moves start from the correct position.
             CoordinatePoint start;
+            bool used_planned = false;
             if (s_planned_position_valid &&
                 (TRAJECTORY_QueueCount() > 0 || INTERPOLATOR_IsActive())) {
                 start = s_planned_position;
+                used_planned = true;
             } else {
                 start = KINEMATICS_GetCurrentPosition();
                 s_planned_position_valid = false;
@@ -415,6 +428,16 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             float ey = event->data.arcMove.y;
             float ez = event->data.arcMove.z;
             float ea = event->data.arcMove.a;
+
+            // DEBUG: Log arc setup
+            UART_Printf("[ARC_SETUP] src=%s start=(%.3f,%.3f,%.3f) ev.xy=(%.3f,%.3f) ij=(%.3f,%.3f) ctr=(%.3f,%.3f) traj=%lu isr=%d\r\n",
+                used_planned ? "plan" : "step",
+                start.coordinate[AXIS_X], start.coordinate[AXIS_Y], start.coordinate[AXIS_Z],
+                ex, ey,
+                event->data.arcMove.centerX, event->data.arcMove.centerY,
+                cx, cy,
+                (unsigned long)TRAJECTORY_QueueCount(),
+                (int)INTERPOLATOR_IsActive());
 
             float fr = event->data.arcMove.feedrate;
             if (fr < 1.0f) fr = s->max_rate[AXIS_X];
@@ -462,8 +485,11 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             appData->arcStartPoint                   = start;
             appData->arcEndPoint.coordinate[AXIS_X]  = ex;
             appData->arcEndPoint.coordinate[AXIS_Y]  = ey;
-            appData->arcEndPoint.coordinate[AXIS_Z]  = ez;
-            appData->arcEndPoint.coordinate[AXIS_A]  = ea;
+            // Z and A are optional in arc commands. NAN means "same as start"
+            // (no helical motion). Replace NAN now so MOTION_Arc() never passes
+            // NAN into TRAJECTORY_AddMove, which would corrupt dist/millimeters.
+            appData->arcEndPoint.coordinate[AXIS_Z]  = isnan(ez) ? start.coordinate[AXIS_Z] : ez;
+            appData->arcEndPoint.coordinate[AXIS_A]  = isnan(ea) ? start.coordinate[AXIS_A] : ea;
             appData->arcRadius                       = radius;
             appData->arcClockwise                    = cw;
             appData->arcFeedrate                     = fr;
@@ -479,8 +505,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             // chains from the correct position even before MOTION_Arc() runs.
             s_planned_position.coordinate[AXIS_X] = ex;
             s_planned_position.coordinate[AXIS_Y] = ey;
-            s_planned_position.coordinate[AXIS_Z] = ez;
-            s_planned_position.coordinate[AXIS_A] = ea;
+            s_planned_position.coordinate[AXIS_Z] = appData->arcEndPoint.coordinate[AXIS_Z];
+            s_planned_position.coordinate[AXIS_A] = appData->arcEndPoint.coordinate[AXIS_A];
             s_planned_position_valid = true;
 
             return true;

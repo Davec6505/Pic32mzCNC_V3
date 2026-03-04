@@ -58,7 +58,6 @@
 // *****************************************************************************
 void EXTERNAL_3_InterruptHandler( void );
 void TIMER_4_InterruptHandler( void );
-void TIMER_5_InterruptHandler( void );
 void SPI2_RX_InterruptHandler( void );
 void SPI2_TX_InterruptHandler( void );
 void UART3_FAULT_InterruptHandler( void );

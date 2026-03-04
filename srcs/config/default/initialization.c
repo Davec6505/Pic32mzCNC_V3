@@ -193,8 +193,6 @@ void SYS_Initialize ( void* data )
 
     TMR4_Initialize();
 
-    TMR5_Initialize();
-
 	SPI2_Initialize();
 
     NVM_Initialize();

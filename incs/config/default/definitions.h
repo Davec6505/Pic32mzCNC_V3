@@ -53,7 +53,6 @@
 #include "peripheral/uart/plib_uart3.h"
 #include "peripheral/tmr/plib_tmr6.h"
 #include "peripheral/tmr/plib_tmr4.h"
-#include "peripheral/tmr/plib_tmr5.h"
 #include "peripheral/clk/plib_clk.h"
 #include "peripheral/gpio/plib_gpio.h"
 #include "peripheral/cache/plib_cache.h"

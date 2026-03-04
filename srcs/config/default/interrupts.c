@@ -68,7 +68,6 @@
 // *****************************************************************************
 void EXTERNAL_3_Handler (void);
 void TIMER_4_Handler (void);
-void TIMER_5_Handler (void);
 void SPI2_RX_Handler (void);
 void SPI2_TX_Handler (void);
 void UART3_FAULT_Handler (void);
@@ -87,14 +86,9 @@ void __attribute__((used)) __ISR(_EXTERNAL_3_VECTOR, ipl7SRS) EXTERNAL_3_Handler
     EXTERNAL_3_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_TIMER_4_VECTOR, ipl1SRS) TIMER_4_Handler (void)
+void __attribute__((used)) __ISR(_TIMER_4_VECTOR, ipl6SRS) TIMER_4_Handler (void)
 {
     TIMER_4_InterruptHandler();
-}
-
-void __attribute__((used)) __ISR(_TIMER_5_VECTOR, ipl4SRS) TIMER_5_Handler (void)
-{
-    TIMER_5_InterruptHandler();
 }
 
 void __attribute__((used)) __ISR(_SPI2_RX_VECTOR, ipl1SRS) SPI2_RX_Handler (void)
