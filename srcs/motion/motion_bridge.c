@@ -414,6 +414,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             // added == false means zero-length move (e.g. "G1 F5000" with no axis
             // parameters).  That is not an error — the feedrate was already saved
             // modally above.  Fall through and consume the command regardless.
+            (void)added;
 
             // Advance the planned position to this move's end so the next
             // queued command uses the correct absolute start coordinate.
