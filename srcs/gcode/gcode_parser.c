@@ -698,37 +698,34 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
     }
 
     static uint32_t prev_count = 0xFFFFFFFFu;
+    static uint32_t oks_owed   = 0;           // freed slots not yet acknowledged
     uint32_t curr = q->count;
 
     if (okPendingCount == 0) {
         // Nothing to release — keep prev_count in sync so we don't get a
         // spurious burst when OKs start being deferred after a soft-reset.
         prev_count = curr;
+        oks_owed   = 0;
         return;
     }
 
+    // Accumulate freed gcode slots since last call.
     if (curr < prev_count) {
-        // Queue decreased — release one ok per freed slot.
-        uint32_t freed = prev_count - curr;
-        while (freed > 0 && okPendingCount > 0) {
-            if (!UART_SendOK()) break;
-            DEBUG_PRINT_GCODE("[DEFERRED] Slot freed (%lu->%lu), sent ok (pending=%lu)\r\n",
-                              (unsigned long)prev_count, (unsigned long)curr,
-                              (unsigned long)(okPendingCount - 1));
-            okPendingCount--;
-            freed--;
-        }
-    } else if (curr == 0 && okPendingCount > 0) {
-        // Queue already empty — flush remaining deferred oks so UGS can send
-        // the next batch. Flow control is queue-depth-based, not motion-based.
-        DEBUG_PRINT_GCODE("[DEFERRED] Queue empty — flushing %lu remaining oks\r\n",
-                          (unsigned long)okPendingCount);
-        while (okPendingCount > 0) {
-            if (!UART_SendOK()) break;
-            okPendingCount--;
-        }
+        oks_owed += (prev_count - curr);
     }
     prev_count = curr;
+
+    // Release at most ONE ok per call so UGS sees a steady trickle,
+    // never a burst. oks_owed retains the remainder for the next call.
+    if (oks_owed > 0 && okPendingCount > 0) {
+        if (UART_SendOK()) {
+            DEBUG_PRINT_GCODE("[DEFERRED] Sent ok (owed=%lu, pending=%lu)\r\n",
+                              (unsigned long)(oks_owed - 1),
+                              (unsigned long)(okPendingCount - 1));
+            okPendingCount--;
+            oks_owed--;
+        }
+    }
 }
 
 /**
