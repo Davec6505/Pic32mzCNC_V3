@@ -196,6 +196,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     cmdQueue->head = 0;
     cmdQueue->tail = 0;
     cmdQueue->count = 0;
+    cmdQueue->commands_consumed = 0;
     
     /* 9. Reset G-code parser state */
     okPendingCount = 0;       // Clear all deferred ok responses
@@ -633,6 +634,7 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
         // Empty command - consume it and return false
         cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
         cmdQueue->count--;
+        cmdQueue->commands_consumed++;
         return false;
     }
 
@@ -641,6 +643,7 @@ bool GCODE_GetNextEvent(GCODE_CommandQueue* cmdQueue, GCODE_Event* event)
         DEBUG_PRINT_GCODE("[GetEvent] Parse failed for: '%s'\r\n", gc->command);
         cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
         cmdQueue->count--;
+        cmdQueue->commands_consumed++;
         return false;
     }
 
@@ -663,6 +666,7 @@ void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue)
     // Remove the event that was just processed
     cmdQueue->tail = (cmdQueue->tail + 1) % GCODE_MAX_COMMANDS;
     cmdQueue->count--;
+    cmdQueue->commands_consumed++;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -691,34 +695,41 @@ void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue)
  * a dense section of linear moves generates.
  */
 void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
+    // Use the monotonically-increasing commands_consumed counter to determine
+    // how many OKs to release.  This is correct even when new commands arrive
+    // simultaneously (which makes the raw q->count delta unreliable — the
+    // depth can stay flat while commands flow through, starving UGS).
+    static uint32_t prev_consumed = 0;
+    uint32_t curr_consumed = q->commands_consumed;
+
     // Do NOT release deferred oks while a G4 dwell is in progress.
     if (MOTION_IsDwellActive()) {
         DEBUG_PRINT_GCODE("[FLOW] Dwell active — suppressing deferred ok release\r\n");
         return;
     }
 
-    static uint32_t prev_count = 0xFFFFFFFFu;
-    uint32_t curr = q->count;
-
     if (okPendingCount == 0) {
-        // Nothing to release — keep prev_count in sync so we don't get a
-        // spurious burst when OKs start being deferred after a soft-reset.
-        prev_count = curr;
+        // Nothing to release — keep prev_consumed in sync so we don't get a
+        // spurious burst (uint32 wraparound) when commands_consumed is reset
+        // on soft-reset but prev_consumed still holds the old value.
+        prev_consumed = curr_consumed;
         return;
     }
 
-    if (curr < prev_count) {
-        // Queue shrank — release one ok for each freed slot.
-        uint32_t freed = prev_count - curr;
-        while (freed > 0 && okPendingCount > 0) {
+    if (curr_consumed != prev_consumed) {
+        // Commands were consumed since last check — release one ok per command.
+        uint32_t consumed = curr_consumed - prev_consumed; // wraps safely (uint32)
+        prev_consumed = curr_consumed;
+        while (consumed > 0 && okPendingCount > 0) {
             if (!UART_SendOK()) break;
-            DEBUG_PRINT_GCODE("[DEFERRED] Slot freed, sent ok (pending=%lu)\r\n",
+            DEBUG_PRINT_GCODE("[DEFERRED] Command consumed, sent ok (pending=%lu)\r\n",
                               (unsigned long)(okPendingCount - 1));
             okPendingCount--;
-            freed--;
+            consumed--;
         }
-    } else if (curr == 0 && okPendingCount > 0) {
-        // Queue already at zero — flush remaining so UGS can send the next batch.
+    } else if (q->count == 0 && okPendingCount > 0) {
+        // Queue drained to zero with no new consumption detected this call.
+        // Flush remaining so UGS is never permanently blocked on the last batch.
         DEBUG_PRINT_GCODE("[DEFERRED] Queue empty — flushing %lu remaining oks\r\n",
                           (unsigned long)okPendingCount);
         while (okPendingCount > 0) {
@@ -726,7 +737,6 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
             okPendingCount--;
         }
     }
-    prev_count = curr;
 }
 
 /**

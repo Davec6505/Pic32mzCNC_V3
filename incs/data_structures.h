@@ -139,6 +139,13 @@ typedef struct {
     uint32_t tail;
     uint32_t count;
     
+    // Monotonically increasing counter: incremented every time a command is
+    // removed from the queue (consumed/discarded).  CheckDeferredOk uses the
+    // delta of this value to release exactly one deferred "ok" per consumed
+    // command — correct even when new commands arrive simultaneously
+    // (which makes the raw q->count delta unreliable).
+    uint32_t commands_consumed;
+
     // ✅ Motion queue info for flow control (no circular dependency!)
     // Flow control reads appData->motionQueueCount directly (single authoritative source)
     uint32_t maxMotionSegments;     // Maximum motion buffer size
