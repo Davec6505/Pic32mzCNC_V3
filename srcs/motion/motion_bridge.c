@@ -403,21 +403,32 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             }
 
             // Add to trajectory queue; Recalculate blends junction speeds.
-            bool added = TRAJECTORY_AddMove(start, end, fr, 0.0f, 0.0f);
-            if (added) {
-                // Advance the planned position to this move's end so the next
-                // queued command uses the correct absolute start coordinate.
-                s_planned_position       = end;
-                s_planned_position_valid = true;
+            // Guard: back off early (same threshold as MOTION_Arc) so linear moves
+            // don't queue up to 64 and starve TRAJECTORY_Recalculate.
+            // Returning false leaves the gcode command in the queue for retry next
+            // iteration — MOTION_Tasks will have drained at least one slot by then.
+            if (TRAJECTORY_QueueCount() >= (uint32_t)(TRAJ_QUEUE_SIZE - 2)) {
+                return false;  // Back off — retry next iteration
+            }
 
-                TRAJECTORY_Recalculate();
-                // Pump the first move if interpolator is idle
-                if (!INTERPOLATOR_IsActive()) {
-                    SCurveMove mv;
-                    if (TRAJECTORY_GetNextMove(&mv)) {
-                        STEPPERS_Enable();
-                        INTERPOLATOR_LoadMove(&mv);
-                    }
+            bool added = TRAJECTORY_AddMove(start, end, fr, 0.0f, 0.0f);
+            if (!added) {
+                // Should not happen given the guard above, but be safe.
+                return false;  // Retry next iteration
+            }
+
+            // Advance the planned position to this move's end so the next
+            // queued command uses the correct absolute start coordinate.
+            s_planned_position       = end;
+            s_planned_position_valid = true;
+
+            TRAJECTORY_Recalculate();
+            // Pump the first move if interpolator is idle
+            if (!INTERPOLATOR_IsActive()) {
+                SCurveMove mv;
+                if (TRAJECTORY_GetNextMove(&mv)) {
+                    STEPPERS_Enable();
+                    INTERPOLATOR_LoadMove(&mv);
                 }
             }
             return true;

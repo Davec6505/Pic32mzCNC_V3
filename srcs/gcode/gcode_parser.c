@@ -811,10 +811,6 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 nBytesRead += got;
                 rxBuffer[nBytesRead] = '\0';
             }
-        } else {
-            // ✅ No new bytes arriving - check for deferred ok
-            // This runs every iteration when idle, ensuring final "ok" is sent
-            GCODE_CheckDeferredOk(appData, cmdQueue);
         }
 
         if (nBytesRead == 0) {
@@ -901,8 +897,6 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     nBytesRead = 0;
                     memset(rxBuffer, 0, sizeof(rxBuffer));
                 }
-                // After consuming a line, attempt to release any deferred ok now that we may have headroom
-                GCODE_CheckDeferredOk(appData, cmdQueue);
                 break;
             }
         }
