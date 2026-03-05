@@ -403,19 +403,17 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             }
 
             // Add to trajectory queue; Recalculate blends junction speeds.
-            // Guard: back off early (same threshold as MOTION_Arc) so linear moves
-            // don't queue up to 64 and starve TRAJECTORY_Recalculate.
-            // Returning false leaves the gcode command in the queue for retry next
-            // iteration — MOTION_Tasks will have drained at least one slot by then.
+            // Guard: back off early (same threshold as MOTION_Arc) if queue is nearly
+            // full — return false so the gcode command stays for retry next iteration
+            // after MOTION_Tasks drains at least one slot.
             if (TRAJECTORY_QueueCount() >= (uint32_t)(TRAJ_QUEUE_SIZE - 2)) {
-                return false;  // Back off — retry next iteration
+                return false;  // Queue full — retry next iteration
             }
 
             bool added = TRAJECTORY_AddMove(start, end, fr, 0.0f, 0.0f);
-            if (!added) {
-                // Should not happen given the guard above, but be safe.
-                return false;  // Retry next iteration
-            }
+            // added == false means zero-length move (e.g. "G1 F5000" with no axis
+            // parameters).  That is not an error — the feedrate was already saved
+            // modally above.  Fall through and consume the command regardless.
 
             // Advance the planned position to this move's end so the next
             // queued command uses the correct absolute start coordinate.
