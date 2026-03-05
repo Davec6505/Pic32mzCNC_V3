@@ -70,7 +70,7 @@
 /* Static Buffers / State                                                     */
 /* -------------------------------------------------------------------------- */
 static uint8_t txBuffer[1024];
-static uint8_t rxBuffer[512];  // Increased to match UART3 RX buffer size
+static uint8_t rxBuffer[1024];  // Increased to match UART3 RX buffer size
 static volatile uint32_t nBytesRead = 0;
 
 GCODE_Data gcodeData = {
@@ -674,9 +674,14 @@ void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue)
 /**
  * @brief Check if we should send a deferred "ok" response
  *
- * Gates on gcode command queue depth only.  Releases deferred oks in a
- * burst whenever the queue drains below LOW_WATER, refilling UGS's send
- * window so it keeps pushing the next batch of commands.
+ * Gates on gcode command queue depth only.  Releases ONE deferred ok each
+ * time a gcode queue slot is free (count < HIGH_WATER).  This causes OKs
+ * to trickle out at exactly the rate commands are consumed — UGS sends one
+ * new command for each OK, keeping the queue stable near HIGH_WATER.
+ *
+ * A burst release (LOW_WATER) is deliberately avoided: it would push all
+ * pending OKs to UGS at once, making UGS think streaming is complete while
+ * the trajectory queue still has segments in flight.
  */
 void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
     // Do NOT release deferred oks while a G4 dwell is in progress.
@@ -697,14 +702,13 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
         return;
     }
 
-    // Normal flow: release deferred oks when gcode queue is below low-water.
-    // Send them one-by-one so each freed slot lets UGS push one new command.
-    while (okPendingCount > 0 && q->count <= GCODE_QUEUE_LOW_WATER) {
-        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (gcodeQ=%lu <= LOW=%d, pending=%lu)\r\n",
-                          (unsigned long)q->count, GCODE_QUEUE_LOW_WATER,
+    // Normal flow: release ONE deferred ok whenever one gcode slot is free.
+    // Do not loop — send at most one per call so OKs pace with consumption.
+    if (okPendingCount > 0 && q->count < GCODE_QUEUE_HIGH_WATER) {
+        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (gcodeQ=%lu < HIGH=%d, pending=%lu)\r\n",
+                          (unsigned long)q->count, GCODE_QUEUE_HIGH_WATER,
                           (unsigned long)okPendingCount);
         if (UART_SendOK()) okPendingCount--;
-        else break;
     }
 }
 
