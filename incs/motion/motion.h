@@ -34,4 +34,15 @@ void MOTION_SyncPlannedPosition(void);
 // does not think the file is complete while commands are still queued.
 bool MOTION_IsDwellActive(void);
 
+// Returns true when both the trajectory queue and the interpolator are idle
+// (no motion executing and none queued).  Used by the probe monitor in app.c
+// to detect that the probe reached its target without triggering.
+bool MOTION_IsIdle(void);
+
+// Stop motion immediately on a probe trigger.
+// Stops the interpolator, clears the trajectory queue, and re-anchors the
+// planned-position tracker to the live step-counter.
+// Does NOT disable steppers so the machine holds position at contact point.
+void MOTION_ProbeStop(void);
+
 #endif /* MOTION_H */
