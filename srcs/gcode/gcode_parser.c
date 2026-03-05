@@ -88,7 +88,7 @@ static uint32_t okPendingCount = 0;         // Flow control: count of deferred "
 // Pre-fill phase removed: it was designed for UGS-style pipelined senders.
 // With a sequential streamer (wait-for-ok) and the interpolator now counted
 // in motionQueueCount, normal 1-for-1 flow control is correct immediately.
-static bool startupPrefillDone = true;  // always start in normal flow mode
+/* startupPrefillDone removed — flow control is purely queue-depth-based */
 
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
@@ -199,7 +199,6 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     
     /* 9. Reset G-code parser state */
     okPendingCount = 0;       // Clear all deferred ok responses
-    startupPrefillDone = true;  // no pre-fill — use normal flow immediately
     grblCheckMode = false;
     g_feed_hold_active  = false;  // Clear hold (defined in stepper.c / stepper.h)
     g_feed_hold_pending = false;  // Cancel any in-flight pending hold
@@ -230,7 +229,6 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
     okPendingCount = 0;       // Clear all deferred ok responses
-    startupPrefillDone = true;  // no pre-fill — use normal flow immediately
     gcodeData.state = GCODE_STATE_IDLE;
     unitsInches = false;
     grblCheckMode = false;
@@ -699,46 +697,38 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
         return;
     }
 
-    if (!startupPrefillDone) {
-        // Pre-fill phase: release all pending oks once queue reaches high-water.
-        if (q->count >= GCODE_QUEUE_HIGH_WATER) {
-            startupPrefillDone = true;
-            while (okPendingCount > 0) {
-                if (UART_SendOK()) okPendingCount--;
-                else break;
-            }
-        }
+    static uint32_t prev_count = 0xFFFFFFFFu;
+    uint32_t curr = q->count;
+
+    if (okPendingCount == 0) {
+        // Nothing to release — keep prev_count in sync so we don't get a
+        // spurious burst when OKs start being deferred after a soft-reset.
+        prev_count = curr;
         return;
     }
 
-    if (okPendingCount == 0) return;
-
-    static uint32_t prev_count = 0;
-    uint32_t curr = q->count;
-
-    if (curr > 0) {
-        // Phase A: gcode queue not yet empty — trickle one ok per consumed slot.
-        if (curr < prev_count) {
-            DEBUG_PRINT_GCODE("[DEFERRED-A] Slot freed (%lu->%lu), sending ok (pending=%lu)\r\n",
+    if (curr < prev_count) {
+        // Queue decreased — release one ok per freed slot.
+        uint32_t freed = prev_count - curr;
+        while (freed > 0 && okPendingCount > 0) {
+            if (!UART_SendOK()) break;
+            DEBUG_PRINT_GCODE("[DEFERRED] Slot freed (%lu->%lu), sent ok (pending=%lu)\r\n",
                               (unsigned long)prev_count, (unsigned long)curr,
-                              (unsigned long)okPendingCount);
-            if (UART_SendOK()) okPendingCount--;
+                              (unsigned long)(okPendingCount - 1));
+            okPendingCount--;
+            freed--;
         }
-        prev_count = curr;
-    } else {
-        // Phase B: gcode queue at zero — wait for motion to fully complete.
-        prev_count = 0;
-        bool arc_idle  = (appData->arcGenState == ARC_GEN_IDLE);
-        bool traj_idle = (appData->motionQueueCount == 0);
-        if (arc_idle && traj_idle) {
-            DEBUG_PRINT_GCODE("[DEFERRED-B] Motion done — flushing %lu pending oks\r\n",
-                              (unsigned long)okPendingCount);
-            while (okPendingCount > 0) {
-                if (UART_SendOK()) okPendingCount--;
-                else break;
-            }
+    } else if (curr == 0 && okPendingCount > 0) {
+        // Queue already empty — flush remaining deferred oks so UGS can send
+        // the next batch. Flow control is queue-depth-based, not motion-based.
+        DEBUG_PRINT_GCODE("[DEFERRED] Queue empty — flushing %lu remaining oks\r\n",
+                          (unsigned long)okPendingCount);
+        while (okPendingCount > 0) {
+            if (!UART_SendOK()) break;
+            okPendingCount--;
         }
     }
+    prev_count = curr;
 }
 
 /**
@@ -760,13 +750,7 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
         return;
     }
 
-    if (!startupPrefillDone) {
-        // Pre-fill: send immediately so UGS keeps pushing and queue fills fast.
-        (void)UART_SendOK();
-        return;
-    }
-
-    // Normal flow: gate on gcode queue depth.
+    // Gate purely on gcode queue depth: one ok per one accepted command.
     if (q->count >= GCODE_QUEUE_HIGH_WATER) {
         DEBUG_PRINT_GCODE("[FLOW] Deferring ok (gcodeQ=%lu >= HIGH=%d, pending=%lu)\r\n",
                           (unsigned long)q->count, GCODE_QUEUE_HIGH_WATER,
