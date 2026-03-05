@@ -674,14 +674,23 @@ void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue)
 /**
  * @brief Check if we should send a deferred "ok" response
  *
- * Gates on gcode command queue depth only.  Releases ONE deferred ok each
- * time a gcode queue slot is free (count < HIGH_WATER).  This causes OKs
- * to trickle out at exactly the rate commands are consumed — UGS sends one
- * new command for each OK, keeping the queue stable near HIGH_WATER.
+ * Two-phase release strategy:
  *
- * A burst release (LOW_WATER) is deliberately avoided: it would push all
- * pending OKs to UGS at once, making UGS think streaming is complete while
- * the trajectory queue still has segments in flight.
+ * Phase A — gcode queue still has commands (q->count > 0):
+ *   Release ONE deferred ok each time the gcode queue count DECREASES (a
+ *   command was consumed and dispatched to the trajectory planner).
+ *   prev_count ensures exactly one ok per consumed slot regardless of how
+ *   many times this function is called per iteration.
+ *
+ * Phase B — gcode queue fully drained (q->count == 0):
+ *   Hold ALL remaining deferred oks until physical motion is completely done:
+ *     - trajectory queue empty  (motionQueueCount == 0)
+ *     - arc generation finished (arcGenState == ARC_GEN_IDLE)
+ *   Then flush every remaining pending ok in one burst.
+ *
+ * This guarantees UGS cannot receive its final ok(s) while stepper motion
+ * is still executing, regardless of how many trajectory segments an arc or
+ * a dense section of linear moves generates.
  */
 void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
     // Do NOT release deferred oks while a G4 dwell is in progress.
@@ -702,24 +711,34 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
         return;
     }
 
-    // Normal flow: release exactly ONE deferred ok when the gcode queue count
-    // DECREASES (i.e. a slot was genuinely freed by command consumption).
-    //
-    // This is called from many places (top of GCODE_Tasks, motionSegmentCompleted,
-    // etc.), so we must not release an ok just because q->count < HIGH_WATER — that
-    // fires on every call while the queue is below threshold and pumps out surplus OKs.
-    // Tracking prev_count ensures we only release when a slot actually opened up,
-    // giving a strict 1-for-1 ratio: one deferred ok per gcode command consumed.
+    if (okPendingCount == 0) return;
+
     static uint32_t prev_count = 0;
     uint32_t curr = q->count;
 
-    if (okPendingCount > 0 && curr < prev_count) {
-        DEBUG_PRINT_GCODE("[DEFERRED] Slot freed (gcodeQ %lu→%lu) — sending deferred ok (pending=%lu)\r\n",
-                          (unsigned long)prev_count, (unsigned long)curr,
-                          (unsigned long)okPendingCount);
-        if (UART_SendOK()) okPendingCount--;
+    if (curr > 0) {
+        // Phase A: gcode queue not yet empty — trickle one ok per consumed slot.
+        if (curr < prev_count) {
+            DEBUG_PRINT_GCODE("[DEFERRED-A] Slot freed (%lu->%lu), sending ok (pending=%lu)\r\n",
+                              (unsigned long)prev_count, (unsigned long)curr,
+                              (unsigned long)okPendingCount);
+            if (UART_SendOK()) okPendingCount--;
+        }
+        prev_count = curr;
+    } else {
+        // Phase B: gcode queue at zero — wait for motion to fully complete.
+        prev_count = 0;
+        bool arc_idle  = (appData->arcGenState == ARC_GEN_IDLE);
+        bool traj_idle = (appData->motionQueueCount == 0);
+        if (arc_idle && traj_idle) {
+            DEBUG_PRINT_GCODE("[DEFERRED-B] Motion done — flushing %lu pending oks\r\n",
+                              (unsigned long)okPendingCount);
+            while (okPendingCount > 0) {
+                if (UART_SendOK()) okPendingCount--;
+                else break;
+            }
+        }
     }
-    prev_count = curr;
 }
 
 /**
