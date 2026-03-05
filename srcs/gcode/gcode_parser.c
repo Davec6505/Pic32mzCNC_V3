@@ -746,7 +746,7 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
     // refills that slot and the queue stays near 63/64.
     // Release condition mirrors the deferred condition: release one ok whenever the
     // gcode queue has space (< GCODE_MAX_COMMANDS-1 entries) and trajectory is below
-    // low-water.  Using MAX-1 (= 15) matches the real circular-buffer full point.
+    // low-water.  Using MAX-1 (= 63) matches the real circular-buffer full point.
     while (okPendingCount > 0
            && appData->motionQueueCount < lowWater
            && q->count < GCODE_MAX_COMMANDS - 1) {
@@ -797,8 +797,8 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 
     // Normal 1-for-1 phase: defer when trajectory queue is at high-water OR the gcode
     // command queue is full (prevents silent command drops in pipelined senders like UGS).
-    // Use GCODE_MAX_COMMANDS-1 (= 15) because the circular buffer's full condition fires
-    // at head+1==tail which corresponds to 15 entries, not 16.
+    // Use GCODE_MAX_COMMANDS-1 (= 63) because the circular buffer's full condition fires
+    // at head+1==tail which corresponds to MAX-1 entries, not MAX.
     bool cmdQueueFull = (q->count >= GCODE_MAX_COMMANDS - 1);
     if (appData->motionQueueCount >= highWater || cmdQueueFull) {
         DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu >= highWater=%lu, pending=%lu)\r\n",
@@ -1350,32 +1350,16 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 
     case GCODE_STATE_GCODE_COMMAND:
     {
-        // ✅ FIX: Block when the gcode command queue is nearly full.
-        // Extract_CommandLineFrom_Buffer uses a circular-buffer full check that
-        // fires at (GCODE_MAX_COMMANDS-1) = 15 entries (head+1==tail).  When that
-        // check fires it silently breaks the token loop, dropping remaining tokens,
-        // but the old code still called SendOrDeferOk — sending a false "ok" to
-        // UGS for a command that was never queued.  UGS counted all those false
-        // oks, decided streaming was done, and the machine stopped mid-file.
-        //
-        // Guard: require at least 4 free slots before processing so a combined
-        // modal like "G21G90G17" (3 tokens) is never partially queued.
-        // When the guard fires we leave rxBuffer and nBytesRead intact so the
-        // next GCODE_Tasks() call retries this same command automatically.
-        if (cmdQueue->count >= GCODE_MAX_COMMANDS - 4) {
-            break;  // Queue nearly full — retry next iteration, do NOT send ok
-        }
-
         uint32_t cmd_end = 0;
         for (uint32_t i = 0; i < nBytesRead; i++) {
             if (rxBuffer[i] == '\0') { cmd_end = i; break; }
         }
         DEBUG_PRINT_GCODE("[GCODE_CMD] Processing command: '%s'\r\n", rxBuffer);
         cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
-        
+
         DEBUG_PRINT_GCODE("[GCODE_CMD] Normal flow control\r\n");
         SendOrDeferOk(appData, cmdQueue);
-        
+
         nBytesRead = 0;
         memset(rxBuffer, 0, sizeof(rxBuffer));
         gcodeData.state = GCODE_STATE_IDLE;

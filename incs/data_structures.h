@@ -126,7 +126,7 @@ typedef struct {
 // G-code Queue Structures
 // ============================================================================
 
-#define GCODE_MAX_COMMANDS 16
+#define GCODE_MAX_COMMANDS 64
 #define GCODE_BUFFER_SIZE 80
 
 typedef struct {
