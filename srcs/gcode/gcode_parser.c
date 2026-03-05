@@ -47,17 +47,24 @@
 
 // Dual-threshold flow control for UGS compatibility
 // HIGH_WATER: Start deferring "ok" when queue reaches this (almost full)
-// LOW_WATER: Resume sending "ok" when queue drains to this (some space freed)
+// GCODE QUEUE FLOW CONTROL
+// -------------------------
+// The 64-slot gcode command queue is the UGS throttle.  The trajectory
+// planner queue (also 64 slots) is managed independently by MOTION_Arc
+// which backs off at 62/64 — we do NOT use trajectory depth to gate UGS.
 //
-// With TRAJ_QUEUE_SIZE=64:
-//   Defer at 63 (1 free slot)  — HIGH_WATER=1 → highWater = 64-1 = 63
-//   Send  at 63 (1 free slot)  — LOW_WATER=1  → lowWater  = 64-1 = 63
+// HIGH_WATER: stop sending "ok" (defer) when gcode queue reaches this many entries.
+// LOW_WATER:  resume sending "ok" when gcode queue drains back to this level.
 //
-// This means UGS receives "ok" the instant ONE slot opens, so the next
-// G2/G3 command arrives and starts building chord segments while the ISR
-// is still consuming the current arc — the trajectory queue stays full.
-#define MOTION_BUFFER_HIGH_WATER 1    // Defer when only 1 slot remains free (highWater = TRAJ_QUEUE_SIZE-1 = 63)
-#define MOTION_BUFFER_LOW_WATER  1    // Send ok the moment 1 slot is freed  (lowWater  = TRAJ_QUEUE_SIZE-1 = 63)
+// With GCODE_MAX_COMMANDS=64:
+//   HIGH_WATER=48 → defer once 3/4 full  (16 free slots)
+//   LOW_WATER=16  → release once 1/4 full (48 free slots)
+//
+// This creates a 32-command hysteresis band.  UGS pushes commands until it
+// hits high-water, pauses, then gets a burst of deferred oks when the MCU
+// drains the queue below low-water — keeping both ends busy.
+#define GCODE_QUEUE_HIGH_WATER 48
+#define GCODE_QUEUE_LOW_WATER  16
 
 /* -------------------------------------------------------------------------- */
 /* Static Buffers / State                                                     */
@@ -664,121 +671,56 @@ void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue)
 /* Flow Control Helpers - Centralized OK Management                           */
 /* -------------------------------------------------------------------------- */
 
-/* Removed IsOkPending/SetOkPending/ClearOkPending helpers to avoid unused warnings;
-   logic now accesses okPending directly inside the flow-control helpers below. */
-
-/**
- * @brief Compute high-water mark for flow control (when to START deferring ok)
- * 
- * Returns maxSegments - HIGH_WATER threshold
- * Example: With MAX=16, HIGH_WATER=2 → defer when queue >= 14
- */
-static inline uint32_t Flow_HighWater(const GCODE_CommandQueue* q)
-{
-    if (q == NULL) return 0U;
-    return (q->maxMotionSegments > MOTION_BUFFER_HIGH_WATER)
-         ? (uint32_t)(q->maxMotionSegments - MOTION_BUFFER_HIGH_WATER)
-         : 0U;
-}
-
-/**
- * @brief Compute low-water mark for flow control (when to RESUME sending ok)
- * 
- * Returns maxSegments - LOW_WATER threshold
- * Example: With MAX=16, LOW_WATER=4 → resume when queue <= 12
- */
-static inline uint32_t Flow_LowWater(const GCODE_CommandQueue* q)
-{
-    if (q == NULL) return 0U;
-    return (q->maxMotionSegments > MOTION_BUFFER_LOW_WATER)
-         ? (uint32_t)(q->maxMotionSegments - MOTION_BUFFER_LOW_WATER)
-         : 0U;
-}
-
 /**
  * @brief Check if we should send a deferred "ok" response
- * 
- * With aggressive flow control, only send deferred "ok" when motion queue
- * is COMPLETELY empty. This ensures UGS doesn't see "Finished" until all
- * motion has executed.
- * 
- * @param appData Application data with motion queue count
- * @param q Command queue (unused with current logic)
+ *
+ * Gates on gcode command queue depth only.  Releases deferred oks in a
+ * burst whenever the queue drains below LOW_WATER, refilling UGS's send
+ * window so it keeps pushing the next batch of commands.
  */
 void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
-    uint32_t highWater = Flow_HighWater(&appData->gcodeCommandQueue); // MAX - 1 = 63
-    uint32_t lowWater  = Flow_LowWater(&appData->gcodeCommandQueue);  // MAX - 1 = 63
-
     // Do NOT release deferred oks while a G4 dwell is in progress.
-    // During the dwell the trajectory queue is empty (motionQueueCount=0) which
-    // would normally trigger a flood of deferred oks.  UGS would then receive
-    // oks for all remaining commands, conclude the file is done, and send a
-    // soft-reset — discarding commands still sitting in the gcode command queue.
     if (MOTION_IsDwellActive()) {
         DEBUG_PRINT_GCODE("[FLOW] Dwell active — suppressing deferred ok release\r\n");
         return;
     }
 
     if (!startupPrefillDone) {
-        // ── Pre-fill phase ────────────────────────────────────────────────────
-        // Hold ALL "ok" responses until the trajectory queue is at high-water.
-        // Once it crosses that line, flush every accumulated "ok" in one burst
-        // and switch to normal 1-for-1 flow.
-        if (appData->motionQueueCount >= highWater) {
+        // Pre-fill phase: release all pending oks once queue reaches high-water.
+        if (q->count >= GCODE_QUEUE_HIGH_WATER) {
             startupPrefillDone = true;
-            DEBUG_PRINT_GCODE("[PREFILL] Queue reached high-water (%lu), flushing %lu deferred ok(s)\r\n",
-                              (unsigned long)highWater, (unsigned long)okPendingCount);
             while (okPendingCount > 0) {
-                if (UART_SendOK()) {
-                    okPendingCount--;
-                } else {
-                    break; // TX buffer full, remainder released next iteration
-                }
+                if (UART_SendOK()) okPendingCount--;
+                else break;
             }
         }
-        // else: still filling — nothing to release yet
         return;
     }
 
-    // ── Normal flow phase ─────────────────────────────────────────────────────
-    // Release one "ok" per freed slot: as long as the queue is below high-water
-    // (i.e. any slot is free) drain one pending ok at a time so UGS immediately
-    // refills that slot and the queue stays near 63/64.
-    // Release condition mirrors the deferred condition: release one ok whenever the
-    // gcode queue has space (< GCODE_MAX_COMMANDS-1 entries) and trajectory is below
-    // low-water.  Using MAX-1 (= 63) matches the real circular-buffer full point.
-    while (okPendingCount > 0
-           && appData->motionQueueCount < lowWater
-           && q->count < GCODE_MAX_COMMANDS - 1) {
-        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (queue=%lu < lowWater=%lu, pending=%lu)\r\n",
-                          (unsigned long)appData->motionQueueCount, (unsigned long)lowWater,
+    // Normal flow: release deferred oks when gcode queue is below low-water.
+    // Send them one-by-one so each freed slot lets UGS push one new command.
+    while (okPendingCount > 0 && q->count <= GCODE_QUEUE_LOW_WATER) {
+        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (gcodeQ=%lu <= LOW=%d, pending=%lu)\r\n",
+                          (unsigned long)q->count, GCODE_QUEUE_LOW_WATER,
                           (unsigned long)okPendingCount);
-        if (UART_SendOK()) {
-            okPendingCount--;
-        } else {
-            break;  // TX buffer full, try again next iteration
-        }
+        if (UART_SendOK()) okPendingCount--;
+        else break;
     }
 }
 
 /**
  * @brief Decide whether to send "ok" immediately or defer it
- * 
- * Called when a command is received.
- * Uses HIGH_WATER threshold - defers ok when buffer is almost full.
- * 
- * @param currentQueueCount Current motion queue count
- * @param maxSegments Maximum motion queue size
+ *
+ * Gates purely on gcode command queue depth:
+ *   >= HIGH_WATER → defer (stop filling UGS send window)
+ *   <  HIGH_WATER → send immediately (keep UGS pushing commands)
+ *
+ * The trajectory planner queue is managed independently (MOTION_Arc backs
+ * off at 62/64) — it does NOT gate UGS flow here.
  */
 static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 {
-    uint32_t highWater = Flow_HighWater(q); // MAX - 1 = 63
-
-    // While a G4 dwell is active, always defer — never send immediately.
-    // The trajectory queue is empty during the dwell (motionQueueCount=0) so
-    // without this guard every new incoming command would get an instant ok,
-    // letting UGS exhaust its credit window and declare the file complete
-    // before the queued commands have actually executed.
+    // While a G4 dwell is active, always defer.
     if (MOTION_IsDwellActive()) {
         DEBUG_PRINT_GCODE("[FLOW] Dwell active — deferring ok\r\n");
         okPendingCount++;
@@ -786,30 +728,20 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
     }
 
     if (!startupPrefillDone) {
-        // Pre-fill phase: send immediately so UGS keeps pushing commands
-        // and the trajectory queue fills toward high-water as fast as possible.
-        DEBUG_PRINT_GCODE("[PREFILL] Sending immediate ok (queue=%lu, filling to highWater=%lu)\r\n",
-                          (unsigned long)appData->motionQueueCount,
-                          (unsigned long)highWater);
+        // Pre-fill: send immediately so UGS keeps pushing and queue fills fast.
         (void)UART_SendOK();
         return;
     }
 
-    // Normal 1-for-1 phase: defer when trajectory queue is at high-water OR the gcode
-    // command queue is full (prevents silent command drops in pipelined senders like UGS).
-    // Use GCODE_MAX_COMMANDS-1 (= 63) because the circular buffer's full condition fires
-    // at head+1==tail which corresponds to MAX-1 entries, not MAX.
-    bool cmdQueueFull = (q->count >= GCODE_MAX_COMMANDS - 1);
-    if (appData->motionQueueCount >= highWater || cmdQueueFull) {
-        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (queue=%lu >= highWater=%lu, pending=%lu)\r\n",
-                          (unsigned long)appData->motionQueueCount,
-                          (unsigned long)highWater,
+    // Normal flow: gate on gcode queue depth.
+    if (q->count >= GCODE_QUEUE_HIGH_WATER) {
+        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (gcodeQ=%lu >= HIGH=%d, pending=%lu)\r\n",
+                          (unsigned long)q->count, GCODE_QUEUE_HIGH_WATER,
                           (unsigned long)(okPendingCount + 1));
         okPendingCount++;
     } else {
-        DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (queue=%lu < highWater=%lu)\r\n",
-                          (unsigned long)appData->motionQueueCount,
-                          (unsigned long)highWater);
+        DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (gcodeQ=%lu < HIGH=%d)\r\n",
+                          (unsigned long)q->count, GCODE_QUEUE_HIGH_WATER);
         (void)UART_SendOK();
     }
 }
