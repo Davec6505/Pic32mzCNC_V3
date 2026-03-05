@@ -3,7 +3,37 @@
 
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 4, 2026
+**Last Updated**: March 5, 2026
+
+---
+
+## ✅ FIXED: Deferred-ok release stalls mid-file when gcode queue throughput is steady — March 5, 2026
+
+**Commit**: `df9d197`
+**Files**:
+- `incs/data_structures.h:140` — Added `uint32_t commands_consumed` to `GCODE_CommandQueue`
+- `srcs/gcode/gcode_parser.c` — `GCODE_CheckDeferredOk()` rewritten to use `commands_consumed` delta
+- `srcs/gcode/gcode_parser.c:634,643` — `GCODE_GetNextEvent()` discard paths increment `commands_consumed`
+- `srcs/gcode/gcode_parser.c:665` — `GCODE_ConsumeEvent()` increments `commands_consumed`
+- `srcs/gcode/gcode_parser.c:198` — `GCODE_SoftReset()` resets `commands_consumed = 0`
+
+**Symptom**: `07_complex_long_run_fast.gcode` (199 lines) stopped at `MPos:30.013,50.013` — mid file,
+mid-section. Machine went `<Idle>` without returning to origin. Reproducible.
+
+**Root cause**: `GCODE_CheckDeferredOk` tracked `q->count` (instantaneous queue depth) and released
+deferred OKs only when `curr < prev_count` (queue shrank vs previous call). When the planner was
+consuming commands at roughly the same rate UGS was sending new ones, `q->count` stayed flat — the
+net delta was zero — so `okPendingCount` never drained. UGS's in-flight window exhausted and it
+stopped sending. Machine received no new commands and idled mid-file.
+
+**Fix**: Replaced the fragile `prev_count` depth-delta approach with a monotonically-increasing
+`commands_consumed` counter in `GCODE_CommandQueue`. Every command removed from the queue (via
+`GCODE_ConsumeEvent` or the two silent-discard paths in `GCODE_GetNextEvent`) increments this counter.
+`CheckDeferredOk` computes `delta = curr_consumed - prev_consumed` — correctly counting actual
+removals regardless of simultaneous arrivals — and releases exactly `delta` deferred OKs. Falls back
+to flushing all remaining OKs when `q->count == 0` with no new consumption detected that call.
+
+**Verified**: Full 199-line run completed to `MPos:0.000,0.000,0.000` ✅
 
 ---
 
