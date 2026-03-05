@@ -702,14 +702,24 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
         return;
     }
 
-    // Normal flow: release ONE deferred ok whenever one gcode slot is free.
-    // Do not loop — send at most one per call so OKs pace with consumption.
-    if (okPendingCount > 0 && q->count < GCODE_QUEUE_HIGH_WATER) {
-        DEBUG_PRINT_GCODE("[DEFERRED] Sending deferred ok (gcodeQ=%lu < HIGH=%d, pending=%lu)\r\n",
-                          (unsigned long)q->count, GCODE_QUEUE_HIGH_WATER,
+    // Normal flow: release exactly ONE deferred ok when the gcode queue count
+    // DECREASES (i.e. a slot was genuinely freed by command consumption).
+    //
+    // This is called from many places (top of GCODE_Tasks, motionSegmentCompleted,
+    // etc.), so we must not release an ok just because q->count < HIGH_WATER — that
+    // fires on every call while the queue is below threshold and pumps out surplus OKs.
+    // Tracking prev_count ensures we only release when a slot actually opened up,
+    // giving a strict 1-for-1 ratio: one deferred ok per gcode command consumed.
+    static uint32_t prev_count = 0;
+    uint32_t curr = q->count;
+
+    if (okPendingCount > 0 && curr < prev_count) {
+        DEBUG_PRINT_GCODE("[DEFERRED] Slot freed (gcodeQ %lu→%lu) — sending deferred ok (pending=%lu)\r\n",
+                          (unsigned long)prev_count, (unsigned long)curr,
                           (unsigned long)okPendingCount);
         if (UART_SendOK()) okPendingCount--;
     }
+    prev_count = curr;
 }
 
 /**
