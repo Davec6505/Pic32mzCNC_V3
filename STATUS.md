@@ -7,6 +7,30 @@
 
 ---
 
+## ✅ IMPLEMENTED: G54–G59 Multiple Work Coordinate Systems — Phase 3
+
+**Files**:
+- `incs/gcode/gcode_parser.h` — Added `uint8_t wcs_number` field to `workOffset` union struct (0–5 = G54–G59; sentinel 255 = use current active WCS, i.e. P0)
+- `incs/motion/kinematics.h` — Declared `KINEMATICS_SetActiveWCS(uint8_t)` and `KINEMATICS_GetActiveWCS(void)`
+- `srcs/motion/kinematics.c` — Added `static uint8_t s_active_wcs`; `KINEMATICS_Initialize()` now resets it to 0; new `KINEMATICS_SetActiveWCS()` reads the target slot from NVM via `SETTINGS_GetWorkCoordinateSystem()` and reloads `g_wcs.offset`; new `KINEMATICS_GetActiveWCS()` returns current slot
+- `srcs/gcode/gcode_parser.c` — `G10` block completely rewritten: previously only handled L20 P0/P1 inline; now emits `GCODE_EVENT_SET_WORK_OFFSET` for both L2 and L20, all P0–P6 values, with NaN defaults for unspecified axes
+- `srcs/motion/motion_bridge.c` — Split the old mega-case block (which incorrectly ran probe setup code for ALL modal events including G54–G59/G10) into three separate handlers:
+  - `GCODE_EVENT_SET_WCS` — drains motion, updates `appData->activeWCS`, calls `KINEMATICS_SetActiveWCS()`, invalidates planned position
+  - `GCODE_EVENT_SET_WORK_OFFSET` — drains motion, resolves P0 sentinel → current active WCS, applies L2 (direct offset) or L20 (offset = MachinePos − DesiredWorkPos) math, saves to NVM via `SETTINGS_SetWorkCoordinateSystem()`, conditionally reloads kinematics cache if the active WCS was modified
+  - Remaining modal events (SPINDLE/COOLANT/SET_ABS/REL/TOOL/PROGRAM_END/HOMING) — drain + return true, no probe setup code
+  - Probe (PROBE_TOWARD/PROBE_AWAY) — unchanged probe setup code
+
+**Behaviour**:
+- `G54`–`G59` — switches active WCS; all subsequent moves use the new origin
+- `G10 L2 Pn X Y Z` — directly sets the offset of WCS n (P1=G54 … P6=G59); persisted to NVM flash
+- `G10 L20 Pn X Y Z` — sets offset so that current machine position = specified work position; persisted to NVM flash
+- `P0` in G10 — applies to the currently active WCS (sentinel 255 resolved at event-process time)
+- WCS offset reload in kinematics is instantaneous; next trajectory move uses the new offset
+- `$#` → `[G54:x,y,z]` … `[G59:x,y,z]` report correct stored offsets (existing settings handler)
+- Build: zero warnings/errors — `bins/CNC_V3.hex`
+
+---
+
 ## ✅ IMPLEMENTED: G43 / G43.1 / G49 Tool Length Offset (TLO) — Phase 2
 
 **Files**:

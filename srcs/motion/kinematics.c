@@ -47,6 +47,10 @@ static float g92_offset[NUM_AXIS];
 static float  s_tlo_value  = 0.0f;
 static bool   s_tlo_active = false;
 
+// Active Work Coordinate System index (0=G54 … 5=G59)
+// Loaded from flash into g_wcs at init and whenever KINEMATICS_SetActiveWCS() is called.
+static uint8_t s_active_wcs = 0;
+
 // ─── Initialisation ────────────────────────────────────────────────────────────
 
 void KINEMATICS_Initialize(void)
@@ -55,14 +59,13 @@ void KINEMATICS_Initialize(void)
     memset(g92_offset, 0, sizeof(g92_offset));
     s_tlo_value  = 0.0f;
     s_tlo_active = false;
-
-    // Load default WCS (G54, index 0) from flash settings into g_wcs
+    s_active_wcs = 0;
+    // Load G54 (slot 0) as the default active WCS
     float ox = 0.0f, oy = 0.0f, oz = 0.0f;
     SETTINGS_GetWorkCoordinateSystem(0u, &ox, &oy, &oz);
     g_wcs.offset.coordinate[AXIS_X] = ox;
     g_wcs.offset.coordinate[AXIS_Y] = oy;
     g_wcs.offset.coordinate[AXIS_Z] = oz;
-    // A-axis offset is not stored in flash (3-axis WCS); default 0
     g_wcs.offset.coordinate[AXIS_A] = 0.0f;
 }
 
@@ -193,6 +196,28 @@ void KINEMATICS_SetG92Offset(const float machine[NUM_AXIS],
 void KINEMATICS_ClearG92Offset(void)
 {
     memset(g92_offset, 0, sizeof(g92_offset));
+}
+
+// ─── Active WCS management (G54–G59) ──────────────────────────────────────────────
+//
+// G54=0, G55=1 … G59=5.  Reloading from flash keeps g_wcs consistent with
+// any $10x= writes or G10 commands that may have modified a slot.
+
+void KINEMATICS_SetActiveWCS(uint8_t wcs_number)
+{
+    if (wcs_number > 5u) return;  // Only G54–G59 supported
+    s_active_wcs = wcs_number;
+    float ox = 0.0f, oy = 0.0f, oz = 0.0f;
+    SETTINGS_GetWorkCoordinateSystem(wcs_number, &ox, &oy, &oz);
+    g_wcs.offset.coordinate[AXIS_X] = ox;
+    g_wcs.offset.coordinate[AXIS_Y] = oy;
+    g_wcs.offset.coordinate[AXIS_Z] = oz;
+    g_wcs.offset.coordinate[AXIS_A] = 0.0f;  // A-axis offset not stored (always 0)
+}
+
+uint8_t KINEMATICS_GetActiveWCS(void)
+{
+    return s_active_wcs;
 }
 
 // ─── Tool Length Offset (G43 / G43.1 / G49) ──────────────────────────────────

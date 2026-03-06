@@ -33,6 +33,13 @@ void KINEMATICS_GetActiveWCSOffset(uint8_t activeWCS, float* x_offset, float* y_
 void KINEMATICS_SetG92Offset(const float machine[NUM_AXIS], const float desired_work[NUM_AXIS]);
 void KINEMATICS_ClearG92Offset(void);
 
+// Active Work Coordinate System management (G54–G59).
+// KINEMATICS_SetActiveWCS(n) reloads g_wcs.offset from flash slot n (0=G54…5=G59)
+// so that subsequent WorkToMachine / MachineToWork calls use the new offset.
+// Replaces the cached G54 that was loaded at KINEMATICS_Initialize().
+void KINEMATICS_SetActiveWCS(uint8_t wcs_number);
+uint8_t KINEMATICS_GetActiveWCS(void);
+
 // Tool Length Offset (G43 / G43.1 / G49)
 // Applied to Z-axis only (GRBL standard). Not flash-backed — cleared on soft reset.
 // KINEMATICS_SetTLO activates and stores the offset value (replaces any prior value).

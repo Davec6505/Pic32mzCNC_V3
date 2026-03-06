@@ -587,18 +587,91 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             DEBUG_PRINT_MOTION("[TLO] G49 cancelled\r\n");
             return true;
 
+        case GCODE_EVENT_SET_WCS: {
+            // G54–G59: switch active work coordinate system.
+            // Wait for in-flight motion to complete so the coordinate change
+            // takes effect at the exact correct point in the command stream.
+            if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) {
+                return false;  // Still executing — retry next iteration
+            }
+            uint8_t new_wcs = event->data.setWCS.wcs_number;  // 0=G54 … 5=G59
+            if (new_wcs > 5u) new_wcs = 0u;
+            appData->activeWCS = new_wcs;
+            KINEMATICS_SetActiveWCS(new_wcs);
+            // Coordinate space just changed → reanchor planned position so the
+            // next queued move uses the new origin (not a stale machine-space value
+            // that would map to the wrong work position in the new WCS).
+            s_planned_position_valid = false;
+            DEBUG_PRINT_MOTION("[WCS] G%d active (slot %u)\r\n", 54 + new_wcs, (unsigned)new_wcs);
+            return true;
+        }
+
+        case GCODE_EVENT_SET_WORK_OFFSET: {
+            // G10 L2 Pn  — set WCS offset directly from parameter values
+            // G10 L20 Pn — set WCS offset such that current machine pos = given work pos
+            // Wait for motion to idle first (ensures MPos is stable for L20).
+            if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) {
+                return false;
+            }
+            // Resolve target WCS slot: sentinel 255 → active WCS
+            uint8_t slot = event->data.workOffset.wcs_number;
+            if (slot == 255u || slot > 5u) slot = appData->activeWCS;
+
+            float ox = 0.0f, oy = 0.0f, oz = 0.0f;
+            SETTINGS_GetWorkCoordinateSystem(slot, &ox, &oy, &oz);  // current stored offsets
+
+            if (event->data.workOffset.l_value == 2u) {
+                // G10 L2: parameter values ARE the new offsets directly
+                if (!isnan(event->data.workOffset.x)) ox = event->data.workOffset.x;
+                if (!isnan(event->data.workOffset.y)) oy = event->data.workOffset.y;
+                if (!isnan(event->data.workOffset.z)) oz = event->data.workOffset.z;
+            } else {
+                // G10 L20: offset = MachinePos - DesiredWorkPos
+                CoordinatePoint mpos = KINEMATICS_GetCurrentPosition();
+                if (!isnan(event->data.workOffset.x))
+                    ox = mpos.coordinate[AXIS_X] - event->data.workOffset.x;
+                if (!isnan(event->data.workOffset.y))
+                    oy = mpos.coordinate[AXIS_Y] - event->data.workOffset.y;
+                if (!isnan(event->data.workOffset.z))
+                    oz = mpos.coordinate[AXIS_Z] - event->data.workOffset.z;
+            }
+
+            // Persist to flash
+            SETTINGS_SetWorkCoordinateSystem(slot, ox, oy, oz);
+
+            // If the modified slot is currently active, reload kinematics cache
+            if (slot == appData->activeWCS) {
+                KINEMATICS_SetActiveWCS(slot);
+                s_planned_position_valid = false;  // coordinate space changed
+            }
+
+            DEBUG_PRINT_MOTION("[WCS] G10 L%lu P%u (G%d) offset=(%.3f,%.3f,%.3f)\r\n",
+                (unsigned long)event->data.workOffset.l_value,
+                (unsigned)slot, 54 + slot, (double)ox, (double)oy, (double)oz);
+            return true;
+        }
+
+        // ── Purely modal — parser already applied these, no physical effect.
+        // Consume immediately without stalling the queue.
+        case GCODE_EVENT_SET_ABSOLUTE:
+        case GCODE_EVENT_SET_RELATIVE:
+        case GCODE_EVENT_SET_SPINDLE_SPEED:
+        case GCODE_EVENT_SET_TOOL:
+            return true;
+
+        // ── Sequenced modal — spindle/coolant/program-end/homing must take
+        // effect at the exact point in the command stream, after prior motion.
         case GCODE_EVENT_SPINDLE_ON:
         case GCODE_EVENT_SPINDLE_OFF:
         case GCODE_EVENT_COOLANT_ON:
         case GCODE_EVENT_COOLANT_OFF:
-        case GCODE_EVENT_SET_SPINDLE_SPEED:
-        case GCODE_EVENT_SET_ABSOLUTE:
-        case GCODE_EVENT_SET_RELATIVE:
-        case GCODE_EVENT_SET_WORK_OFFSET:
-        case GCODE_EVENT_SET_WCS:
-        case GCODE_EVENT_SET_TOOL:
         case GCODE_EVENT_PROGRAM_END:
         case GCODE_EVENT_HOMING:
+            if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) {
+                return false;  // Still executing — retry next iteration
+            }
+            return true;
+
         case GCODE_EVENT_PROBE_TOWARD:
         case GCODE_EVENT_PROBE_AWAY:
         {

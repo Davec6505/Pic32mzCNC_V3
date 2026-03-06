@@ -92,7 +92,8 @@ typedef struct {
         
         struct {
             float x, y, z, a;       // Work offset coordinates (G92 or G10)
-            uint32_t l_value;       // L parameter (2 or 20 for G10)
+            uint32_t l_value;        // L parameter (2 or 20 for G10)
+            uint8_t  wcs_number;     // Target WCS: 0-5 = G54-G59; 255 = use current active (P0)
         } workOffset;
         
         struct {

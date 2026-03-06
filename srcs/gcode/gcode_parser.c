@@ -419,40 +419,43 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         }
 
         if (gnum == 10) {
+            // G10 L2  Pn X# Y# Z# — set WCS offset directly (offset IS the value)
+            // G10 L20 Pn X# Y# Z# — set WCS so current machine pos = given work pos
+            // P0 = active WCS; P1–P6 = G54–G59 respectively
             char* pP = find_char((char*)cmd, 'P');
             char* pL = find_char((char*)cmd, 'L');
             int p_val = pP ? (int)strtol(pP + 1, NULL, 10) : 0;
             int l_val = pL ? (int)strtol(pL + 1, NULL, 10) : 0;
-            if (l_val == 20) {
-                if (p_val == 0 || p_val == 1) {
-                    StepperPosition* pos = STEPPER_GetPosition();
-                    WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-                    const float unit_scale = unitsInches ? 25.4f : 1.0f;
-                    
-                    // Array-based axis parameter parsing with loop
-                    float desired[NUM_AXIS];
-                    float mpos[NUM_AXIS];
-                    
-                    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-                        char* pAxis = find_char((char*)cmd, axis_letters[axis]);
-                        desired[axis] = pAxis ? (parse_float_after(pAxis) * unit_scale) : NAN;
-                        mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
-                    }
-                    
-                    // Set WCS offset (only X, Y, Z supported)
-                    for (E_AXIS axis = AXIS_X; axis < AXIS_Z + 1; axis++) {
-                        if (!isnan(desired[axis])) {
-                            SET_COORDINATE_AXIS(&wcs->offset, axis, mpos[axis] - desired[axis]);
-                        }
-                    }
-                    
-                    return true;
-                } else {
-                    return true;
+            if (l_val != 2 && l_val != 20) return true;  // Unsupported L — silently consume
+
+            const float unit_scale = unitsInches ? 25.4f : 1.0f;
+            ev->type = GCODE_EVENT_SET_WORK_OFFSET;
+            ev->data.workOffset.l_value    = (uint32_t)l_val;
+            // P0 → sentinel 255 = "resolve to active WCS at event-handle time"
+            // P1–P6 → G54–G59 (wcs_number = p_val - 1)
+            ev->data.workOffset.wcs_number = (p_val == 0) ? 255u
+                : ((p_val >= 1 && p_val <= 6) ? (uint8_t)(p_val - 1) : 255u);
+
+            ev->data.workOffset.x = NAN;
+            ev->data.workOffset.y = NAN;
+            ev->data.workOffset.z = NAN;
+            ev->data.workOffset.a = NAN;
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                char* pAxis = find_char((char*)cmd, axis_letters[axis]);
+                float v = pAxis ? (parse_float_after(pAxis) * unit_scale) : NAN;
+                switch (axis) {
+                    case AXIS_X: ev->data.workOffset.x = v; break;
+                    case AXIS_Y: ev->data.workOffset.y = v; break;
+                    case AXIS_Z: ev->data.workOffset.z = v; break;
+                    case AXIS_A: ev->data.workOffset.a = v; break;
+                    default: break;
                 }
-            } else {
-                return true;
             }
+            DEBUG_PRINT_GCODE("[PARSE] G10 L%d P%d wcs=%u x=%.3f y=%.3f z=%.3f\r\n",
+                l_val, p_val, (unsigned)ev->data.workOffset.wcs_number,
+                (double)ev->data.workOffset.x, (double)ev->data.workOffset.y,
+                (double)ev->data.workOffset.z);
+            return true;
         }
 
         // G38.2, G38.3, G38.4, G38.5 - Probe commands
