@@ -72,6 +72,71 @@ static bool            s_planned_position_valid = false;
 static bool     s_dwell_active    = false;
 static uint32_t s_dwell_end_ticks = 0;
 
+// ─── Canned Cycle State (G81 / G83) ──────────────────────────────────────────
+// Implemented as a static state machine inside MOTION_ProcessGcodeEvent.
+// Each phase returns false (retry) until the phase's move completes, then
+// advances.  Final retract returns true to consume the event from the queue.
+typedef enum {
+    CC_IDLE        = 0,
+    CC_RAPID_XY    = 1,   // Rapid to hole XY
+    CC_RAPID_R     = 2,   // Rapid to R-plane
+    CC_FEED_TO     = 3,   // Feed to current peck depth (or Z bottom for G81)
+    CC_PECK_LIFT   = 4,   // G83: rapid retract to R-plane between pecks
+    CC_PECK_PLUNGE = 5,   // G83: rapid from R to just above previous peck
+    CC_RETRACT     = 6,   // Rapid to retract height (G98=initial Z, G99=R)
+} CannedPhase;
+
+static CannedPhase s_cc_phase       = CC_IDLE;
+static bool        s_cc_is_peck     = false;  // true = G83, false = G81
+static float       s_cc_x           = 0.0f;   // Current hole X (work, absolute)
+static float       s_cc_y           = 0.0f;   // Current hole Y (work, absolute)
+static float       s_cc_z           = 0.0f;   // Drill bottom Z (work, absolute)
+static float       s_cc_r           = 0.0f;   // R-plane Z (work, absolute)
+static float       s_cc_q           = 0.0f;   // Peck increment (positive mm)
+static float       s_cc_feedrate    = 0.0f;   // Drill feedrate (mm/min)
+static float       s_cc_initial_z   = 0.0f;   // Work Z at cycle start (G98 target)
+static float       s_cc_peck_depth  = 0.0f;   // Next peck target Z
+static float       s_cc_prev_depth  = 0.0f;   // Previous peck Z (for plunge clearance)
+static uint32_t    s_cc_holes_left  = 0u;     // Remaining hole count
+static bool        s_cc_g98         = true;   // true=G98 (initial Z), false=G99 (R)
+static float       s_cc_dx          = 0.0f;   // X increment per hole (G91 mode)
+static float       s_cc_dy          = 0.0f;   // Y increment per hole (G91 mode)
+
+// Queue one work-space move and kick the interpolator if idle.
+// Returns false if the trajectory queue is too full to accept the move (caller
+// retries next iteration after MOTION_Tasks() drains a slot).
+static bool cc_add_move_work(float wx, float wy, float wz, float feedrate)
+{
+    if (TRAJECTORY_QueueCount() >= (uint32_t)(TRAJ_QUEUE_SIZE - 2)) return false;
+    CoordinatePoint start_m = KINEMATICS_GetCurrentPosition();
+    CoordinatePoint start_w = KINEMATICS_MachineToWork(start_m);
+    CoordinatePoint end_w;
+    end_w.coordinate[AXIS_X] = wx;
+    end_w.coordinate[AXIS_Y] = wy;
+    end_w.coordinate[AXIS_Z] = wz;
+    end_w.coordinate[AXIS_A] = start_w.coordinate[AXIS_A];  // A unchanged
+    CoordinatePoint end_m = KINEMATICS_WorkToMachine(end_w);
+    TRAJECTORY_AddMove(start_m, end_m, feedrate, 0.0f, 0.0f);
+    TRAJECTORY_Recalculate();
+    if (!INTERPOLATOR_IsActive()) {
+        SCurveMove mv;
+        if (TRAJECTORY_GetNextMove(&mv)) {
+            STEPPERS_Enable();
+            INTERPOLATOR_LoadMove(&mv);
+        }
+    }
+    return true;
+}
+
+// Most-restrictive XYZ rapid feedrate from settings.
+static float cc_rapid_fr(const CNC_Settings *s)
+{
+    float fr = s->max_rate[AXIS_X];
+    if (s->max_rate[AXIS_Y] < fr) fr = s->max_rate[AXIS_Y];
+    if (s->max_rate[AXIS_Z] < fr) fr = s->max_rate[AXIS_Z];
+    return fr;
+}
+
 // ─── STEPPER API bridges ──────────────────────────────────────────────────────
 
 void STEPPER_Initialize(APP_DATA *appData)
@@ -87,6 +152,8 @@ void STEPPER_Initialize(APP_DATA *appData)
     appData->gcodeCommandQueue.maxMotionSegments = TRAJ_QUEUE_SIZE;
     s_dwell_active    = false;  // Cancel any in-progress dwell on init/reset
     s_dwell_end_ticks = 0;
+    s_cc_phase        = CC_IDLE;  // Cancel any in-progress canned cycle on soft reset
+    s_cc_holes_left   = 0u;
     TRAJECTORY_Initialize();
     INTERPOLATOR_Initialize();
 }
@@ -742,6 +809,177 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
                 appData->probeAlarmOnFail);
 
             return true;
+        }
+
+        case GCODE_EVENT_CANNED_CANCEL:
+            // G80 — cancel any armed canned cycle.  Immediate; no drain needed.
+            s_cc_phase = CC_IDLE;
+            DEBUG_PRINT_MOTION("[CANNED] G80 cancelled\r\n");
+            return true;
+
+        case GCODE_EVENT_CANNED_DRILL:
+        case GCODE_EVENT_CANNED_PECK:
+        {
+            // ── Phase 0: latch parameters on fresh entry ──────────────────────
+            if (s_cc_phase == CC_IDLE) {
+                // Drain before starting — ensures MPos is stable for G98 latch.
+                if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) return false;
+
+                s_cc_is_peck  = (event->type == GCODE_EVENT_CANNED_PECK);
+                s_cc_g98      = event->data.cannedDrill.g98;
+                s_cc_holes_left = event->data.cannedDrill.l;
+                if (s_cc_holes_left == 0u) s_cc_holes_left = 1u;
+
+                // Resolve feedrate (must be positive; fallback to modal then 100)
+                s_cc_feedrate = event->data.cannedDrill.feedrate;
+                if (s_cc_feedrate < 1.0f && s_modal_feedrate_mm_min >= 1.0f)
+                    s_cc_feedrate = s_modal_feedrate_mm_min;
+                if (s_cc_feedrate < 1.0f) s_cc_feedrate = 100.0f;
+
+                // Current work position for relative-mode resolution and G98 latch
+                CoordinatePoint cur_m = KINEMATICS_GetCurrentPosition();
+                CoordinatePoint cur_w = KINEMATICS_MachineToWork(cur_m);
+                s_cc_initial_z = cur_w.coordinate[AXIS_Z];  // G98 retract target
+
+                float ev_x = event->data.cannedDrill.x;
+                float ev_y = event->data.cannedDrill.y;
+
+                if (appData->absoluteMode) {
+                    // G90: X/Y are absolute work positions of the first hole
+                    s_cc_x  = isnan(ev_x) ? cur_w.coordinate[AXIS_X] : ev_x;
+                    s_cc_y  = isnan(ev_y) ? cur_w.coordinate[AXIS_Y] : ev_y;
+                    s_cc_z  = event->data.cannedDrill.z;
+                    s_cc_r  = event->data.cannedDrill.r;
+                    s_cc_dx = 0.0f;
+                    s_cc_dy = 0.0f;
+                } else {
+                    // G91: X/Y are per-hole increments; Z/R relative to current Z
+                    s_cc_dx = isnan(ev_x) ? 0.0f : ev_x;
+                    s_cc_dy = isnan(ev_y) ? 0.0f : ev_y;
+                    s_cc_x  = cur_w.coordinate[AXIS_X] + s_cc_dx;
+                    s_cc_y  = cur_w.coordinate[AXIS_Y] + s_cc_dy;
+                    s_cc_z  = cur_w.coordinate[AXIS_Z] + event->data.cannedDrill.z;
+                    s_cc_r  = cur_w.coordinate[AXIS_Z] + event->data.cannedDrill.r;
+                }
+
+                // G83 peck increment — must be > 0; clamp to full depth if absent
+                float total_depth = fabsf(s_cc_z - s_cc_r);
+                s_cc_q = (s_cc_is_peck && event->data.cannedDrill.q > 0.001f)
+                         ? event->data.cannedDrill.q : total_depth;
+                if (s_cc_q < 0.001f) s_cc_q = total_depth;
+
+                // Initialise peck tracker at R (first step computed in CC_RAPID_R)
+                s_cc_peck_depth = s_cc_r;
+                s_cc_prev_depth = s_cc_r;
+
+                s_cc_phase = CC_RAPID_XY;
+                s_planned_position_valid = false;  // canned cycle uses GetCurrentPosition
+
+                DEBUG_PRINT_MOTION("[CANNED] G8%d start holes=%lu z=%.2f r=%.2f q=%.2f fr=%.1f\r\n",
+                    s_cc_is_peck ? 3 : 1, (unsigned long)s_cc_holes_left,
+                    (double)s_cc_z, (double)s_cc_r,
+                    (double)s_cc_q, (double)s_cc_feedrate);
+            }
+
+            // ── Main state machine — always drain between phases ───────────────
+            if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) return false;
+
+            switch (s_cc_phase) {
+
+                case CC_RAPID_XY: {
+                    // Rapid to XY of current hole (Z unchanged)
+                    CoordinatePoint cur_m = KINEMATICS_GetCurrentPosition();
+                    CoordinatePoint cur_w = KINEMATICS_MachineToWork(cur_m);
+                    if (!cc_add_move_work(s_cc_x, s_cc_y, cur_w.coordinate[AXIS_Z],
+                                         cc_rapid_fr(s)))
+                        return false;
+                    s_cc_phase = CC_RAPID_R;
+                    return false;
+                }
+
+                case CC_RAPID_R: {
+                    // Rapid to R-plane
+                    if (!cc_add_move_work(s_cc_x, s_cc_y, s_cc_r, cc_rapid_fr(s)))
+                        return false;
+                    // Compute first peck target (or full depth for G81)
+                    if (s_cc_is_peck) {
+                        float dir = (s_cc_z < s_cc_r) ? -1.0f : 1.0f;
+                        s_cc_peck_depth = s_cc_r + dir * s_cc_q;
+                        // Clamp to drill bottom
+                        if (dir < 0.0f && s_cc_peck_depth < s_cc_z) s_cc_peck_depth = s_cc_z;
+                        if (dir > 0.0f && s_cc_peck_depth > s_cc_z) s_cc_peck_depth = s_cc_z;
+                        s_cc_prev_depth = s_cc_r;
+                    }
+                    s_cc_phase = CC_FEED_TO;
+                    return false;
+                }
+
+                case CC_FEED_TO: {
+                    // Feed to current peck depth (G83) or drill bottom (G81)
+                    float target_z = s_cc_is_peck ? s_cc_peck_depth : s_cc_z;
+                    if (!cc_add_move_work(s_cc_x, s_cc_y, target_z, s_cc_feedrate))
+                        return false;
+                    // At full depth → retract; otherwise lift for next peck
+                    bool at_bottom = fabsf(target_z - s_cc_z) < 0.001f;
+                    s_cc_phase = at_bottom ? CC_RETRACT : CC_PECK_LIFT;
+                    return false;
+                }
+
+                case CC_PECK_LIFT: {
+                    // G83: rapid clear back to R-plane between pecks
+                    if (!cc_add_move_work(s_cc_x, s_cc_y, s_cc_r, cc_rapid_fr(s)))
+                        return false;
+                    // Advance peck depth by Q toward Z
+                    s_cc_prev_depth = s_cc_peck_depth;
+                    float dir = (s_cc_z < s_cc_r) ? -1.0f : 1.0f;
+                    s_cc_peck_depth += dir * s_cc_q;
+                    if (dir < 0.0f && s_cc_peck_depth < s_cc_z) s_cc_peck_depth = s_cc_z;
+                    if (dir > 0.0f && s_cc_peck_depth > s_cc_z) s_cc_peck_depth = s_cc_z;
+                    s_cc_phase = CC_PECK_PLUNGE;
+                    return false;
+                }
+
+                case CC_PECK_PLUNGE: {
+                    // G83: rapid from R to 0.5 mm above previous peck depth
+                    float dir = (s_cc_z < s_cc_r) ? 1.0f : -1.0f;  // opposite to drill dir
+                    float resume_z = s_cc_prev_depth + dir * 0.5f;
+                    if (!cc_add_move_work(s_cc_x, s_cc_y, resume_z, cc_rapid_fr(s)))
+                        return false;
+                    s_cc_phase = CC_FEED_TO;
+                    return false;
+                }
+
+                case CC_RETRACT: {
+                    // Rapid to G98 (initial Z) or G99 (R-plane)
+                    float retract_z = s_cc_g98 ? s_cc_initial_z : s_cc_r;
+                    if (!cc_add_move_work(s_cc_x, s_cc_y, retract_z, cc_rapid_fr(s)))
+                        return false;
+
+                    s_cc_holes_left--;
+                    if (s_cc_holes_left > 0u) {
+                        // Advance to next hole (G91 increment; zero for G90)
+                        s_cc_x += s_cc_dx;
+                        s_cc_y += s_cc_dy;
+                        // Reset peck state for the new hole
+                        s_cc_peck_depth = s_cc_r;
+                        s_cc_prev_depth = s_cc_r;
+                        s_cc_phase = CC_RAPID_XY;
+                        return false;
+                    }
+
+                    // All holes complete — consume the event
+                    s_cc_phase = CC_IDLE;
+                    // Re-anchor planned position from step counter
+                    s_planned_position       = KINEMATICS_GetCurrentPosition();
+                    s_planned_position_valid = true;
+                    DEBUG_PRINT_MOTION("[CANNED] cycle complete\r\n");
+                    return true;
+                }
+
+                default:
+                    s_cc_phase = CC_IDLE;
+                    return true;
+            }
         }
 
         case GCODE_EVENT_DWELL: {

@@ -7,6 +7,37 @@
 
 ---
 
+## ✅ IMPLEMENTED: G81/G83 Canned Drilling Cycles — Phase 4
+
+**Files**:
+- `incs/gcode/gcode_parser.h` — Added `GCODE_EVENT_CANNED_DRILL`, `GCODE_EVENT_CANNED_PECK`, `GCODE_EVENT_CANNED_CANCEL` to `GCODE_EventType` enum; added `cannedDrill` struct to `GCODE_Event` union (`x y z r q feedrate l g98`)
+- `srcs/gcode/gcode_parser.c` — Added `static bool s_canned_g98` modal flag; G98/G99 parsing (immediate modal, no event); G80 → `GCODE_EVENT_CANNED_CANCEL`; G81 → `GCODE_EVENT_CANNED_DRILL`; G83 → `GCODE_EVENT_CANNED_PECK`; G33 stub → `error:2` (blocked, no spindle encoder); all parse `X Y Z R Q F L` with unit scaling
+- `srcs/motion/motion_bridge.c` — Added `CannedPhase` enum, 12 static state variables, `cc_add_move_work()` helper, `cc_rapid_fr()` helper; `GCODE_EVENT_CANNED_CANCEL` immediate consume; `GCODE_EVENT_CANNED_DRILL/PECK` 6-phase state machine (RAPID_XY → RAPID_R → FEED_TO → [PECK_LIFT → PECK_PLUNGE →] RETRACT); canned cycle state reset in `STEPPER_Initialize()` on soft reset
+
+**Architecture** — dwell pattern (not arc pattern):
+- Event stays in queue (`return false`) while cycle executes across many iterations
+- Each phase: drain check → issue one move → advance phase → return false
+- No `APP_DATA` or `app.c` changes required
+
+**G81 phase sequence per hole**:
+`RAPID_XY → RAPID_R → FEED_TO(Z) → RETRACT(G98/G99)` × L holes
+
+**G83 phase sequence per hole**:
+`RAPID_XY → RAPID_R → [FEED_TO(peck) → PECK_LIFT → PECK_PLUNGE] × pecks → FEED_TO(Z) → RETRACT` × L holes
+
+**Behaviour**:
+- `G98` / `G99` — modal, sets retract mode (initial Z / R-plane); persists across lines
+- `G80` — cancels armed cycle immediately (no drain)
+- `G81 X Y Z R F` — simple drill; L-word optional (default 1)
+- `G83 X Y Z R Q F` — peck drill; Q = peck increment (positive mm); 0.5mm rapid-plunge clearance above previous depth
+- `G90` — X/Y are absolute hole positions; Z/R absolute
+- `G91` — X/Y are per-hole increments applied from current position; Z/R relative to current Z; L>1 drills L holes spaced by X/Y increment
+- `G33` — replies `error:2` (rigid tapping deferred to Phase 5, needs spindle encoder)
+- Soft reset (`Ctrl+X`) cancels any in-progress canned cycle via `STEPPER_Initialize()`
+- Build: zero warnings/errors — `bins/CNC_V3.hex`
+
+---
+
 ## ✅ IMPLEMENTED: G54–G59 Multiple Work Coordinate Systems — Phase 3
 
 **Files**:

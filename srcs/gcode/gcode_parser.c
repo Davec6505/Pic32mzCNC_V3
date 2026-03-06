@@ -94,7 +94,8 @@ static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
 // g_feed_hold_active is in stepper.h (defined in stepper.c) — global, gated in app.c APP_IDLE
 static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
-static bool unitsInches = false;            /* false=mm (G21), true=inches (G20) */
+static bool unitsInches  = false;           /* false=mm (G21), true=inches (G20) */
+static bool s_canned_g98 = true;            /* true=G98 (return initial Z), false=G99 (return R) */
 
 /* ✅ REMOVED: Startup deferral variables (caused UGS stalling) */
 
@@ -377,9 +378,13 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         DEBUG_PRINT_GCODE("[PARSE] G-code detected: gnum=%d\r\n", gnum);
 
         // G20/G21 - Units (handled internally, no event needed)
-        if (gnum == 20) { unitsInches = true; ev->type = GCODE_EVENT_NONE; return true; }
+        if (gnum == 20) { unitsInches = true;  ev->type = GCODE_EVENT_NONE; return true; }
         if (gnum == 21) { unitsInches = false; ev->type = GCODE_EVENT_NONE; return true; }
-        
+
+        // G98/G99 - Canned cycle return mode (modal, no event)
+        if (gnum == 98) { s_canned_g98 = true;  ev->type = GCODE_EVENT_NONE; return true; }
+        if (gnum == 99) { s_canned_g98 = false; ev->type = GCODE_EVENT_NONE; return true; }
+
         // G90/G91 - Positioning mode
         if (gnum == 90) { ev->type = GCODE_EVENT_SET_ABSOLUTE; return true; }
         if (gnum == 91) { ev->type = GCODE_EVENT_SET_RELATIVE; return true; }
@@ -540,6 +545,64 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             ev->type = GCODE_EVENT_TLO_CANCEL;
             DEBUG_PRINT_GCODE("[PARSE] G49 TLO cancel\r\n");
             return true;
+        }
+
+        // G80 - Cancel active canned cycle
+        if (gnum == 80) {
+            ev->type = GCODE_EVENT_CANNED_CANCEL;
+            DEBUG_PRINT_GCODE("[PARSE] G80 canned cancel\r\n");
+            return true;
+        }
+
+        // G81 - Simple drill cycle: rapid to X/Y, rapid to R, feed to Z, rapid out
+        // G83 - Peck drill cycle: same approach but depth in Q increments with retract between
+        if (gnum == 81 || gnum == 83) {
+            const float unit_scale = unitsInches ? 25.4f : 1.0f;
+
+            char* pX = find_char((char*)cmd, 'X');
+            char* pY = find_char((char*)cmd, 'Y');
+            char* pZ = find_char((char*)cmd, 'Z');
+            char* pR = find_char((char*)cmd, 'R');
+            char* pQ = find_char((char*)cmd, 'Q');
+            char* pF = find_char((char*)cmd, 'F');
+            char* pL = find_char((char*)cmd, 'L');
+
+            // Z and R are required; reject silently if missing
+            if (!pZ || !pR) {
+                DEBUG_PRINT_GCODE("[PARSE] G8%d missing Z or R — ignored\r\n", gnum == 81 ? 1 : 3);
+                return false;
+            }
+
+            ev->type = (gnum == 81) ? GCODE_EVENT_CANNED_DRILL : GCODE_EVENT_CANNED_PECK;
+
+            ev->data.cannedDrill.x        = pX ? (parse_float_after(pX) * unit_scale) : NAN;
+            ev->data.cannedDrill.y        = pY ? (parse_float_after(pY) * unit_scale) : NAN;
+            ev->data.cannedDrill.z        = parse_float_after(pZ) * unit_scale;
+            ev->data.cannedDrill.r        = parse_float_after(pR) * unit_scale;
+            ev->data.cannedDrill.q        = pQ ? (parse_float_after(pQ) * unit_scale) : 0.0f;
+            ev->data.cannedDrill.feedrate = pF ? (parse_float_after(pF) * unit_scale) : 0.0f;
+            // L0 or L absent → treat as L1 (one hole), GRBL convention
+            uint32_t l_raw = pL ? (uint32_t)strtol(pL + 1, NULL, 10) : 1u;
+            ev->data.cannedDrill.l        = (l_raw == 0u) ? 1u : l_raw;
+            ev->data.cannedDrill.g98      = s_canned_g98;
+
+            DEBUG_PRINT_GCODE("[PARSE] G%d X=%.2f Y=%.2f Z=%.2f R=%.2f Q=%.2f F=%.1f L=%lu G%s\r\n",
+                gnum,
+                (double)ev->data.cannedDrill.x, (double)ev->data.cannedDrill.y,
+                (double)ev->data.cannedDrill.z, (double)ev->data.cannedDrill.r,
+                (double)ev->data.cannedDrill.q, (double)ev->data.cannedDrill.feedrate,
+                (unsigned long)ev->data.cannedDrill.l,
+                s_canned_g98 ? "98" : "99");
+            return true;
+        }
+
+        // G33 - Spindle-synchronised motion (rigid tapping precursor)
+        // Blocked until spindle encoder feedback is available (Phase 5).
+        if (gnum == 33) {
+            UART_Printf("error:2\r\n");  // unsupported command
+            DEBUG_PRINT_GCODE("[PARSE] G33 unsupported (no spindle encoder)\r\n");
+            ev->type = GCODE_EVENT_NONE;
+            return true;  // consume to avoid infinite replay
         }
 
         if (gnum == 0 || gnum == 1) {

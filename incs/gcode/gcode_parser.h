@@ -51,7 +51,10 @@ typedef enum {
     GCODE_EVENT_PROBE_TOWARD,       // G38.2, G38.3 - Probe toward workpiece
     GCODE_EVENT_PROBE_AWAY,         // G38.4, G38.5 - Probe away from workpiece
     GCODE_EVENT_TLO_SET,            // G43, G43.1   - Activate tool length offset
-    GCODE_EVENT_TLO_CANCEL          // G49           - Cancel tool length offset
+    GCODE_EVENT_TLO_CANCEL,         // G49           - Cancel tool length offset
+    GCODE_EVENT_CANNED_DRILL,       // G81           - Simple drill cycle
+    GCODE_EVENT_CANNED_PECK,        // G83           - Peck drilling cycle
+    GCODE_EVENT_CANNED_CANCEL       // G80           - Cancel canned cycle
 } GCODE_EventType;
 
 typedef struct {
@@ -115,6 +118,16 @@ typedef struct {
             bool alarm_on_fail;     // true for G38.2/G38.4, false for G38.3/G38.5
             bool probe_toward;      // true = toward (G38.2/G38.3), false = away (G38.4/G38.5)
         } probe;
+
+        struct {
+            float x, y;         // Hole position (work coords)
+            float z;            // Drill depth (work coord, typically negative)
+            float r;            // R-plane: rapid-to clearance height (work coord)
+            float q;            // G83 only: peck increment (positive, mm)
+            float feedrate;     // Drill feedrate (mm/min)
+            uint32_t l;         // Repeat count (0 or 1 = one hole, >1 = multiple)
+            bool g98;           // true = retract to initial Z (G98), false = retract to R (G99)
+        } cannedDrill;
     } data;
 } GCODE_Event;
 
