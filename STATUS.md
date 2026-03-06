@@ -38,6 +38,64 @@
 
 ---
 
+## 🔲 PLANNED: Manual Jog Control — Phase 5
+
+### Phase 5a — Software Jog (`$J=` + `0x85` cancel) ← IMPLEMENT NEXT
+
+**Goal**: Enable UGS jog buttons, jog-wheel in UGS, and any PC-side pendant without hardware changes.
+
+**Scope**:
+- Parse `$J=G91 X1 F500` / `$J=G90 X10 Y10 F1000` in the `$`-command handler
+- Valid modals inside `$J=`: G90/G91 (position mode), G20/G21 (units), axis words + F only — anything else → `error:4`
+- Emit `GCODE_EVENT_JOG` (new event type) which reuses `linearMove` union struct but carries an `is_jog` flag
+- Motion bridge: jog move bypasses look-ahead planner (no junction planning across jog boundaries), goes direct to `TRAJECTORY_AddMove()`; `is_jog` flag stored on segment so the queue drains cleanly without waiting for preceding G-code moves
+- Real-time cancel byte `0x85` — flush jog-only segments from the trajectory queue, leave any non-jog segments intact, return to IDLE without raising ALARM (distinct from feed hold `!` and soft reset `Ctrl+X`)
+- Status report: reports `<Jog|MPos:...>` while jog segment executing (GRBL v1.1 compliant)
+
+**Architecture notes**:
+- `0x85` must be caught in the real-time character handler before line buffering, same priority as `?`, `!`, `~`, `0x18`
+- Motion queue flush: iterate queue tail→head, discard segments with `is_jog == true`, stop at first non-jog segment; call `STEPPER_StopMotion()` if queue becomes empty
+- `$J=` is NOT added to the G-code command queue — parsed and emitted directly, no `ok` response (GRBL v1.1 behaviour: jog commands DO get `ok` on acceptance, cancel gets no response)
+- Unit scaling: respect current modal units (G20/G21) and distance mode (G90/G91)
+
+**Files to modify**:
+- `incs/gcode/gcode_parser.h` — add `GCODE_EVENT_JOG`; add `bool is_jog` to `linearMove` struct (or reuse with flag)
+- `srcs/gcode/gcode_parser.c` — `$J=` branch in query handler; `0x85` in real-time char handler
+- `srcs/motion/motion_bridge.c` — `GCODE_EVENT_JOG` case; `0x85` flush logic
+- `incs/data_structures.h` / `MotionSegment` — add `bool is_jog` field to segment
+
+**Test sequence (UGS)**:
+```
+$J=G91X1F500      → jog 1mm +X, ok
+$J=G91X-1F500     → jog 1mm -X, ok
+$J=G90X0Y0F1000   → jog to origin, ok
+0x85              → cancel in-progress jog (no response)
+```
+
+---
+
+### Phase 5b — Hardware Pendant (PS2 Serial) ← TO BE DESIGNED
+
+**Hardware decision**: PS2 game controller via serial (UART or bit-bang PS2 protocol) — TBD after Phase 5a validated.
+
+**Likely architecture**:
+- PS2 controller polled at ~50Hz from `APP_IDLE` (rate-limited, non-blocking)
+- Axis buttons / D-pad → generate internal `$J=` equivalent jog events directly (bypasses UART parser)
+- Analogue sticks → variable feedrate jog (stick deflection maps to feedrate %, jog distance per poll period)
+- Dedicated buttons: feed hold, cycle start, soft reset, zero WCS, spindle on/off
+- Separate PS2 driver module: `srcs/pendant/ps2_pendant.c` + `incs/pendant/ps2_pendant.h`
+- Pendant active only when machine is IDLE or JOG state — ignored during file streaming
+
+**Hardware interface options** (decide before Phase 5b):
+1. PS2 hardware protocol (clock/data GPIO + bit-bang or SPI) — lowest latency
+2. PS2 → USB adapter → PIC32 USB host (complex, requires USB OTG hardware)
+3. PS2 → UART adapter board — simplest firmware integration
+4. Bluetooth PS2 controller → UART module — wireless option
+
+**Design discussion deferred until Phase 5a is complete and hardware is confirmed.**
+
+---
+
 ## ✅ IMPLEMENTED: G54–G59 Multiple Work Coordinate Systems — Phase 3
 
 **Files**:
