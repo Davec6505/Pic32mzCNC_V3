@@ -42,12 +42,19 @@ static WorkCoordinateSystem g_wcs;
 // G92 temporary offset (machine coordinates, not flash-backed)
 static float g92_offset[NUM_AXIS];
 
+// Tool Length Offset — active value in mm, applied to Z only (GRBL G43/G49 semantics)
+// Not flash-backed; cleared on soft reset via KINEMATICS_ClearTLO().
+static float  s_tlo_value  = 0.0f;
+static bool   s_tlo_active = false;
+
 // ─── Initialisation ────────────────────────────────────────────────────────────
 
 void KINEMATICS_Initialize(void)
 {
     memset(&g_wcs, 0, sizeof(g_wcs));
     memset(g92_offset, 0, sizeof(g92_offset));
+    s_tlo_value  = 0.0f;
+    s_tlo_active = false;
 
     // Load default WCS (G54, index 0) from flash settings into g_wcs
     float ox = 0.0f, oy = 0.0f, oz = 0.0f;
@@ -71,6 +78,9 @@ CoordinatePoint KINEMATICS_WorkToMachine(CoordinatePoint work_pos)
                                + g_wcs.offset.coordinate[i]
                                + g92_offset[i];
     }
+    if (s_tlo_active) {
+        machine.coordinate[AXIS_Z] += s_tlo_value;
+    }
     return machine;
 }
 
@@ -81,6 +91,9 @@ CoordinatePoint KINEMATICS_MachineToWork(CoordinatePoint machine_pos)
         work.coordinate[i] = machine_pos.coordinate[i]
                             - g_wcs.offset.coordinate[i]
                             - g92_offset[i];
+    }
+    if (s_tlo_active) {
+        work.coordinate[AXIS_Z] -= s_tlo_value;
     }
     return work;
 }
@@ -102,6 +115,9 @@ CoordinatePoint KINEMATICS_WorkToMachineWithWCS(CoordinatePoint work_pos,
     machine.coordinate[AXIS_X] = work_pos.coordinate[AXIS_X] + ox + g92_offset[AXIS_X];
     machine.coordinate[AXIS_Y] = work_pos.coordinate[AXIS_Y] + oy + g92_offset[AXIS_Y];
     machine.coordinate[AXIS_Z] = work_pos.coordinate[AXIS_Z] + oz + g92_offset[AXIS_Z];
+    if (s_tlo_active) {
+        machine.coordinate[AXIS_Z] += s_tlo_value;
+    }
     machine.coordinate[AXIS_A] = work_pos.coordinate[AXIS_A]      + g92_offset[AXIS_A];
     return machine;
 }
@@ -117,6 +133,9 @@ CoordinatePoint KINEMATICS_MachineToWorkWithWCS(CoordinatePoint machine_pos,
     work.coordinate[AXIS_X] = machine_pos.coordinate[AXIS_X] - ox - g92_offset[AXIS_X];
     work.coordinate[AXIS_Y] = machine_pos.coordinate[AXIS_Y] - oy - g92_offset[AXIS_Y];
     work.coordinate[AXIS_Z] = machine_pos.coordinate[AXIS_Z] - oz - g92_offset[AXIS_Z];
+    if (s_tlo_active) {
+        work.coordinate[AXIS_Z] -= s_tlo_value;
+    }
     work.coordinate[AXIS_A] = machine_pos.coordinate[AXIS_A]      - g92_offset[AXIS_A];
     return work;
 }
@@ -174,6 +193,31 @@ void KINEMATICS_SetG92Offset(const float machine[NUM_AXIS],
 void KINEMATICS_ClearG92Offset(void)
 {
     memset(g92_offset, 0, sizeof(g92_offset));
+}
+
+// ─── Tool Length Offset (G43 / G43.1 / G49) ──────────────────────────────────
+//
+// TLO is applied to the Z axis only (GRBL convention).
+// It shifts the machine Z target so that Z=0 in work space corresponds to the
+// tip of the current tool rather than the reference gauge-length plane.
+// Positive TLO = tool is longer than reference → spindle lifts to compensate.
+
+void KINEMATICS_SetTLO(float offset_mm)
+{
+    s_tlo_value  = offset_mm;
+    s_tlo_active = true;
+}
+
+void KINEMATICS_ClearTLO(void)
+{
+    s_tlo_value  = 0.0f;
+    s_tlo_active = false;
+}
+
+float KINEMATICS_GetTLO(bool *active_out)
+{
+    if (active_out) *active_out = s_tlo_active;
+    return s_tlo_active ? s_tlo_value : 0.0f;
 }
 
 // ─── Position from stepper step counts ────────────────────────────────────────

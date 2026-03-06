@@ -567,6 +567,26 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
                 s_modal_feedrate_mm_min = event->data.setFeedrate.feedrate;
             return true;
 
+        case GCODE_EVENT_TLO_SET:
+            // G43 / G43.1  — activate tool length offset on Z axis.
+            // Apply immediately (modal change; does not require motion drain).
+            KINEMATICS_SetTLO(event->data.tlo.value);
+            // For stored G43 (not inline G43.1), persist to flash so $# reflects it
+            // even after power-cycle.  Dynamic G43.1 values are intentionally not saved.
+            if (!event->data.tlo.dynamic) {
+                SETTINGS_SetToolLengthOffset(event->data.tlo.value);
+            }
+            DEBUG_PRINT_MOTION("[TLO] G43%s active, offset=%.3f mm\r\n",
+                               event->data.tlo.dynamic ? ".1" : "",
+                               (double)event->data.tlo.value);
+            return true;
+
+        case GCODE_EVENT_TLO_CANCEL:
+            // G49 — deactivate tool length offset.
+            KINEMATICS_ClearTLO();
+            DEBUG_PRINT_MOTION("[TLO] G49 cancelled\r\n");
+            return true;
+
         case GCODE_EVENT_SPINDLE_ON:
         case GCODE_EVENT_SPINDLE_OFF:
         case GCODE_EVENT_COOLANT_ON:

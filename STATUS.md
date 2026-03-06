@@ -3,7 +3,28 @@
 
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 5, 2026
+**Last Updated**: March 2026
+
+---
+
+## ✅ IMPLEMENTED: G43 / G43.1 / G49 Tool Length Offset (TLO) — Phase 2
+
+**Files**:
+- `incs/gcode/gcode_parser.h` — Added `GCODE_EVENT_TLO_SET`, `GCODE_EVENT_TLO_CANCEL` to `GCODE_EventType` enum; added `struct { float value; bool dynamic; } tlo` to `GCODE_Event` union
+- `incs/motion/kinematics.h` — Declared `KINEMATICS_SetTLO()`, `KINEMATICS_ClearTLO()`, `KINEMATICS_GetTLO(bool*)`
+- `srcs/motion/kinematics.c` — Added `s_tlo_value`/`s_tlo_active` statics; implemented TLO API; applied TLO to Z in all four coordinate transforms (`WorkToMachine`, `MachineToWork`, `WorkToMachineWithWCS`, `MachineToWorkWithWCS`)
+- `srcs/gcode/gcode_parser.c` — Parsed G43/G43.1/G49 in `parse_command_to_event()`; updated `$#` to report live TLO via `KINEMATICS_GetTLO()`; added G43/G49 to `$G` modal state report
+- `srcs/motion/motion_bridge.c` — Added `GCODE_EVENT_TLO_SET` and `GCODE_EVENT_TLO_CANCEL` cases to `MOTION_ProcessGcodeEvent()`; G43 (stored) persists to flash via `SETTINGS_SetToolLengthOffset()`; G43.1 (dynamic) applies live without saving
+
+**Behaviour**:
+- `G43`     — activates stored TLO from settings (persisted to NVM flash via `SETTINGS_SetToolLengthOffset()`)
+- `G43.1 Zn` — activates inline dynamic TLO = n mm (not persisted; lost at power-cycle)
+- `G49`     — cancels active TLO (Z reverts to raw WCS)
+- TLO applied to Z axis only (GRBL v1.1 standard)
+- TLO persists across soft reset (`Ctrl+X`); cancelled only by explicit `G49`
+- `$#` → `[TLO:x.xxx]` now shows the live active value (G43.1 dynamic value shown correctly)
+- `$G` → shows `G43` or `G49` in modal state
+- Build: zero warnings/errors — `bins/CNC_V3.hex`
 
 ---
 

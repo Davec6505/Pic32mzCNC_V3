@@ -509,6 +509,36 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             return false;
         }
 
+        // G43 / G43.1 - Activate Tool Length Offset
+        // G43      : activate stored TLO (from settings; optional H-word ignored — single tool supported)
+        // G43.1 Z# : dynamic inline TLO from Z parameter
+        if (gnum == 43) {
+            char* pDot = find_char((char*)cmd, '.');
+            int subcode = pDot ? (int)strtol(pDot + 1, NULL, 10) : 0;
+            ev->type = GCODE_EVENT_TLO_SET;
+            if (subcode == 1) {
+                // G43.1 — inline dynamic value from Z parameter
+                char* pZ = find_char((char*)cmd, 'Z');
+                const float unit_scale = unitsInches ? 25.4f : 1.0f;
+                ev->data.tlo.value   = pZ ? (parse_float_after(pZ) * unit_scale) : 0.0f;
+                ev->data.tlo.dynamic = true;
+            } else {
+                // G43 — use persisted tool length offset from settings
+                ev->data.tlo.value   = SETTINGS_GetToolLengthOffset();
+                ev->data.tlo.dynamic = false;
+            }
+            DEBUG_PRINT_GCODE("[PARSE] G43.%d TLO=%.3f dynamic=%d\r\n",
+                              subcode, (double)ev->data.tlo.value, (int)ev->data.tlo.dynamic);
+            return true;
+        }
+
+        // G49 - Cancel Tool Length Offset
+        if (gnum == 49) {
+            ev->type = GCODE_EVENT_TLO_CANCEL;
+            DEBUG_PRINT_GCODE("[PARSE] G49 TLO cancel\r\n");
+            return true;
+        }
+
         if (gnum == 0 || gnum == 1) {
             ev->type = GCODE_EVENT_LINEAR_MOVE;
             ev->data.linearMove.isRapid = (gnum == 0);  // G0 = rapid, G1 = feed
@@ -1077,8 +1107,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             SETTINGS_GetG92Offset(&g92_x, &g92_y, &g92_z);
             p += snprintf(&buf[p], sizeof(buf)-p, "[G92:%.3f,%.3f,%.3f]\r\n", g92_x, g92_y, g92_z);
             
-            // Report tool length offset
-            float tlo = SETTINGS_GetToolLengthOffset();
+            // Report live tool length offset (reflects G43, G43.1 and G49)
+            bool tlo_active = false;
+            float tlo = KINEMATICS_GetTLO(&tlo_active);
+            (void)tlo_active;  // active flag available for future use
             p += snprintf(&buf[p], sizeof(buf)-p, "[TLO:%.3f]\r\n", tlo);
             
             // Report last probe result (contact position + triggered flag)
@@ -1101,6 +1133,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             l += sprintf(&state_buffer[l], "%s ", unitsInches ? "G20" : "G21");
             l += sprintf(&state_buffer[l], "G%d ", appData->absoluteMode ? 90 : 91);
             l += sprintf(&state_buffer[l], "G94 ");
+            // Tool length offset modal state (G43 if active, G49 if cancelled)
+            { bool tlo_on = false; KINEMATICS_GetTLO(&tlo_on);
+              l += sprintf(&state_buffer[l], "%s ", tlo_on ? "G43" : "G49"); }
             l += sprintf(&state_buffer[l], "M5 ");
             l += sprintf(&state_buffer[l], "M9 ");
             l += sprintf(&state_buffer[l], "T%lu ", (unsigned long)appData->modalToolNumber);

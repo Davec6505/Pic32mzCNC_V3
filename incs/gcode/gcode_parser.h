@@ -49,7 +49,9 @@ typedef enum {
     GCODE_EVENT_HOMING,             // $H - Homing cycle
     GCODE_EVENT_PROGRAM_END,        // M0, M2, M30 - Program end/stop
     GCODE_EVENT_PROBE_TOWARD,       // G38.2, G38.3 - Probe toward workpiece
-    GCODE_EVENT_PROBE_AWAY          // G38.4, G38.5 - Probe away from workpiece
+    GCODE_EVENT_PROBE_AWAY,         // G38.4, G38.5 - Probe away from workpiece
+    GCODE_EVENT_TLO_SET,            // G43, G43.1   - Activate tool length offset
+    GCODE_EVENT_TLO_CANCEL          // G49           - Cancel tool length offset
 } GCODE_EventType;
 
 typedef struct {
@@ -100,7 +102,12 @@ typedef struct {
         struct {
             uint32_t axes_mask;     // Bitmap of axes to home (bit 0=X, 1=Y, 2=Z, 3=A)
         } homing;
-        
+
+        struct {
+            float value;    // TLO offset in mm (+ = tool longer than reference)
+            bool  dynamic;  // true = G43.1 (inline value), false = G43 (from settings/tool table)
+        } tlo;
+
         struct {
             float x, y, z, a;       // Target coordinates for probe move
             float feedrate;         // Probe feedrate

@@ -33,6 +33,15 @@ void KINEMATICS_GetActiveWCSOffset(uint8_t activeWCS, float* x_offset, float* y_
 void KINEMATICS_SetG92Offset(const float machine[NUM_AXIS], const float desired_work[NUM_AXIS]);
 void KINEMATICS_ClearG92Offset(void);
 
+// Tool Length Offset (G43 / G43.1 / G49)
+// Applied to Z-axis only (GRBL standard). Not flash-backed — cleared on soft reset.
+// KINEMATICS_SetTLO activates and stores the offset value (replaces any prior value).
+// KINEMATICS_ClearTLO deactivates TLO (G49).
+// KINEMATICS_GetTLO returns the current live value and sets *active to its state.
+void  KINEMATICS_SetTLO(float offset_mm);
+void  KINEMATICS_ClearTLO(void);
+float KINEMATICS_GetTLO(bool *active_out);  // returns value; sets *active_out
+
 // Physics & profiling calculations for motion planning
 MotionSegment* KINEMATICS_LinearMove(CoordinatePoint start, CoordinatePoint end, float feedrate, 
                                    MotionSegment* segment_buffer,
