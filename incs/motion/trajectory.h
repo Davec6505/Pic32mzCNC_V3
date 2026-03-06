@@ -72,6 +72,7 @@ typedef struct {
     float max_entry_speed_sqr;    // junction speed limit squared
     float max_junction_speed_sqr; // centripetal corner limit squared
     bool  speed_locked;           // true → planner must not alter this block
+    bool  is_jog;                 // true → jog move (cancel with 0x85, no cross-move junction blend)
 } SCurveMove;
 
 
@@ -103,6 +104,19 @@ bool  TRAJECTORY_GetNextMove(SCurveMove *out);
 
 // Returns number of moves currently in the queue.
 uint32_t TRAJECTORY_QueueCount(void);
+
+// Mark the most recently added move as a jog move.
+// Call immediately after a successful TRAJECTORY_AddMove for a jog command.
+// Also locks the move's speed so the planner will not blend it with neighbours.
+void  TRAJECTORY_TagLastAsJog(void);
+
+// Returns true if the queue contains at least one jog-flagged move.
+bool  TRAJECTORY_HasJogMoves(void);
+
+// Remove all jog-flagged moves from the newest (head) end of the queue,
+// stopping at the first non-jog move so G-code segments are preserved.
+// Call from the 0x85 real-time jog-cancel handler.
+void  TRAJECTORY_CancelJog(void);
 
 // Evaluate v(t) [mm/s] at time t [s] from move start.
 // Used by the interpolator to compute the DDS increment each tick.

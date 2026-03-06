@@ -109,7 +109,7 @@ static bool s_canned_g98 = true;            /* true=G98 (return initial Z), fals
 // 0x11 = XON (flow control - ignored)
 // 0x13 = DC3/XOFF (flow control - ignored)
 static inline bool is_control_char(uint8_t c){ 
-    return (c == '?' || c == '~' || c == '!' || c == 0x18 || 
+    return (c == '?' || c == '~' || c == '!' || c == 0x18 || c == 0x85 ||
             c == 0x95 || c == 0x90 || c == 0x99 || c == 0x11 || c == 0x13); 
 }
 GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t length, GCODE_CommandQueue* commandQueue);
@@ -1016,6 +1016,8 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     state = "Hold:1";  // GRBL v1.1: Hold:1 = draining / decelerating
                 } else if (g_feed_hold_active) {
                     state = "Hold:0";  // GRBL v1.1: Hold:0 = fully stopped
+                } else if (MOTION_IsJogging()) {
+                    state = "Jog";
                 } else if (appData->arcGenState == ARC_GEN_ACTIVE) {
                     // Arc generator active → still processing arc segments
                     state = "Run";
@@ -1033,7 +1035,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 // the real executing speed.  STEPPER_GetCurrentFeedrateMmMin() reads
                 // the hardware timer ticks directly – zero ambiguity.
                 float feedrate_mm_min = 0.0f;
-                if (state[0] == 'R') {
+                if (state[0] == 'R' || state[0] == 'J') {
                     feedrate_mm_min = STEPPER_GetCurrentFeedrateMmMin();
                     if (feedrate_mm_min < 1.0f) {
                         // Fallback: use modal feedrate if step_interval not yet loaded
@@ -1077,6 +1079,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 GCODE_SoftReset(appData, cmdQueue);
                 break;
             }
+            case 0x85: /* Jog cancel — flush queued jog moves, no alarm */
+                MOTION_JogCancel();
+                // No response per GRBL v1.1 spec
+                break;
             case 0x95: /* XOFF - flow control, ignore */
             case 0x90: /* DLE - data link escape, ignore */
             case 0x99: /* Unknown control char - ignore */
@@ -1389,6 +1395,112 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             UART3_Write((uint8_t*)"[MSG:$21 Hard Limits Enable - $21=0 (disabled), $21=1 (enabled)]\r\n", 68);
             UART3_Write((uint8_t*)"[MSG:$5 Limit Pin Invert - NO switch:$5=0 (pin HIGH triggers), NC switch:$5=255 (pin LOW triggers)]\r\n", 103);
             UART3_Write((uint8_t*)"[MSG:$L - Show limit switch states (debug)]\r\n", 46);
+            handled = true;
+        }
+        else if (len >= 3 && cmd[0] == '$' && cmd[1] == 'J' && cmd[2] == '=') {
+            // $J= jog command — parsed and submitted directly (bypasses command queue).
+            // GRBL v1.1: sends "ok" on acceptance; error on alarm, bad syntax, or queue full.
+            if (grblAlarm) {
+                UART3_Write((uint8_t*)"error:2\r\n", 9);
+                send_ok = false;
+            } else {
+                const char *p = &cmd[3];
+                bool jog_relative = !appData->absoluteMode;
+                bool jog_inches   = unitsInches;
+                float jx = NAN, jy = NAN, jz = NAN, ja = NAN, jf = NAN;
+                bool parse_err = false;
+
+                while (*p && !parse_err) {
+                    char ch = (char)toupper((unsigned char)*p);
+                    if (ch == ' ' || ch == '\t') { p++; continue; }
+                    if (ch == 'G') {
+                        p++;
+                        char *end = NULL;
+                        long gnum = strtol(p, &end, 10);
+                        if (end == p) { parse_err = true; break; }
+                        p = end;
+                        if      (gnum == 90) jog_relative = false;
+                        else if (gnum == 91) jog_relative = true;
+                        else if (gnum == 20) jog_inches   = true;
+                        else if (gnum == 21) jog_inches   = false;
+                        else { parse_err = true; }
+                    } else if (ch == 'X' || ch == 'Y' || ch == 'Z' || ch == 'A' || ch == 'F') {
+                        p++;
+                        char *end = NULL;
+                        float val = strtof(p, &end);
+                        if (end == p) { parse_err = true; break; }
+                        p = end;
+                        if      (ch == 'X') jx = val;
+                        else if (ch == 'Y') jy = val;
+                        else if (ch == 'Z') jz = val;
+                        else if (ch == 'A') ja = val;
+                        else if (ch == 'F') jf = val;
+                    } else {
+                        parse_err = true;
+                    }
+                }
+
+                // F word is mandatory; at least one axis must be specified
+                if (parse_err || isnan(jf) || jf <= 0.0f ||
+                    (isnan(jx) && isnan(jy) && isnan(jz) && isnan(ja))) {
+                    UART3_Write((uint8_t*)"error:4\r\n", 9);
+                    send_ok = false;
+                } else {
+                    float scale = jog_inches ? 25.4f : 1.0f;
+
+                    // Resolve target in work coords (default unspecified axes to current work pos)
+                    CoordinatePoint cur_m = KINEMATICS_GetCurrentPosition();
+                    CoordinatePoint cur_w = KINEMATICS_MachineToWork(cur_m);
+                    CoordinatePoint tgt_w = cur_w;
+
+                    if (!isnan(jx)) {
+                        if (jog_relative) tgt_w.coordinate[AXIS_X] += jx * scale;
+                        else              tgt_w.coordinate[AXIS_X]  = jx * scale;
+                    }
+                    if (!isnan(jy)) {
+                        if (jog_relative) tgt_w.coordinate[AXIS_Y] += jy * scale;
+                        else              tgt_w.coordinate[AXIS_Y]  = jy * scale;
+                    }
+                    if (!isnan(jz)) {
+                        if (jog_relative) tgt_w.coordinate[AXIS_Z] += jz * scale;
+                        else              tgt_w.coordinate[AXIS_Z]  = jz * scale;
+                    }
+                    if (!isnan(ja)) {
+                        if (jog_relative) tgt_w.coordinate[AXIS_A] += ja * scale;
+                        else              tgt_w.coordinate[AXIS_A]  = ja * scale;
+                    }
+
+                    jf *= scale;  // scale feedrate if in inches mode
+
+                    // Cap feedrate to the most restrictive axis max_rate
+                    const CNC_Settings *js = SETTINGS_GetCurrent();
+                    float fr_cap = js->max_rate[AXIS_X];
+                    for (E_AXIS ax = AXIS_Y; ax < NUM_AXIS; ax++) {
+                        if (js->max_rate[ax] < fr_cap) fr_cap = js->max_rate[ax];
+                    }
+                    if (jf > fr_cap) jf = fr_cap;
+                    if (jf < 1.0f)   jf = 1.0f;
+
+                    // Build jog event and submit directly to motion bridge
+                    GCODE_Event ev;
+                    memset(&ev, 0, sizeof(ev));
+                    ev.type                     = GCODE_EVENT_JOG;
+                    ev.data.linearMove.x        = tgt_w.coordinate[AXIS_X];
+                    ev.data.linearMove.y        = tgt_w.coordinate[AXIS_Y];
+                    ev.data.linearMove.z        = tgt_w.coordinate[AXIS_Z];
+                    ev.data.linearMove.a        = tgt_w.coordinate[AXIS_A];
+                    ev.data.linearMove.feedrate = jf;
+                    ev.data.linearMove.isRapid  = false;
+                    ev.data.linearMove.is_jog   = true;
+
+                    if (!MOTION_ProcessGcodeEvent(appData, &ev)) {
+                        // Trajectory queue full
+                        UART3_Write((uint8_t*)"error:8\r\n", 9);
+                        send_ok = false;
+                    }
+                    // send_ok remains true on successful submission
+                }
+            }
             handled = true;
         }
 

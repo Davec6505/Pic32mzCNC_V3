@@ -26,6 +26,7 @@
 #include "motion/trajectory.h"
 #include "motion/interpolator.h"
 #include "motion/kinematics.h"
+#include "motion/homing.h"
 #include "settings/settings.h"
 #include "utils/utils.h"
 #include "utils/uart_utils.h"
@@ -71,6 +72,12 @@ static bool            s_planned_position_valid = false;
 // CoreTimer runs at CPU/2 = 100 MHz → 100,000,000 ticks = 1 second.
 static bool     s_dwell_active    = false;
 static uint32_t s_dwell_end_ticks = 0;
+
+// ─── Jog state ────────────────────────────────────────────────────────────────
+// Track whether the currently executing interpolator move is a jog move.
+// Set when a jog SCurveMove is popped by MOTION_Tasks; cleared when a
+// non-jog move is popped or when all motion stops.
+static bool s_jog_executing = false;
 
 // ─── Canned Cycle State (G81 / G83) ──────────────────────────────────────────
 // Implemented as a static state machine inside MOTION_ProcessGcodeEvent.
@@ -154,6 +161,7 @@ void STEPPER_Initialize(APP_DATA *appData)
     s_dwell_end_ticks = 0;
     s_cc_phase        = CC_IDLE;  // Cancel any in-progress canned cycle on soft reset
     s_cc_holes_left   = 0u;
+    s_jog_executing   = false;    // Cancel jog tracking on soft reset
     TRAJECTORY_Initialize();
     INTERPOLATOR_Initialize();
 }
@@ -295,6 +303,9 @@ void MOTION_Tasks(APP_DATA *appData)
         SCurveMove next_move;
         if (TRAJECTORY_GetNextMove(&next_move)) {
             INTERPOLATOR_LoadMove(&next_move);
+            s_jog_executing = next_move.is_jog;  // track whether this move is a jog
+        } else {
+            s_jog_executing = false;  // queue drained — no jog executing
         }
         // Fire even if queue is now empty — the count sync above already
         // reflects the new (lower) occupancy, so CheckDeferredOk will
@@ -406,6 +417,63 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
     const CNC_Settings *s = SETTINGS_GetCurrent();
 
     switch (event->type) {
+
+        case GCODE_EVENT_JOG: {
+            // Jog moves bypass the look-ahead planner: each move decels to 0
+            // (entry_v=0, exit_v=0) so there is no junction blending across jog
+            // boundaries.  Multiple rapid jog commands chain via s_planned_position.
+            if (TRAJECTORY_QueueCount() >= (uint32_t)(TRAJ_QUEUE_SIZE - 2)) {
+                return false;  // Queue full — caller may retry
+            }
+
+            // Use planned position for jog-to-jog chaining; fall back to live pos
+            // when the queue is empty (e.g. after 0x85 cancel cleared it).
+            CoordinatePoint start;
+            if (s_planned_position_valid &&
+                (TRAJECTORY_QueueCount() > 0 || INTERPOLATOR_IsActive())) {
+                start = s_planned_position;
+            } else {
+                start = KINEMATICS_GetCurrentPosition();
+                s_planned_position_valid = false;
+            }
+
+            // Coordinates in event are work-space absolute; convert to machine space.
+            CoordinatePoint end_w;
+            end_w.coordinate[AXIS_X] = event->data.linearMove.x;
+            end_w.coordinate[AXIS_Y] = event->data.linearMove.y;
+            end_w.coordinate[AXIS_Z] = event->data.linearMove.z;
+            end_w.coordinate[AXIS_A] = event->data.linearMove.a;
+            CoordinatePoint end = KINEMATICS_WorkToMachine(end_w);
+
+            float fr = event->data.linearMove.feedrate;
+            if (fr < 1.0f) fr = 1.0f;
+
+            bool added = TRAJECTORY_AddMove(start, end, fr, 0.0f, 0.0f);
+            if (!added) return true;  // Zero-length move — consume silently
+
+            // Tag the trajectory entry as a jog move (enables 0x85 selective cancel).
+            TRAJECTORY_TagLastAsJog();
+
+            s_planned_position       = end;
+            s_planned_position_valid = true;
+
+            TRAJECTORY_Recalculate();
+
+            if (!INTERPOLATOR_IsActive()) {
+                SCurveMove mv;
+                if (TRAJECTORY_GetNextMove(&mv)) {
+                    STEPPERS_Enable();
+                    INTERPOLATOR_LoadMove(&mv);
+                    s_jog_executing = mv.is_jog;
+                }
+            }
+
+            DEBUG_PRINT_MOTION("[JOG] Queued to (%.3f,%.3f,%.3f) @ %.0f mm/min\r\n",
+                (double)end.coordinate[AXIS_X], (double)end.coordinate[AXIS_Y],
+                (double)end.coordinate[AXIS_Z], (double)fr);
+
+            return true;
+        }
 
         case GCODE_EVENT_LINEAR_MOVE: {
             // Guard: do not inject linear moves into the trajectory queue while an
@@ -726,16 +794,28 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
         case GCODE_EVENT_SET_TOOL:
             return true;
 
-        // ── Sequenced modal — spindle/coolant/program-end/homing must take
+        // ── Sequenced modal — spindle/coolant/program-end must take
         // effect at the exact point in the command stream, after prior motion.
         case GCODE_EVENT_SPINDLE_ON:
         case GCODE_EVENT_SPINDLE_OFF:
         case GCODE_EVENT_COOLANT_ON:
         case GCODE_EVENT_COOLANT_OFF:
         case GCODE_EVENT_PROGRAM_END:
-        case GCODE_EVENT_HOMING:
             if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) {
                 return false;  // Still executing — retry next iteration
+            }
+            return true;
+
+        case GCODE_EVENT_HOMING:
+            // Wait for any executing motion to drain, then start the homing cycle.
+            if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) {
+                return false;  // Still executing — retry next iteration
+            }
+            // Invalidate planned position — homing resets step counters.
+            s_planned_position_valid = false;
+            if (!HOMING_Start(appData, event->data.homing.axes_mask)) {
+                // Homing globally disabled ($22=0) or already active — send error.
+                UART_Printf("error:8\r\n");
             }
             return true;
 
@@ -1092,4 +1172,28 @@ bool MOTION_HomingMove(APP_DATA *appData,
         }
     }
     return true;
+}
+
+// ─── Jog cancel (real-time 0x85) ─────────────────────────────────────────────
+
+void MOTION_JogCancel(void)
+{
+    // Remove jog-flagged moves from the trajectory queue (preserves G-code moves).
+    TRAJECTORY_CancelJog();
+
+    // If the interpolator is currently executing a jog move, stop it immediately.
+    if (s_jog_executing && INTERPOLATOR_IsActive()) {
+        INTERPOLATOR_Stop();
+    }
+
+    s_jog_executing         = false;
+    s_planned_position_valid = false;  // Re-anchor from live step-counter on next move
+
+    DEBUG_PRINT_MOTION("[JOG] Cancelled (0x85)\r\n");
+}
+
+bool MOTION_IsJogging(void)
+{
+    // True when a jog move is currently executing OR queued in the trajectory.
+    return s_jog_executing || TRAJECTORY_HasJogMoves();
 }

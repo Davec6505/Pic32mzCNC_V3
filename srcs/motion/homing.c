@@ -111,13 +111,30 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
             break;
             
         case HOMING_STATE_LOCATE:
-            // APP.C handles limit detection and transitions to PULLOFF
-            // Here we just check if motion completed without hitting limit (alarm)
-            if (!g_homing.motion_active && appData->motionQueueCount == 0) {
-                DEBUG_PRINT_GCODE("[HOMING] LOCATE motion complete without limit - ALARM\r\n");
-                g_homing.state = HOMING_STATE_ALARM;
-                g_homing.alarm_code = 9;  // GRBL Alarm 9: Homing fail
-                STEPPER_DisableAll();
+            // Queue-empty drives all transitions:
+            //  • locate_backing_off + queue empty  → auto-start re-approach
+            //  • locate_reapproaching + queue empty → alarm (missed switch)
+            // NOTE: do NOT gate on g_homing.motion_active — that flag is set true by
+            // HOMING_StartLocate() and is never cleared during backoff, so using it
+            // would prevent the re-approach from ever starting.
+            if (appData->motionQueueCount == 0) {
+                if (g_homing.locate_reapproaching) {
+                    // Re-approach ran to end without hitting the switch → alarm
+                    DEBUG_PRINT_MOTION("[HOMING] LOCATE re-approach ended without switch hit - ALARM\r\n");
+                    g_homing.state = HOMING_STATE_ALARM;
+                    g_homing.alarm_code = 9;
+                    STEPPER_DisableAll();
+                }
+                // Backoff move completed (queue drained) — automatically start re-approach.
+                // The limit is not polled during backoff so we use queue-empty as the
+                // trigger rather than the falling edge.
+                else if (g_homing.locate_backing_off) {
+                    DEBUG_PRINT_MOTION("[HOMING] LOCATE backoff complete → starting re-approach\r\n");
+                    g_homing.locate_backing_off = false;
+                    HOMING_StartLocateReapproach(appData);
+                }
+                // Otherwise we're between the falling-edge stop and HOMING_StartLocateReapproach
+                // queuing a new move — do nothing, re-approach will start momentarily.
             }
             break;
             
@@ -206,11 +223,12 @@ void HOMING_StartSeek(APP_DATA* appData) {
     
     DEBUG_PRINT_MOTION("[HOMING_SEEK] RAW: dir_mask=0x%02X\r\n", dir_mask);
     
-    // Calculate search distance based on $23 setting ONLY
-    // $23=0 → home to MIN switch (negative direction in machine coordinates)
-    // $23=1 → home to MAX switch (positive direction in machine coordinates)
-    // NOTE: $3 (step_direction_invert) only inverts GPIO pin, G-code already handles this
-    float search_distance = home_positive ? 300.0f : -300.0f;
+    // Calculate search distance based on $23 setting and $130-$133 max_travel.
+    // $23=0 → home to MIN switch (negative direction) → search -max_travel
+    // $23=1 → home to MAX switch (positive direction) → search +max_travel
+    CNC_Settings* settings = SETTINGS_GetCurrent();
+    float travel = settings->max_travel[g_homing.current_axis];
+    float search_distance = home_positive ? travel : -travel;
     
     DEBUG_PRINT_MOTION("[HOMING_SEEK] axis=%d, $23=%d, distance=%.1f\r\n",
                       g_homing.current_axis, dir_mask, 
@@ -232,41 +250,74 @@ void HOMING_StartSeek(APP_DATA* appData) {
 }
 
 void HOMING_StartLocate(APP_DATA* appData) {
-    // Determine homing direction from $23 mask
+    // Phase 1 of LOCATE: drive AWAY from the switch with a long move at feed rate.
+    // We do NOT pre-queue the re-approach here — we wait until the switch actually
+    // opens (falling edge in app.c) before starting the re-approach.  This removes
+    // the race condition where a fixed backoff distance might not clear the switch.
+    //
+    // $23=0 (MIN) → switch is in the - direction  → back off in + direction
+    // $23=1 (MAX) → switch is in the + direction  → back off in - direction
     uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
     bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
-    
-    // Back off $27 (pull_off) to just clear the switch, then re-approach slowly.
-    // Using pull_off for backoff ensures we clear the switch regardless of hysteresis.
-    // Re-approach = pull_off * 2 so the switch is guaranteed within range.
-    // $23=0 (MIN) → back off +pull_off, then approach -(pull_off*2)
-    // $23=1 (MAX) → back off -pull_off, then approach +(pull_off*2)
+
+    // Use a generous backoff distance (10× pull-off) so we definitely clear the
+    // switch regardless of overshoot.  App.c will stop the move on the falling edge.
     float pull_off = *g_homing_settings[g_homing.current_axis].homing_pull_off;
-    float backoff_distance = home_positive ? -pull_off : pull_off;
-    float locate_distance  = home_positive ? (pull_off * 2.0f) : -(pull_off * 2.0f);
-    
-    DEBUG_PRINT_MOTION("[HOMING_LOCATE] axis=%d, pull_off=%.1f, backoff=%.1f, locate=%.1f\r\n",
-                      g_homing.current_axis, pull_off, backoff_distance, locate_distance);
-    
-    // Build target position (back off first)
+    float backoff_distance = home_positive ? -(pull_off * 10.0f) : (pull_off * 10.0f);
+
+    DEBUG_PRINT_MOTION("[HOMING_LOCATE] axis=%d, backoff=%.1f mm (waiting for switch open)\r\n",
+                       g_homing.current_axis, backoff_distance);
+
     CoordinatePoint current = KINEMATICS_GetCurrentPosition();
-    CoordinatePoint target = current;
-    
-    // Array-based axis targeting (replaces switch statement)
+    CoordinatePoint target  = current;
     ADD_COORDINATE_AXIS(&target, g_homing.current_axis, backoff_distance);
-    
-    // Queue backoff move then slow re-approach — both via the motion bridge.
-    MOTION_HomingMove(appData, current, target,
-                      *g_homing_settings[g_homing.current_axis].homing_feed_rate);
 
-    // Generate slow re-approach segment
-    current = target;
-
-    // Array-based axis targeting (replaces switch statement)
-    ADD_COORDINATE_AXIS(&target, g_homing.current_axis, locate_distance);
-
+    g_homing.locate_backing_off   = true;
+    g_homing.locate_reapproaching = false;
     g_homing.motion_active =
         MOTION_HomingMove(appData, current, target,
+                          *g_homing_settings[g_homing.current_axis].homing_feed_rate);
+}
+
+void HOMING_StartLocateReapproach(APP_DATA* appData) {
+    // Phase 2 of LOCATE: backoff complete.  Reset the limit state tracker so we get
+    // a clean rising edge when the slow re-approach hits the switch.
+    // (limit_previous was last set to 'active=true' during seek; without this reset
+    //  the re-approach will never generate a rising edge.)
+    UTILS_HomingLimitReset();
+
+    // Phase 2 of LOCATE: Add a fixed $27 extra
+    // clearance (already stopped at the edge), then re-approach slowly toward the switch.
+    // $23=0 (MIN) → re-approach in - direction
+    // $23=1 (MAX) → re-approach in + direction
+    uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
+    bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
+
+    float pull_off = *g_homing_settings[g_homing.current_axis].homing_pull_off;
+    // Extra clearance away from switch before re-approach
+    float clearance  = home_positive ? -(pull_off) : (pull_off);
+    // Re-approach distance: clearance + enough to reach switch (pull_off * 2 headroom)
+    float reapproach = home_positive ? (pull_off * 3.0f) : -(pull_off * 3.0f);
+
+    DEBUG_PRINT_MOTION("[HOMING_LOCATE_REAPPROACH] axis=%d, clearance=%.1f, reapproach=%.1f\r\n",
+                       g_homing.current_axis, clearance, reapproach);
+
+    CoordinatePoint current = KINEMATICS_GetCurrentPosition();
+    CoordinatePoint mid     = current;
+    ADD_COORDINATE_AXIS(&mid, g_homing.current_axis, clearance);
+
+    // Queue extra clearance move first
+    MOTION_HomingMove(appData, current, mid,
+                      *g_homing_settings[g_homing.current_axis].homing_feed_rate);
+
+    // Then queue the slow re-approach
+    CoordinatePoint target = mid;
+    ADD_COORDINATE_AXIS(&target, g_homing.current_axis, reapproach);
+
+    g_homing.locate_backing_off   = false;
+    g_homing.locate_reapproaching = true;
+    g_homing.motion_active =
+        MOTION_HomingMove(appData, mid, target,
                           *g_homing_settings[g_homing.current_axis].homing_feed_rate);
 }
 

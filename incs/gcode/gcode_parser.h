@@ -54,7 +54,8 @@ typedef enum {
     GCODE_EVENT_TLO_CANCEL,         // G49           - Cancel tool length offset
     GCODE_EVENT_CANNED_DRILL,       // G81           - Simple drill cycle
     GCODE_EVENT_CANNED_PECK,        // G83           - Peck drilling cycle
-    GCODE_EVENT_CANNED_CANCEL       // G80           - Cancel canned cycle
+    GCODE_EVENT_CANNED_CANCEL,      // G80           - Cancel canned cycle
+    GCODE_EVENT_JOG                 // $J=           - Jog move (bypasses command queue)
 } GCODE_EventType;
 
 typedef struct {
@@ -64,6 +65,7 @@ typedef struct {
             float x, y, z, a;    // Target coordinates
             float feedrate;      // Feed rate in units/min (0 = use modal/rapid)
             bool  isRapid;       // true = G0 rapid (use max_rate), false = G1 feed
+            bool  is_jog;        // true = jog move (0x85 cancellable, no junction blend)
         } linearMove;
         
         struct {

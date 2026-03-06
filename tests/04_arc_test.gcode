@@ -18,7 +18,7 @@ G94 ; units per minute feed rate
 M3 S1000 ; spindle on
 
 ; Safety: Raise to 5mm
-G0 Z5 F1500
+G0 Z5 F3500
 
 ; Move to start position (0mm, 0mm)
 G0 X0 Y0
@@ -33,7 +33,7 @@ G0 Z0
 ; End: (10, 0)
 ; Center: (5, 0) via I5 J0
 ; Expected: 90° arc, CW, radius 5mm, ~18 segments
-G2 X10 Y0 I5 J0 F1000
+G2 X10 Y0 I5 J0 F3000
 
 ; Pause at corner
 G4 P0.5
@@ -45,7 +45,7 @@ G4 P0.5
 ; End: (10, 10)
 ; Center: (10, 5) via I0 J5
 ; Expected: 90° arc, CCW, radius 5mm, ~18 segments
-G3 X10 Y10 I0 J5 F500
+G3 X10 Y10 I0 J5 F1500
 
 ; Pause at corner
 G4 P0.5
@@ -57,7 +57,7 @@ G4 P0.5
 ; End: (0, 10)
 ; Center: (5, 10) via I-5 J0
 ; Expected: 180° arc, CW, radius 5mm, ~35 segments
-G2 X0 Y10 I-5 J0 F500
+G2 X0 Y10 I-5 J0 F2500
 
 ; Pause at corner
 G4 P0.5
@@ -80,7 +80,7 @@ G4 P0.5
 ; End: (20, 10)
 ; Center: (10, 10) via I10 J0
 ; Expected: 180° arc, CW, radius 10mm, ~70 segments
-G2 X20 Y10 I10 J0 F500
+G2 X20 Y10 I10 J0 F3500
 
 ; Retract to safety height
 G0 Z5

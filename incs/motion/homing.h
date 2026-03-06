@@ -44,7 +44,8 @@ typedef struct {
     
     // Motion tracking
     bool motion_active;         // True when homing move in progress
-    bool locate_backing_off;    // True during LOCATE backoff (before re-approach)
+    bool locate_backing_off;    // True while backing off from switch (switch still closed)
+    bool locate_reapproaching;  // True while doing the slow re-approach (switch is open)
     uint32_t alarm_code;        // Non-zero if homing failed
 } HomingControl;
 
@@ -113,6 +114,7 @@ void HOMING_StartSeek(APP_DATA* appData);
  * Slow precision move at homing_feed_rate
  */
 void HOMING_StartLocate(APP_DATA* appData);
+void HOMING_StartLocateReapproach(APP_DATA* appData);
 
 /**
  * @brief Start pulloff phase for current axis

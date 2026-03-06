@@ -3,8 +3,7 @@
 // ============================================================================
 // Architecture
 // ------------
-//  * OC1 generates a periodic ISR at the current step rate (TMR4 time-base).
-//  * PR4 is set ONCE per segment and stays CONSTANT for all n_step steps.
+//  * TMR4 generates a 10us periodic ISR at the current step rate (TMR4 time-base).
 //    There is NO acceleration math inside the ISR.
 //  * Velocity changes live entirely in the segment buffer, built by
 //    SEGMENT_PrepBuffer() in the main loop from the planner (MotionSegment) queue.
@@ -31,7 +30,7 @@
 // ============================================================================
 // Forward declarations
 // ============================================================================
-//static void OCP1_ISR(uintptr_t context);
+
 void TMR5_PulseWidthCallback(uint32_t status, uintptr_t context);
 
 // ============================================================================

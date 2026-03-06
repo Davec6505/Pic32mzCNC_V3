@@ -61,7 +61,9 @@
 
 #include "motion/interpolator.h"
 #include "motion/trajectory.h"
+#include "motion/motion_utils.h"
 #include "utils/utils.h"
+#include "settings/settings.h"
 #include "data_structures.h"
 
 // Harmony PLIB for TMR4
@@ -237,14 +239,14 @@ void INTERPOLATOR_LoadMove(const SCurveMove *move)
     active_move = *move;   // struct copy
 
     // ── Direction pins ──────────────────────────────────────────────────────
+    // Apply $3 (step_direction_invert) mask so motor wiring can be corrected
+    // without swapping physical wires.  dds_dir always follows the commanded
+    // direction (for position counting); only the GPIO pin is inverted.
+    uint8_t dir_inv = SETTINGS_GetCurrent()->step_direction_invert;
     for (int i = 0; i < NUM_AXIS; i++) {
-        if (move->unit_vec[i] >= 0.0f) {
-            AXIS_DirSet((E_AXIS)i);
-            dds_dir[i] = +1;
-        } else {
-            AXIS_DirClear((E_AXIS)i);
-            dds_dir[i] = -1;
-        }
+        bool forward = (move->unit_vec[i] >= 0.0f);
+        dds_dir[i] = forward ? +1 : -1;
+        MOTION_UTILS_SetDirection((E_AXIS)i, forward, dir_inv);
     }
 
     // ── Reset accumulators ─────────────────────────────────────────────────

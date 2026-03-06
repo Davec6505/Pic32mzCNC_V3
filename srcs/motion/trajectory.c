@@ -566,6 +566,36 @@ uint32_t TRAJECTORY_QueueCount(void)
     return traj_count;
 }
 
+// ─── Jog support ─────────────────────────────────────────────────────────────
+
+void TRAJECTORY_TagLastAsJog(void)
+{
+    if (traj_count == 0u) return;
+    uint32_t newest = (traj_head == 0u) ? (TRAJ_QUEUE_SIZE - 1u) : (traj_head - 1u);
+    traj_queue[newest].is_jog     = true;
+    traj_queue[newest].speed_locked = true;  // prevent planner from blending across jog boundary
+}
+
+bool TRAJECTORY_HasJogMoves(void)
+{
+    for (uint32_t i = 0u; i < traj_count; i++) {
+        if (traj_queue[(traj_tail + i) % TRAJ_QUEUE_SIZE].is_jog) return true;
+    }
+    return false;
+}
+
+void TRAJECTORY_CancelJog(void)
+{
+    // Remove jog-flagged moves from the HEAD (newest) backward toward tail,
+    // stopping at the first non-jog move so G-code segments are preserved.
+    while (traj_count > 0u) {
+        uint32_t newest = (traj_head == 0u) ? (TRAJ_QUEUE_SIZE - 1u) : (traj_head - 1u);
+        if (!traj_queue[newest].is_jog) break;
+        traj_head = newest;
+        traj_count--;
+    }
+}
+
 // ─── Profile evaluation ───────────────────────────────────────────────────────
 //
 // Used by the interpolator each tick to get the current velocity.

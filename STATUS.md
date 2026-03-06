@@ -3,7 +3,122 @@
 
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 2026
+**Last Updated**: March 8, 2026
+
+---
+
+## ✅ BUG FIX: LOCATE phase freezes — event-driven backoff redesign (March 8, 2026)
+
+**Symptom**: After hardware `$H` test, Z would drive to the limit switch (SEEK working), then freeze in `<Run>` state indefinitely. Backoff never started; pulloff never started.
+
+**Root cause**: `HOMING_StartLocate()` pre-queued both the backoff move AND the slow re-approach simultaneously using fixed distances at the moment the limit switch fired. The re-approach `MOTION_HomingMove()` call used the pre-stop machine position as its start — and the step counter had not yet settled — so `TRAJECTORY_AddMove()` returned `false` (zero-distance guard: `if (dist < 1e-6f) return false`). That caused `g_homing.motion_active = false`. On the very next iteration, `HOMING_Tasks()` saw `!motion_active && motionQueueCount == 0` and immediately fired Alarm 9, halting everything.
+
+**Fix**: Complete redesign of the LOCATE phase to event-driven backoff:
+
+1. **SEEK rising edge** → Stop interpolator, reset trajectory, call `HOMING_StartLocate()` which now only queues a long open-ended backoff (10× `$27` pull-off distance). Sets `locate_backing_off = true`.
+2. **LOCATE falling edge** (switch opens during backoff) → Stop the backoff, call `HOMING_StartLocateReapproach()` which queues: (a) a fixed `$27` extra clearance move, then (b) a slow re-approach (`3× pull_off`). Sets `locate_reapproaching = true`.
+3. **LOCATE rising edge with `locate_reapproaching`** → That is the precision home point → zero machine position, go to PULLOFF.
+4. **`HOMING_Tasks()` alarm guard** → Only alarms if the re-approach runs to completion without hitting the switch, or if the backoff runs out without the switch opening.
+
+**Files changed**:
+- `incs/motion/homing.h` — `HomingControl`: added `locate_reapproaching` bool field; added `HOMING_StartLocateReapproach()` declaration
+- `srcs/motion/homing.c` — `HOMING_StartLocate()`: rewritten to only start long backoff (no pre-queued re-approach); added new `HOMING_StartLocateReapproach()` function; `HOMING_Tasks()` LOCATE alarm guard updated
+- `srcs/app.c` — rising-edge handler: `LOCATE && locate_reapproaching` triggers PULLOFF; `LOCATE && locate_backing_off` ignored (switch still settling); falling-edge handler: stops backoff and calls `HOMING_StartLocateReapproach()`
+
+---
+
+## ✅ BUG FIX: Homing stuck at limit switch — INTERPOLATOR_Stop() + TRAJECTORY_Reset() (March 7, 2026)
+
+**Symptom**: `$H` would drive Z (or the first axis) to the limit switch, then freeze. No backoff, no slow locate, no pulloff — motor sat on the switch indefinitely.
+
+**Root cause**: In `srcs/app.c`, the rising-edge ISR callback (triggered when a limit switch fired during SEEK) was calling `TMR4_Stop()` and clearing the old segment buffer fields (`appData.motionQueueHead/Tail/Count = 0`, `appData.currentSegment = NULL`). The old fields belong to the pre-S-curve architecture and have no effect on the S-curve engine. Meanwhile, `interp_active` inside `interpolator.c` was left `true`. When `HOMING_StartLocate()` called `MOTION_HomingMove()`, that function calls `TRAJECTORY_AddMove()` (queues the backoff) then checks `if (!INTERPOLATOR_IsActive())` before kicking the DDS — it sees `true` (stale), so the interpolator is never restarted and the move sits in the queue forever.
+
+**Fix**:
+- `srcs/app.c` (SEEK→LOCATE rising-edge handler, LOCATE→PULLOFF rising-edge handler): Replaced
+  ```c
+  TMR4_Stop();
+  appData.motionQueueHead  = 0;
+  appData.motionQueueTail  = 0;
+  appData.motionQueueCount = 0;
+  appData.currentSegment   = NULL;
+  ```
+  with:
+  ```c
+  INTERPOLATOR_Stop();    // clears interp_active AND stops TMR4
+  TRAJECTORY_Reset();     // flushes the S-curve trajectory queue
+  ```
+- `srcs/app.c` (includes): Added `#include "motion/interpolator.h"` and `#include "motion/trajectory.h"` (were missing — would have caused `-Werror` implicit-declaration build failure)
+
+**Files changed**:
+- `srcs/app.c:22-24` — Added `#include "motion/interpolator.h"` and `#include "motion/trajectory.h"`
+- `srcs/app.c:~569-570` — SEEK→LOCATE block: `INTERPOLATOR_Stop(); TRAJECTORY_Reset();`
+- `srcs/app.c:~580-581` — LOCATE→PULLOFF block: `INTERPOLATOR_Stop(); TRAJECTORY_Reset();`
+
+---
+
+## ✅ BUG FIX: $3 direction invert ignored by interpolator (March 7, 2026)
+
+**Symptom**: Setting `$3=4` (invert Z direction) had no visible effect — Z still moved in the same direction.
+
+**Root cause**: `srcs/motion/stepper.c` is excluded from the build (`EXCLUDED_FILES` in `srcs/Makefile`). The S-curve replacement `interpolator.c` set direction GPIO pins via raw `AXIS_DirSet/DirClear` in `INTERPOLATOR_LoadMove()` without consulting `SETTINGS_GetCurrent()->step_direction_invert`. The `STEPPER_ReloadSettings()` stub in `motion_bridge.c` only updated `steps_per_mm`, not the direction mask.
+
+**Fix**:
+- `srcs/motion/interpolator.c`: Added `#include "motion/motion_utils.h"` and `#include "settings/settings.h"`. In `INTERPOLATOR_LoadMove()`, replaced bare `AXIS_DirSet/DirClear` with `MOTION_UTILS_SetDirection(axis, forward, dir_inv)` where `dir_inv = SETTINGS_GetCurrent()->step_direction_invert`. `dds_dir[]` (position accounting) is unchanged — only the GPIO pin is inverted.
+
+**Files changed**:
+- `srcs/motion/interpolator.c:~10-11` — Added `#include "motion/motion_utils.h"` and `#include "settings/settings.h"`
+- `srcs/motion/interpolator.c` — `INTERPOLATOR_LoadMove()` direction block: uses `MOTION_UTILS_SetDirection()` with settings mask
+
+---
+
+## ✅ BUG FIX: $H (homing) returned ok immediately, no motion (March 7, 2026)
+
+**Symptom**: Sending `$H` got an `ok` response immediately; machine stayed at 0,0,0 in `<Idle>` state; no motor motion at all.
+
+**Root cause**: In `srcs/motion/motion_bridge.c`, `GCODE_EVENT_HOMING` was lumped into the fallthrough case with `GCODE_EVENT_SPINDLE_ON`, `GCODE_EVENT_SPINDLE_OFF`, `GCODE_EVENT_COOLANT_ON`, `GCODE_EVENT_COOLANT_OFF`, and `GCODE_EVENT_PROGRAM_END`. That block just drained the trajectory queue and returned `true`. `HOMING_Start()` was never called, `g_homing.state` stayed `HOMING_STATE_IDLE`, and `HOMING_Tasks()` did nothing.
+
+**Fix**:
+- `srcs/motion/motion_bridge.c`: Added `#include "motion/homing.h"`. Removed `GCODE_EVENT_HOMING` from the shared fallthrough. Added dedicated `case GCODE_EVENT_HOMING:` that waits for the trajectory to drain, then calls `HOMING_Start(appData, event->data.homing.axes_mask)`. Sends `error:8` if homing is disabled or already running.
+
+**Files changed**:
+- `srcs/motion/motion_bridge.c:~10` — Added `#include "motion/homing.h"`
+- `srcs/motion/motion_bridge.c` — `GCODE_EVENT_HOMING` given its own case calling `HOMING_Start()`
+
+---
+
+## ✅ IMPLEMENTED: Software Jog ($J= + 0x85 cancel) — Phase 5a
+
+**Files**:
+- `incs/gcode/gcode_parser.h` — Added `GCODE_EVENT_JOG` to `GCODE_EventType` enum; added `bool is_jog` field to `linearMove` union struct
+- `incs/motion/trajectory.h` — Added `bool is_jog` field to `SCurveMove`; added `TRAJECTORY_TagLastAsJog()`, `TRAJECTORY_HasJogMoves()`, `TRAJECTORY_CancelJog()` to public API
+- `incs/motion/motion.h` — Added `MOTION_JogCancel()` and `MOTION_IsJogging()` declarations
+- `srcs/motion/trajectory.c` — Implemented `TRAJECTORY_TagLastAsJog()`, `TRAJECTORY_HasJogMoves()`, `TRAJECTORY_CancelJog()`
+- `srcs/gcode/gcode_parser.c` — Added `0x85` to `is_control_char()`; `case 0x85:` in CONTROL_CHAR handler calls `MOTION_JogCancel()`; `?` status now reports `<Jog|...>` when `MOTION_IsJogging()`; `$J=` handler in QUERY_CHARS parses and submits jog directly to `MOTION_ProcessGcodeEvent()` (bypasses command queue)
+- `srcs/motion/motion_bridge.c` — Added `s_jog_executing` flag; `GCODE_EVENT_JOG` case in `MOTION_ProcessGcodeEvent()`; `MOTION_JogCancel()` flushes jog trajectory entries and stops interpolator if executing jog; `MOTION_IsJogging()` returns true while jog queued or executing; `MOTION_Tasks()` tracks `s_jog_executing` per-move
+
+**Architecture**:
+- `$J=G91X1F500` → parsed in QUERY_CHARS → `GCODE_EVENT_JOG` submitted directly to motion bridge → `ok` returned on acceptance
+- Jog moves tagged `is_jog=true` + `speed_locked=true` in trajectory queue — planner does not blend across jog boundaries (entry_v=0, exit_v=0)
+- Consecutive jog commands chain via `s_planned_position` for smooth multi-step jog
+- `0x85` cancels only jog-tagged moves from queue (newest→oldest), leaves G-code moves intact; stops interpolator if jog was executing; no alarm raised
+- Status `?` reports `<Jog|MPos:...>` during jog execution (GRBL v1.1 compliant)
+
+**Supported `$J=` modals**: G90/G91 (absolute/relative), G20/G21 (units); at least one axis word and F required; any other word → `error:4`
+
+**Error codes**:
+- `error:2` — machine in alarm state (jog rejected)
+- `error:4` — bad/missing parameters (no F, no axis, unknown modal)
+- `error:8` — trajectory queue full at submission time
+
+**Test sequence (UGS)**:
+```
+$J=G91X1F500      → jog 1 mm +X, ok
+$J=G91X-1F500     → jog 1 mm -X, ok
+$J=G90X0Y0F1000   → jog to work origin, ok
+0x85              → cancel in-progress jog (no response)
+```
+
+**Build**: zero warnings/errors — `bins/CNC_V3.hex`
 
 ---
 
@@ -74,25 +189,9 @@ $J=G90X0Y0F1000   → jog to origin, ok
 
 ---
 
-### Phase 5b — Hardware Pendant (PS2 Serial) ← TO BE DESIGNED
+### ~~Phase 5b — Hardware Pendant (PS2 Serial)~~ — **DROPPED**
 
-**Hardware decision**: PS2 game controller via serial (UART or bit-bang PS2 protocol) — TBD after Phase 5a validated.
-
-**Likely architecture**:
-- PS2 controller polled at ~50Hz from `APP_IDLE` (rate-limited, non-blocking)
-- Axis buttons / D-pad → generate internal `$J=` equivalent jog events directly (bypasses UART parser)
-- Analogue sticks → variable feedrate jog (stick deflection maps to feedrate %, jog distance per poll period)
-- Dedicated buttons: feed hold, cycle start, soft reset, zero WCS, spindle on/off
-- Separate PS2 driver module: `srcs/pendant/ps2_pendant.c` + `incs/pendant/ps2_pendant.h`
-- Pendant active only when machine is IDLE or JOG state — ignored during file streaming
-
-**Hardware interface options** (decide before Phase 5b):
-1. PS2 hardware protocol (clock/data GPIO + bit-bang or SPI) — lowest latency
-2. PS2 → USB adapter → PIC32 USB host (complex, requires USB OTG hardware)
-3. PS2 → UART adapter board — simplest firmware integration
-4. Bluetooth PS2 controller → UART module — wireless option
-
-**Design discussion deferred until Phase 5a is complete and hardware is confirmed.**
+> Jogging is handled entirely by UGS on the PC side via `$J=` commands over UART. No firmware pendant support required. If hardware pendant is needed in the future it can use the existing `$J=` + `0x85` infrastructure via any UART-connected device.
 
 ---
 
