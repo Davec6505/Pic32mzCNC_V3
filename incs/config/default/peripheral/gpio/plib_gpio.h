@@ -182,6 +182,11 @@
 #define Coolant_GetLatch()          ((LATB >> 15) & 0x1U)
 #define Coolant_PIN                  GPIO_PIN_RB15
 
+/*** Macros for PROBE_PIN pin ***/
+#define PROBE_PIN_Get()               ((PORTF >> 3) & 0x1U)
+#define PROBE_PIN_GetLatch()          ((LATF >> 3) & 0x1U)
+#define PROBE_PIN_PIN                  GPIO_PIN_RF3
+
 /*** Macros for X_Min pin ***/
 #define X_Min_Set()               (LATASET = (1U<<4))
 #define X_Min_Clear()             (LATACLR = (1U<<4))

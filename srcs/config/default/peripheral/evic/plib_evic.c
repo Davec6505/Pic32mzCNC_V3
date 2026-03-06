@@ -45,6 +45,7 @@
 #include "interrupts.h"
 
 
+static volatile EXT_INT_PIN_CALLBACK_OBJ extInt1CbObj;
 static volatile EXT_INT_PIN_CALLBACK_OBJ extInt3CbObj;
 // *****************************************************************************
 // *****************************************************************************
@@ -57,15 +58,20 @@ void EVIC_Initialize( void )
     INTCONSET = _INTCON_MVEC_MASK;
 
     /* Set up priority and subpriority of enabled interrupts */
+    IPC2SET = 0x18U | 0x1U;  /* EXTERNAL_1:  Priority 6 / Subpriority 1 */
     IPC4SET = 0x1c0000U | 0x0U;  /* EXTERNAL_3:  Priority 7 / Subpriority 0 */
     IPC4SET = 0x18000000U | 0x0U;  /* TIMER_4:  Priority 6 / Subpriority 0 */
-    IPC35SET = 0x4000000U | 0x0U;  /* SPI2_RX:  Priority 1 / Subpriority 0 */
-    IPC36SET = 0x4U | 0x0U;  /* SPI2_TX:  Priority 1 / Subpriority 0 */
+    IPC33SET = 0x80000U | 0x0U;  /* DMA0:  Priority 2 / Subpriority 0 */
+    IPC33SET = 0x8000000U | 0x1000000U;  /* DMA1:  Priority 2 / Subpriority 1 */
+    IPC35SET = 0x8000000U | 0x0U;  /* SPI2_RX:  Priority 2 / Subpriority 0 */
+    IPC36SET = 0x8U | 0x1U;  /* SPI2_TX:  Priority 2 / Subpriority 1 */
     IPC39SET = 0x400U | 0x0U;  /* UART3_FAULT:  Priority 1 / Subpriority 0 */
     IPC39SET = 0x140000U | 0x0U;  /* UART3_RX:  Priority 5 / Subpriority 0 */
     IPC39SET = 0xc000000U | 0x0U;  /* UART3_TX:  Priority 3 / Subpriority 0 */
     IPC41SET = 0x4000000U | 0x3000000U;  /* FLASH_CONTROL:  Priority 1 / Subpriority 3 */
 
+    /* Initialize External interrupt 1 callback object */
+    extInt1CbObj.callback = NULL;
     /* Initialize External interrupt 3 callback object */
     extInt3CbObj.callback = NULL;
 
@@ -192,6 +198,10 @@ bool EVIC_ExternalInterruptCallbackRegister(
     bool status = true;
     switch  (extIntPin)
         {
+        case EXTERNAL_INT_1:
+            extInt1CbObj.callback = callback;
+            extInt1CbObj.context  = context;
+            break;
         case EXTERNAL_INT_3:
             extInt3CbObj.callback = callback;
             extInt3CbObj.context  = context;
@@ -202,6 +212,30 @@ bool EVIC_ExternalInterruptCallbackRegister(
         }
 
     return status;
+}
+
+
+// *****************************************************************************
+/* Function:
+    void EXTERNAL_1_InterruptHandler(void)
+
+  Summary:
+    Interrupt Handler for External Interrupt pin 1.
+
+  Remarks:
+    It is an internal function called from ISR, user should not call it directly.
+*/
+void __attribute__((used)) EXTERNAL_1_InterruptHandler(void)
+{
+    uintptr_t context_var;
+
+    IFS0CLR = _IFS0_INT1IF_MASK;
+
+    if(extInt1CbObj.callback != NULL)
+    {
+        context_var = extInt1CbObj.context;
+        extInt1CbObj.callback (EXTERNAL_INT_1, context_var);
+    }
 }
 
 

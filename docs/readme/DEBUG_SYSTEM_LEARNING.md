@@ -10,8 +10,8 @@ This guide teaches you how to use the compile-time debug system for effective fi
 1. **Add debug output** to stepper module:
    ```c
    // In srcs/motion/stepper.c - STEPPER_LoadSegment()
-   DEBUG_PRINT_STEPPER("[STEPPER] Loading segment: OC1CON=0x%08X, T4CON=0x%08X\r\n", 
-                       (unsigned)OC1CON, (unsigned)T4CON);
+   DEBUG_PRINT_STEPPER("[STEPPER] Loading segment: T4CON=0x%08X\r\n",
+                       (unsigned)T4CON);
    DEBUG_PRINT_STEPPER("[STEPPER] Timer freq: %lu Hz\r\n", TMR4_FrequencyGet());
    ```
 
@@ -26,9 +26,9 @@ This guide teaches you how to use the compile-time debug system for effective fi
 
 4. **Observe debug output**:
    ```
-   [STEPPER] Loading segment: OC1CON=0x00000000, T4CON=0x00000000
+   [STEPPER] Loading segment: T4CON=0x00000000
    [STEPPER] Timer freq: 781250 Hz
-   [STEPPER] Re-enabling OC1 and TMR4 after soft reset
+   [STEPPER] Re-starting TMR4 after soft reset
    ```
 
 5. **Production build** - Remove debug with zero overhead:

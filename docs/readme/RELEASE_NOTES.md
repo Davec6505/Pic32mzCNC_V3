@@ -159,13 +159,8 @@ if (radius_error > settings->arc_tolerance) {
 
 **Problem**: Motion wouldn't restart after Ctrl+X soft reset
 
-**Solution**: Validate and re-enable OC/TMR modules
+**Solution**: Validate and re-enable TMR4
 ```c
-// Re-enable OC1 if disabled
-if(!(OC1CON & _OC1CON_ON_MASK)) {
-    OCMP1_Enable();
-}
-
 // Re-start TMR4 if stopped
 if(!(T4CON & _T4CON_ON_MASK)) {
     TMR4_Start();

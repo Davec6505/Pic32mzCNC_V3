@@ -66,8 +66,11 @@
 // Section: System Interrupt Vector declarations
 // *****************************************************************************
 // *****************************************************************************
+void EXTERNAL_1_Handler (void);
 void EXTERNAL_3_Handler (void);
 void TIMER_4_Handler (void);
+void DMA0_Handler (void);
+void DMA1_Handler (void);
 void SPI2_RX_Handler (void);
 void SPI2_TX_Handler (void);
 void UART3_FAULT_Handler (void);
@@ -81,6 +84,11 @@ void FLASH_CONTROL_Handler (void);
 // Section: System Interrupt Vector definitions
 // *****************************************************************************
 // *****************************************************************************
+void __attribute__((used)) __ISR(_EXTERNAL_1_VECTOR, ipl6SRS) EXTERNAL_1_Handler (void)
+{
+    EXTERNAL_1_InterruptHandler();
+}
+
 void __attribute__((used)) __ISR(_EXTERNAL_3_VECTOR, ipl7SRS) EXTERNAL_3_Handler (void)
 {
     EXTERNAL_3_InterruptHandler();
@@ -91,12 +99,22 @@ void __attribute__((used)) __ISR(_TIMER_4_VECTOR, ipl6SRS) TIMER_4_Handler (void
     TIMER_4_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_SPI2_RX_VECTOR, ipl1SRS) SPI2_RX_Handler (void)
+void __attribute__((used)) __ISR(_DMA0_VECTOR, ipl2SRS) DMA0_Handler (void)
+{
+    DMA0_InterruptHandler();
+}
+
+void __attribute__((used)) __ISR(_DMA1_VECTOR, ipl2SRS) DMA1_Handler (void)
+{
+    DMA1_InterruptHandler();
+}
+
+void __attribute__((used)) __ISR(_SPI2_RX_VECTOR, ipl2SRS) SPI2_RX_Handler (void)
 {
     SPI2_RX_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_SPI2_TX_VECTOR, ipl1SRS) SPI2_TX_Handler (void)
+void __attribute__((used)) __ISR(_SPI2_TX_VECTOR, ipl2SRS) SPI2_TX_Handler (void)
 {
     SPI2_TX_InterruptHandler();
 }

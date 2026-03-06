@@ -293,7 +293,7 @@ missing closing braces.
 **Changes**:
 - `srcs/motion/stepper.c` — **fully rewritten from scratch**
   - All Taylor series ISR code deleted (`accel_count`, `rest`, `jerk_count`, `jerk_steps`, `initial_rate`, `nominal_rate`, `final_rate`, `step_interval` on MotionSegment — all gone)
-  - `OCP1_ISR` is now pure GRBL: Bresenham + step count against `current_segment->n_step`, no acceleration math
+  - `TIMER_4_ISR` is now pure GRBL: Bresenham + step count against `current_segment->n_step`, no acceleration math
   - On segment complete: ISR advances `segmentBufferTail`, loads next StepSegment inline (including updating PR4), or stops TMR4 if buffer empty
   - `STEPPER_LoadSegment()` pops from `segmentBuffer` ring buffer, initialises Bresenham from `StepperBlock`, sets constant PR4
   - `_init_bresenham_from_block()` helper isolates GPIO direction writes (main-loop safe) from ISR Bresenham init
@@ -522,9 +522,9 @@ instantaneous jump from zero to A_max at accel/decel phase boundaries — mechan
 - `srcs/settings/settings.c:512` — `SETTINGS_PrintAll()` — added `$140`-`$143` output lines
 - `incs/data_structures.h:98` — `MotionSegment` struct: added `jerk_steps`, `jerk_steps_log2`, `jerk_count` fields
 - `srcs/motion/kinematics.c:300` — `KINEMATICS_LinearMove()` — compute and store `jerk_steps` / `jerk_steps_log2` / `jerk_count` from `settings->jerk[cfg_axis]`
-- `srcs/motion/stepper.c:565` — `OCP1_ISR` — reset `jerk_count = 0` at decel phase entry
-- `srcs/motion/stepper.c:578` — `OCP1_ISR` — accel phase: apply S-curve scaling via bit-shift
-- `srcs/motion/stepper.c:600` — `OCP1_ISR` — decel phase: apply S-curve scaling via bit-shift
+- `srcs/motion/stepper.c:565` — `TIMER_4_ISR` — reset `jerk_count = 0` at decel phase entry
+- `srcs/motion/stepper.c:578` — `TIMER_4_ISR` — accel phase: apply S-curve scaling via bit-shift
+- `srcs/motion/stepper.c:600` — `TIMER_4_ISR` — decel phase: apply S-curve scaling via bit-shift
 
 **ISR cost**: 1 comparison + 1 multiply + 1 bit-shift per step during jerk ramp only. Zero cost during cruise and after jerk ramp completes (condition `jerk_count >= jerk_steps` exits early).
 
@@ -681,8 +681,8 @@ Same fix applied to `decel_rate_delta` and the copy in `MOTION_RecomputeExit()`.
 Updated all architecture documentation to reflect current `lookahead` branch implementation. Removed all references to the deleted Priority Phase System and old TMR2/OC2/OC3/OC4 per-axis ISR architecture.
 
 - `docs/plantuml/02_segment_clock.puml` — **Complete rewrite**: Now documents period-based TMR4/OC1/TMR5 single-ISR architecture, M14K shadow register swap, switch/Harmony macro GPIO pattern, direct-SFR Timer/OC, Bresenham inside ISR, velocity profiling inside ISR, pulse-width TMR5 callback, race window note
-- `docs/plantuml/01_system_overview.puml` — **Complete rewrite**: Removed TMR2 free-running, OC2/OC3/OC4 per-axis ISRs, Priority Phase enum. Added `OCP1_ISR` single-ISR with shadow regs, look-ahead planner in kinematics, arc incremental generator
-- `docs/plantuml/03_arc_linear_interpolation.puml` — **Targeted fix**: Replaced `[Priority Phase\nSystem]` note with `[MOTION_Tasks Segment Queue]`. Replaced `[Hardware Timers OC1/OC2/OC3/OC4]` with `[OCP1_ISR TMR4/OC1/TMR5]`
+- `docs/plantuml/01_system_overview.puml` — **Complete rewrite**: Removed TMR2 free-running, OC2/OC3/OC4 per-axis ISRs, Priority Phase enum. Added `TIMER_4_ISR` single-ISR with shadow regs, look-ahead planner in kinematics, arc incremental generator
+- `docs/plantuml/03_arc_linear_interpolation.puml` — **Targeted fix**: Replaced `[Priority Phase\nSystem]` note with `[MOTION_Tasks Segment Queue]`. Replaced `[Hardware Timers OC1/OC2/OC3/OC4]` with `[TIMER_4_ISR TMR4/TMR5]`
 - `README.md:9` — Branch updated: `tmc5160` → `lookahead`
 - `README.md:11` — Last build date updated: February 28, 2026 → March 1, 2026
 - `README.md:19` — Feature table: Added "Look-ahead backward-pass planner (junction velocity) ✅ Complete"

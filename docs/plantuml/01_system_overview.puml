@@ -1,7 +1,8 @@
 @startuml
-title CNC Motion Control - System Overview (lookahead branch, March 2026)
-' Architecture: Single OCP1_ISR, Bresenham + velocity profiling inside ISR,
-' GRBL-exact three-pass look-ahead planner, period-based TMR4/OC1/TMR5
+title CNC Motion Control - System Overview (scurve_motion branch, March 2026)
+' Architecture: Single TIMER_4_ISR, Bresenham + velocity profiling inside ISR,
+' GRBL-exact three-pass look-ahead planner, period-based TMR4/TMR5
+' OC1 dual-compare generates step pulse GPIO in hardware (no OC1 interrupt)
 !theme blueprint
 
 participant "GCODE_Tasks\n(✅ Complete)" as GCODE
@@ -12,8 +13,7 @@ participant "STEPPER\n(✅ Complete)" as STEPPER
 participant "MOTION_Tasks\n(✅ Complete)" as MOTION
 participant "LIMIT_CHECK\n(✅ Complete)" as LIMITS
 participant "TMR4\n(Period-Based\n781.25 kHz)" as TMR4
-participant "OC1\n(Dual Compare)" as OC1HW
-participant "OCP1_ISR\n(IPL5 Shadow Regs\nAll Axes)" as OC1ISR
+participant "TIMER_4_ISR\n(IPL6 Shadow Regs\nBresenham + Velocity)" as OC1ISR
 participant "TMR5\n(One-Shot\nPulse Width)" as TMR5
 
 == G-code Reception & Parsing ==
@@ -60,9 +60,12 @@ end
 MOTION -> STEPPER : STEPPER_LoadSegment(segment)
 STEPPER -> STEPPER : Populate ISR statics:\n  delta[], abs_delta[], dominant_axis,\n  dominant_delta, error[], direction_bits
 STEPPER -> STEPPER : Set direction GPIO pins (Harmony macros)\n  DirX_Set/Clear, DirY_Set/Clear, etc.\n  DIR must be stable BEFORE first STEP rising edge
-STEPPER -> TMR4 : PR4 = initial_rate (sets rollover period)
-STEPPER -> OC1HW : OC1R = period - 5, OC1RS = period - 3
-STEPPER -> TMR4 : TMR4_Start() / OCMP1_Enable() if not running
+STEPPER -> TMR4 : PR4 = initial_rate (sets TMR4 rollover = step interval)
+STEPPER -> TMR4 : TMR4_Start() if not running
+note right of STEPPER
+  OC1 dual-compare auto-generates step pulse GPIO in hardware.
+  No OC1 interrupt — step ISR is TIMER_4_InterruptHandler (TMR4 overflow).
+end note
 note right of STEPPER
   Segment transition race window:
   currentSegment assigned before ISR statics populated.
@@ -70,12 +73,12 @@ note right of STEPPER
   Practically harmless — same pattern as GRBL.
 end note
 
-== Per-Step Cycle (OCP1_ISR — all axes, full Bresenham) ==
-TMR4 -> OC1HW : Counts to OC1R → Step pin HIGH (rising edge)
-TMR4 -> OC1HW : Counts to OC1RS → OCP1_ISR fires
+== Per-Step Cycle (TIMER_4_ISR — all axes, full Bresenham) ==
+TMR4 -> GPIO : OC1 hardware auto-toggles step pin HIGH at compare match
+TMR4 -> OC1ISR : TMR4 overflows at PR4 → TIMER_4_InterruptHandler fires (IPL6)
 activate OC1ISR
 note over OC1ISR
-  M14K Shadow Register Set (IPL5):
+  M14K Shadow Register Set (IPL6):
   Hardware register swap in 1 cycle.
   Zero push/pop stack cost on entry/exit.
 end note
@@ -85,7 +88,7 @@ OC1ISR -> OC1ISR : AXIS_IncrementSteps / AXIS_DecrementSteps\n  (always_inline �
 OC1ISR -> OC1ISR : Bresenham loop (max 3 subordinate axes)\n  error[axis] += abs_delta[axis]\n  if error >= dominant_delta:\n    switch(axis) → StepY_Set()/StepZ_Set()/StepA_Set()\n    AXIS_IncrementSteps / DecrementSteps\n    error[axis] -= dominant_delta
 OC1ISR -> TMR5 : T5CONSET = _T5CON_ON_MASK (direct SFR — start one-shot)
 OC1ISR -> OC1ISR : Velocity profiling (integer only, no float, no division)\n  ACCEL: step_interval -= rate_delta  (precomputed look-ahead)\n  DECEL: step_interval += decel_rate_delta\n  CRUISE: unchanged
-OC1ISR -> OC1ISR : Direct SFR: PR4 = period, OC1R = p-5, OC1RS = p-3
+OC1ISR -> OC1ISR : Direct SFR: PR4 = period  (clamp min 7 ticks)
 OC1ISR -> OC1ISR : seg->steps_completed++
 deactivate OC1ISR
 TMR4 -> TMR4 : Rolls over at PR4 → next cycle
@@ -93,7 +96,7 @@ TMR4 -> TMR4 : Rolls over at PR4 → next cycle
 == Pulse Width Expiry (~2.56 µs) ==
 TMR5 -> OC1ISR : TMR5_PulseWidthCallback()
 OC1ISR -> OC1ISR : T5CONCLR = _T5CON_ON_MASK (stop one-shot)
-OC1ISR -> OC1ISR : StepX_Clear(); StepY_Clear(); StepZ_Clear(); StepA_Clear()\n  4 unrolled Harmony macros → 4 LATxCLR writes
+OC1ISR -> GPIO : StepX_Clear(); StepY_Clear(); StepZ_Clear(); StepA_Clear()\n  4 unrolled Harmony macros → 4 LATxCLR writes
 
 == Segment Completion ==
 MOTION -> MOTION : Poll steps_completed >= steps_remaining

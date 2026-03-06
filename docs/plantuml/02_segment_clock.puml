@@ -1,14 +1,15 @@
 @startuml
-title Period-Based OC1/TMR4 Step Engine — Single ISR, Bresenham + Velocity Inside ISR
-' Current architecture as of March 2026 (lookahead branch)
+title Period-Based TMR4 Step Engine — Single ISR, Bresenham + Velocity Inside ISR
+' Current architecture as of March 2026 (scurve_motion branch)
 ' GRBL-exact three-pass planner runs in main loop after each enqueue.
+' ISR is TIMER_4_InterruptHandler (TMR4 overflow, IPL6 shadow regs).
 ' ISR is pure integer: reads pre-computed rate fields, no float, no division.
+' OC1 hardware (dual-compare) auto-toggles step GPIO — no OC1 interrupt used.
 
 scale 1.5
 
 participant "TMR4\n(Period-Based\n781.25 kHz)" as TMR4
-participant "OC1\n(Dual Compare)" as OC1HW
-participant "OCP1_ISR\n(IPL5 Shadow Regs)" as ISR
+participant "TIMER_4_ISR\n(IPL6 Shadow Regs\nBresenham + Velocity)" as ISR
 participant "TMR5\n(One-Shot\nPulse Width)" as TMR5
 participant "Step GPIO\n(Harmony Macros)" as GPIO
 
@@ -17,20 +18,15 @@ note over TMR4, GPIO
   Runs once per segment in main loop BEFORE first step fires:
     delta[], abs_delta[], dominant_axis, direction_bits, error[] loaded into ISR statics
     Direction GPIO pins set here (DirX_Set/Clear etc.) — must be stable before first STEP
-    PR4   = initial_rate      (sets TMR4 rollover period = step interval)
-    OC1R  = period - 5        (rising edge: step pulse starts)
-    OC1RS = period - 3        (falling edge: ISR trigger, pulse width ~2.56 µs)
-    TMR4_Start() / OCMP1_Enable() if not already running
+    PR4 = initial_rate  (TMR4 rollover period = step interval)
+    OC1 dual-compare auto-generates step pulse in hardware (no OC1 interrupt)
+    TMR4_Start() if not already running
 end note
 
-== Per-Step Cycle (repeats every step_interval ticks) ==
+== Per-Step Cycle (repeats every PR4 ticks — TMR4 overflow) ==
 
-TMR4 -> OC1HW : Counts up to OC1R\nOC1 output goes HIGH (step pulse rising edge)
-activate OC1HW
-OC1HW -> GPIO : Step pin HIGH — stepper driver latches on this rising edge
-deactivate OC1HW
-
-TMR4 -> OC1HW : Counts up to OC1RS\nOC1 output goes LOW — OCP1_ISR fires
+TMR4 -> GPIO : OC1 hardware auto-toggles step pin HIGH at compare match\n(silicon — no CPU involvement for pulse rising edge)
+TMR4 -> ISR : TMR4 overflows at PR4 → TIMER_4_InterruptHandler fires (IPL6)
 activate ISR
 note over ISR
   M14K Shadow Register Set (IPL5):
@@ -63,7 +59,7 @@ ISR -> TMR5 : T5CONSET = _T5CON_ON_MASK\n              Direct SFR — starts one
 
 ISR -> ISR : Velocity profiling (integer only — no float, no division)\n             sc = seg->steps_completed\n             ACCEL  (sc < accelerate_until): step_interval -= rate_delta\n             DECEL  (sc >= decelerate_after): step_interval += decel_rate_delta\n             CRUISE: step_interval unchanged
 
-ISR -> ISR : Schedule next step — direct SFR writes\n             period = (uint16_t)step_interval  (clamp: min 7 ticks)\n             PR4   = period       (TMR4 rolls over here, resets to 0)\n             OC1R  = period - 5U  (next rising edge)\n             OC1RS = period - 3U  (next falling edge / next ISR trigger)\n             Invariant: PR4 >= OC1RS > OC1R (OC datasheet 16.3.2.5)
+ISR -> ISR : Schedule next step — direct SFR writes\n             period = (uint16_t)step_interval  (clamp: min 7 ticks)\n             PR4 = period  (TMR4 rolls over here — sets next ISR interval)
 
 ISR -> ISR : seg->steps_completed++
 deactivate ISR
@@ -103,9 +99,10 @@ note over TMR4, GPIO
     Direction   -> set once per segment in STEPPER_LoadSegment() (main loop)
                    Stepper drivers require DIR stable BEFORE first STEP rising edge
 
-  Timer/OC (silicon — never changes board-to-board):
-    PR4, OC1R, OC1RS  -> direct SFR registers (no Harmony abstraction)
-    T5CONSET/T5CONCLR -> direct SFR registers
+  Timer (silicon — never changes board-to-board):
+    PR4               -> direct SFR register (sets TMR4 period / step interval)
+    T5CONSET/T5CONCLR -> direct SFR registers (pulse width one-shot)
+    OC1 dual-compare  -> auto-generates step pulse GPIO in hardware, no ISR
 
   Shadow register set:
     All motion state (delta[], abs_delta[], error[], direction_bits,

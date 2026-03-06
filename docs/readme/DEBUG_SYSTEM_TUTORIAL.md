@@ -211,8 +211,8 @@ bool ProcessGcodeEvent(GCODE_Event* event, APP_DATA* appData) {
 #include "common.h"
 #include "../config/default/peripheral/gpio/plib_gpio.h"
 
-void __ISR(_OC1_VECTOR, IPL5SOFT) OCP1_ISR(void) {
-    IFS0CLR = _IFS0_OC1IF_MASK;  // Clear interrupt flag
+void TIMER_4_InterruptHandler(void) {
+    IFS0CLR = _IFS0_T4IF_MASK;  // Clear TMR4 interrupt flag
     
     // ⚠️ WARNING: Only use DEBUG_EXEC in ISR (no printf - too slow!)
     DEBUG_EXEC_STEPPER(LED2_Toggle());  // Visual pulse indicator
@@ -220,8 +220,8 @@ void __ISR(_OC1_VECTOR, IPL5SOFT) OCP1_ISR(void) {
     // ISR logic...
     step_counter++;
     
-    // Schedule next pulse
-    OC1R = TMR4 + step_interval;
+    // Schedule next period
+    TMR4_PeriodSet(max(7, step_interval + pulse_width + 2));
 }
 ```
 
@@ -345,7 +345,7 @@ DEBUG_PRINT_SEGMENT("Events: %lu\r\n", motion_event_counter);
     static volatile uint32_t isr_call_count = 0;
 #endif
 
-void __ISR(_OC1_VECTOR, IPL5SOFT) OCP1_ISR(void) {
+void TIMER_4_InterruptHandler(void) {
     DEBUG_EXEC_STEPPER(isr_call_count++);
     // Use isr_call_count in debug prints
 }

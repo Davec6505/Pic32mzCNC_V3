@@ -90,7 +90,7 @@ end note
 
 ' Motion Execution
 QUEUE -down-> MOTION : Pop segment\nfrom queue
-MOTION -down-> [OCP1_ISR\nTMR4/OC1/TMR5\n(Single ISR)] : Step pulses\n(period-based timing)
+MOTION -down-> [TIMER_4_ISR\nTMR4/TMR5\n(Single ISR)] : Step pulses\n(period-based timing)
 
 ' Arc Completion
 ARC_GEN -right-> ARC_SM : Last segment?\narcGenState = IDLE

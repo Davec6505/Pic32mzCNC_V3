@@ -140,7 +140,7 @@ typedef struct {
 2. Segment enqueued in `motionQueue[16]`
 3. `MOTION_PlannerRecalculate()` runs reverse+forward+trapezoid pass on all buffered segments
 4. `STEPPER_LoadSegment()` loads next segment — ISR timing fields already final
-5. `OCP1_ISR` executes Bresenham steps; velocity profiling reads pre-computed integer fields
+5. `TIMER_4_ISR` executes Bresenham steps; velocity profiling reads pre-computed integer fields
 6. Segment completes → `motionSegmentCompleted = true`, next segment loads automatically
 
 ### 4. Stepper Control (stepper.c)
@@ -148,15 +148,15 @@ typedef struct {
 
 **Timer Configuration**:
 - **TMR4**: 16-bit, 1:64 prescaler (781.25kHz)
-- **OC1**: X-axis continuous pulse mode
+- **TIMER_4_ISR**: Step ISR (TMR4 overflow, IPL6) — Bresenham + velocity profiling
 - **OC2**: Y-axis continuous pulse mode
 - **Pulse Width**: 2.5µs (2 ticks)
 
 **ISR Architecture**:
 ```c
-void OCP1_ISR(void) {
+void TIMER_4_InterruptHandler(void) {
     // Clear flag FIRST
-    IFS0CLR = _IFS0_OC1IF_MASK;
+    IFS0CLR = _IFS0_T4IF_MASK;  // clear TMR4 interrupt flag
     
     // Generate step pulse
     AXIS_StepSet(dominant_axis);
@@ -179,9 +179,6 @@ void OCP1_ISR(void) {
 **Hardware Validation Guards**:
 ```c
 // Prevent soft reset failures
-if(!(OC1CON & _OC1CON_ON_MASK)) {
-    OCMP1_Enable();  // Re-enable if disabled
-}
 if(!(T4CON & _T4CON_ON_MASK)) {
     TMR4_Start();    // Re-start if stopped
 }
@@ -344,7 +341,7 @@ UGS receives "ok" → Sends next command
 ## Safety Systems
 
 ### E-Stop Hardware Interrupt (RF4, IPL7)
-Highest-priority ISR — beats OC1 step ISR (IPL5). Registered via Change Notice Port F in APP_CONFIG.
+Highest-priority ISR — beats TIMER_4 step ISR (IPL6). Registered via INT3 (RF4) in APP_CONFIG.
 ```c
 // Callback fires on RF4 edge (E-Stop button)
 static void ESTOP_Callback(GPIO_PIN pin, uintptr_t context) {
@@ -368,7 +365,7 @@ Two-flag graceful drain — in-flight segments complete before hardware stops:
 void STEPPER_FinalizeHold(void) {
     g_feed_hold_pending = false;
     g_feed_hold_active  = true;
-    TMR4_Stop(); OC1_Disable(); TMR5_Stop();
+    TMR4_Stop(); TMR5_Stop();
 }
 ```
 

@@ -125,7 +125,7 @@ The heart of the system is a **PIC32MZ2048EFH100** — a 32-bit microcontroller 
 | UART for G-code | UART3 (115200 baud) |
 | Step timer | TMR4 (100 kHz fixed-rate) |
 | Step pulse clear timer | TMR5 (one-shot, ~3 µs) |
-| OC modules | OC1–OC4 (Output Compare — step pulse generation) |
+| TMR4 | Step timing ISR source (overflow fires TIMER_4_InterruptHandler) |
 | SPI2 | TMC5160 driver configuration |
 
 ### 2.2 Memory Layout

@@ -1081,8 +1081,12 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             float tlo = SETTINGS_GetToolLengthOffset();
             p += snprintf(&buf[p], sizeof(buf)-p, "[TLO:%.3f]\r\n", tlo);
             
-            // Report probe position (currently not implemented - show zeros)
-            p += snprintf(&buf[p], sizeof(buf)-p, "[PRB:0.000,0.000,0.000:0]\r\n");
+            // Report last probe result (contact position + triggered flag)
+            p += snprintf(&buf[p], sizeof(buf)-p, "[PRB:%.3f,%.3f,%.3f:%d]\r\n",
+                (double)appData->probePosition.coordinate[AXIS_X],
+                (double)appData->probePosition.coordinate[AXIS_Y],
+                (double)appData->probePosition.coordinate[AXIS_Z],
+                appData->probeSuccess ? 1 : 0);
             
             UART3_Write((uint8_t*)buf, (uint32_t)p);
             handled = true;
@@ -1308,8 +1312,23 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         DEBUG_PRINT_GCODE("[GCODE_CMD] Processing command: '%s'\r\n", rxBuffer);
         cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
 
-        DEBUG_PRINT_GCODE("[GCODE_CMD] Normal flow control\r\n");
-        SendOrDeferOk(appData, cmdQueue);
+        // Probe commands (G38.x) own their own ok: it is sent by app.c ONLY after
+        // probe completion ([PRB:...] result line precedes the ok).  Suppress the
+        // normal SendOrDeferOk here so UGS does not receive a premature ok.
+        bool is_probe_cmd = false;
+        for (uint32_t pi = 0; pi + 2 < nBytesRead && rxBuffer[pi] != '\0'; pi++) {
+            if ((rxBuffer[pi] == 'G' || rxBuffer[pi] == 'g') &&
+                 rxBuffer[pi+1] == '3' && rxBuffer[pi+2] == '8') {
+                is_probe_cmd = true;
+                break;
+            }
+        }
+        if (!is_probe_cmd) {
+            DEBUG_PRINT_GCODE("[GCODE_CMD] Normal flow control\r\n");
+            SendOrDeferOk(appData, cmdQueue);
+        } else {
+            DEBUG_PRINT_GCODE("[GCODE_CMD] Probe command — ok withheld until completion\r\n");
+        }
 
         nBytesRead = 0;
         memset(rxBuffer, 0, sizeof(rxBuffer));

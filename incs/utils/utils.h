@@ -165,11 +165,13 @@ static inline bool __attribute__((always_inline)) LIMIT_CheckAxis(E_AXIS axis, u
 
 // ===== PROBE INPUT ABSTRACTION =====
 
-// Probe input is Z-max limit switch (standard GRBL convention)
-// $6 probe invert setting: 0=normally open (NO), 1=normally closed (NC)
+// Probe input: dedicated INT1 pin RF3 (PROBE_PIN)
+// $6 probe invert setting: 0=normally open (NO, reads 0 on contact), 1=normally closed (NC)
 // Returns true when probe is triggered (contact made)
+// NOTE: The INT1 ISR (PROBE_Callback) stops step hardware on edge — this function is used
+//       for status queries ($#) and soft-reset re-arm checks only.
 static inline bool __attribute__((always_inline)) PROBE_Get(uint8_t probe_invert) {
-    bool pin_state = LIMIT_GetMax(AXIS_Z);  // Z-max limit is probe input
+    bool pin_state = (bool)PROBE_PIN_Get();  // RF3 dedicated probe input
     return pin_state ^ (probe_invert ? 1 : 0);  // Apply invert setting
 }
 

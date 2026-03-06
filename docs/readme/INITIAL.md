@@ -6,7 +6,7 @@ This README provides an overview of the CNC motion control system architecture u
 Features
 Uses TMR2 as a free-running timer for a shared time base at 100khz.
 
-Multiple Output Compare (OCx) modules generate step pulses for CNC axes.
+TMR4 overflow fires TIMER_4_InterruptHandler for CNC axis step pulses.
 
 Bresenham interpolation coordinates multi-axis motion.
 
@@ -25,7 +25,7 @@ Free-running 32-bit timer with 10 μ s tick
 
 OCx (OC1–OC4)
 
-Output Compare modules for X, Y, Z, A axes
+TMR4 step ISR for X, Y, Z, A axes
 
 OCx ISR
 
@@ -62,15 +62,15 @@ Clear OCx interrupt flags promptly in each ISR.
 Use modular structs to track segment and axis states.
 
 Example ISR Skeleton
-void __ISR(_OC1_VECTOR, IPL5SOFT) OC1Handler(void) {
-    IFSxCLR = _IFSx_OC1IF_MASK; // Clear interrupt flag
-    uint32_t now = TMR2;
+```c
+void TIMER_4_InterruptHandler(void) {
+    IFS0CLR = _IFS0_T4IF_MASK; // Clear TMR4 interrupt flag
 
-    bresenham_step(&segment, axes, now);
+    bresenham_step(&segment, axes);
 
-    OC1R = now + segment.x_interval;
-    OC1RS = OC1R + pulse_width;
+    TMR4_PeriodSet(segment.x_interval + pulse_width + 2);
 }
+```
 For more detailed documentation, diagrams, or initialization code, please refer to the project wiki or contact the maintainer.
 
 Apply revision

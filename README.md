@@ -40,8 +40,8 @@ GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, tar
 | Peripheral clock | 50 MHz (PBCLK3) |
 | CoreTimer | 100 MHz (CPU/2) |
 | FPU | Single-precision hardware (`-mhard-float -msingle-float`) |
-| Step timer | TMR4 1:64 → 781.25 kHz (1.28 µs/tick) |
-| Step output | OC1 continuous-pulse dual-compare mode |
+| Step timer | TMR4 1:64 → 781.25 kHz (1.28 µs/tick) — overflow fires step ISR |
+| Step pulse | OC1 dual-compare auto-generates GPIO pulse in hardware |
 | Spindle PWM | OC8 / TMR6 @ 3.338 kHz |
 | SPI2 | Mode 3, ~1.923 MHz (BRG=12), 8-bit, MSSEN=0 |
 | Bootloader | MikroE USB HID @ 0x9D1F4000 (48 KB) |
@@ -90,12 +90,12 @@ Mixing is fully supported (e.g. X+Y = TMC5160, Z+A = DRV8825).
 
 ### Key Design Concept
 
-**Virtual Dominant Axis** — OC1 fires the ISR only at the actual step rate needed, not at a fixed 30 kHz background rate. CPU load scales with motion speed, not a fixed overhead.
+**Virtual Dominant Axis** — `TIMER_4_InterruptHandler` fires only at the actual step rate needed, not at a fixed background rate. CPU load scales with motion speed, not a fixed overhead.
 
 ### Motion Pipeline
 
 ```
-UART RX → Parser → Event Queue → Kinematics → Motion Queue → STEPPER_LoadSegment → OC1 ISR
+UART RX → Parser → Event Queue → Kinematics → Motion Queue → STEPPER_LoadSegment → TIMER_4_ISR
                         ↓              ↓              ↓                               ↓
                    Flow Control   Velocity       Position                      Bresenham
                    (defer "ok")   Profile        Tracking                   subordinate axes
@@ -113,24 +113,25 @@ main.c
         │     ├── motion.c  — segment queue, GRBL-exact three-pass planner
         │     ├── gcode_parser.c — parse events, flow control
         │     ├── kinematics.c — generate motion segments
-        │     ├── stepper.c — load segments to TMR4/OC1
+        │     ├── stepper.c — load segments to TMR4
         │     └── TMC5160_Tasks() [rate-limited 10 Hz, #ifdef HAS_TMC5160_AXIS]
         ├── APP_HOMING      → homing.c ($H — 4-phase seek/locate/pulloff/complete)
         └── APP_ALARM       → stepper.c (emergency stop, STEPPER_DisableAll)
 
 ISR (asynchronous)
-  ├── OCP1_ISR  — Bresenham step pulses (stepper.c, IPL5)
+  ├── TIMER_4_ISR  — Bresenham step pulses (stepper.c, IPL6)
   ├── TMR5_Callback — pulse width timing (stepper.c)
   ├── OC8 / TMR6 — spindle PWM (spindle.c)
   ├── UART3_ISR — ring buffer RX/TX
-  └── CN-F_ISR  — E-Stop button RF4 (stepper.c, IPL7 — highest priority)
+  ├── INT1_ISR  — Probe contact RF3 (app.c, IPL6)
+  └── INT3_ISR  — E-Stop button RF4 (app.c, IPL7 — highest priority)
 ```
 
 ### ISR Architecture
 
-All Bresenham interpolation and velocity profiling execute **inside** `OCP1_ISR` — there is no separate main-loop phase system. The PIC32MZ M14K shadow register set at IPL5 swaps the entire CPU register file in 1 cycle on ISR entry/exit, giving zero push/pop stack cost.
+All Bresenham interpolation and velocity profiling execute **inside** `TIMER_4_InterruptHandler` — there is no separate main-loop phase system. The PIC32MZ M14K shadow register set at IPL6 swaps the entire CPU register file in 1 cycle on ISR entry/exit, giving zero push/pop stack cost.
 
-**Per-step sequence inside `OCP1_ISR`:**
+**Per-step sequence inside `TIMER_4_InterruptHandler`:**
 
 1. Cache `seg = currentSegment` (NULL guard — immediate return if not loaded)
 2. **Dominant axis STEP HIGH** — `switch(dominant_axis)` → Harmony `#define` macro → single `LATxSET` write. Compiler emits a jump table; no function call, no pointer indirection.
@@ -140,7 +141,7 @@ All Bresenham interpolation and velocity profiling execute **inside** `OCP1_ISR`
 6. **Velocity profiling** — integer arithmetic only, no float, no division:
    - Accel: `step_interval -= rate_delta` (floor at `nominal_rate`)
    - Decel: `step_interval += decel_rate_delta` (ceil at `final_rate`)
-7. `PR4 = period`, `OC1R = period-5`, `OC1RS = period-3` — direct SFR writes. Timer/OC silicon never changes board-to-board so no Harmony abstraction is needed here.
+7. `PR4 = period` — direct SFR write sets next TMR4 rollover interval. TMR4 silicon never changes board-to-board so no Harmony abstraction is needed here.
 8. `seg->steps_completed++`
 9. **Segment completion check** — if `steps_completed >= steps_remaining`: write `T4CONCLR = _T4CON_ON_MASK` directly (stops TMR4 in silicon *inside the ISR*, before returning) → set `motionSegmentCompleted = true` → `return`. This eliminates phantom ISR calls that would otherwise occur on the next TMR4 rollover after the final step.
 
@@ -148,11 +149,11 @@ All Bresenham interpolation and velocity profiling execute **inside** `OCP1_ISR`
 
 **GPIO vs Timer/OC split:**
 - **GPIO** (board-specific, MCC-managed): Harmony `#define` macros (`StepX_Set()` etc.) — MCC pin renames propagate automatically.
-- **Timer/OC** (silicon, never board-specific): direct SFR registers (`PR4`, `OC1R`, `OC1RS`, `T5CONSET`, `T5CONCLR`).
+- **Timer** (silicon, never board-specific): direct SFR registers (`PR4`, `T5CONSET`, `T5CONCLR`).
 
 ### Dwell (G4)
 
-Dwell segments (`SEGMENT_TYPE_DWELL`) bypass the TMR4/OC1 hardware entirely. `STEPPER_LoadSegment()` records a CoreTimer start value and duration (CoreTimer runs at 100 MHz = CPU/2), then returns immediately. The segment is held in `currentSegment` until `STEPPER_IsDwellComplete()` confirms the elapsed CoreTimer ticks exceed `dwell_duration`. No step pulses are generated; the motion queue does not advance until the dwell expires.
+Dwell segments (`SEGMENT_TYPE_DWELL`) bypass the TMR4 step ISR entirely. `STEPPER_LoadSegment()` records a CoreTimer start value and duration (CoreTimer runs at 100 MHz = CPU/2), then returns immediately. The segment is held in `currentSegment` until `STEPPER_IsDwellComplete()` confirms the elapsed CoreTimer ticks exceed `dwell_duration`. No step pulses are generated; the motion queue does not advance until the dwell expires.
 
 ### Safety Flags
 
@@ -320,7 +321,7 @@ Pic32mzCNC_V3/
 │   ├── gcode/
 │   │   └── gcode_parser.c     # GRBL protocol, flow control, G38.x
 │   ├── motion/
-│   │   ├── stepper.c          # TMR4/OC1 hardware, ISR, Bresenham
+        ├── stepper.c          # TMR4 step ISR, Bresenham
 │   │   ├── motion.c           # Segment queue, phase system
 │   │   ├── kinematics.c       # Velocity profiling, arc math
 │   │   ├── homing.c           # $H 4-phase cycle

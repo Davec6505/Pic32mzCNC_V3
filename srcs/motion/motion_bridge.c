@@ -581,8 +581,75 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
         case GCODE_EVENT_HOMING:
         case GCODE_EVENT_PROBE_TOWARD:
         case GCODE_EVENT_PROBE_AWAY:
-            // Modal-state / system events handled elsewhere; consume silently
+        {
+            // Phase 1: wait for any executing motion to drain before starting the
+            // probe move.  This matches the dwell guard and ensures probe feedrate
+            // is the very first move the interpolator sees (no blending artefact).
+            if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) {
+                return false;  // Still executing — retry next iteration
+            }
+
+            // Resolve start in machine coordinates.
+            // Re-anchor from the step counter (motion fully drained above).
+            CoordinatePoint pr_start = KINEMATICS_GetCurrentPosition();
+            s_planned_position       = pr_start;
+            s_planned_position_valid = true;
+
+            // Build probe target in work space (NAN = keep current axis).
+            CoordinatePoint pr_start_work = KINEMATICS_MachineToWork(pr_start);
+            CoordinatePoint pr_end_work   = pr_start_work;
+
+            if (!isnan(event->data.probe.x)) pr_end_work.coordinate[AXIS_X] = event->data.probe.x;
+            if (!isnan(event->data.probe.y)) pr_end_work.coordinate[AXIS_Y] = event->data.probe.y;
+            if (!isnan(event->data.probe.z)) pr_end_work.coordinate[AXIS_Z] = event->data.probe.z;
+            if (!isnan(event->data.probe.a)) pr_end_work.coordinate[AXIS_A] = event->data.probe.a;
+
+            CoordinatePoint pr_end = KINEMATICS_WorkToMachine(pr_end_work);
+
+            // Resolve feedrate: event value overrides modal; fallback 100 mm/min.
+            float pr_fr = event->data.probe.feedrate;
+            if (pr_fr < 1.0f && s_modal_feedrate_mm_min >= 1.0f)
+                pr_fr = s_modal_feedrate_mm_min;
+            if (pr_fr < 1.0f) pr_fr = 100.0f;
+
+            // Arm probe state BEFORE queueing the move so the monitor in app.c
+            // can detect a trigger issued by the very first ISR tick.
+            appData->probeState       = PROBE_STATE_MOVING;
+            appData->probeSuccess     = false;
+            appData->probeAlarmOnFail = event->data.probe.alarm_on_fail;
+
+            // Queue single trajectory move to probe target.
+            // entry/exit = 0 → no junction blending; exact feedrate maintained.
+            if (!TRAJECTORY_AddMove(pr_start, pr_end, pr_fr, 0.0f, 0.0f)) {
+                // Zero-length move (target == current position) — immediate failure.
+                appData->probeState = PROBE_STATE_FAILED;
+                return true;
+            }
+
+            // Advance planned position.
+            s_planned_position       = pr_end;
+            s_planned_position_valid = true;
+
+            TRAJECTORY_Recalculate();
+
+            // Kick interpolator if idle.
+            if (!INTERPOLATOR_IsActive()) {
+                SCurveMove mv;
+                if (TRAJECTORY_GetNextMove(&mv)) {
+                    STEPPERS_Enable();
+                    INTERPOLATOR_LoadMove(&mv);
+                }
+            }
+
+            DEBUG_PRINT_MOTION("[PROBE] Move queued to (%.3f,%.3f,%.3f) @ %.1f mm/min alarm=%d\r\n",
+                (double)pr_end.coordinate[AXIS_X],
+                (double)pr_end.coordinate[AXIS_Y],
+                (double)pr_end.coordinate[AXIS_Z],
+                (double)pr_fr,
+                appData->probeAlarmOnFail);
+
             return true;
+        }
 
         case GCODE_EVENT_DWELL: {
             // Phase 1: wait for all queued motion to finish before the dwell starts.
@@ -626,6 +693,32 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
 bool MOTION_IsDwellActive(void)
 {
     return s_dwell_active;
+}
+
+// ─── MOTION IDLE QUERY ────────────────────────────────────────────────────────
+
+// Returns true when both the trajectory queue and the interpolator are idle.
+// Used by the probe monitor in app.c to detect that the probe move completed
+// without a trigger (probe failed to make contact).
+bool MOTION_IsIdle(void)
+{
+    return !INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u;
+}
+
+// ─── PROBE STOP ───────────────────────────────────────────────────────────────
+
+// Stop motion immediately on a probe trigger.
+//   • Stops the DDS interpolator (halts step generation).
+//   • Clears the trajectory queue (discards the remainder of the probe move).
+//   • Re-anchors the planned-position tracker to the live step-counter so the
+//     next queued command starts from the exact contact position.
+// Steppers remain ENABLED so the machine holds position at the contact point.
+void MOTION_ProbeStop(void)
+{
+    INTERPOLATOR_Stop();
+    TRAJECTORY_Reset();
+    MOTION_SyncPlannedPosition();
+    // Intentionally NOT calling STEPPER_DisableAll — hold torque is required.
 }
 
 // ─── PLANNED POSITION SYNC ────────────────────────────────────────────────────
