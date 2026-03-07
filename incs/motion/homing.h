@@ -23,12 +23,13 @@
 
 // Homing state machine
 typedef enum {
-    HOMING_STATE_IDLE = 0,      // No homing in progress
-    HOMING_STATE_SEEK,          // Fast approach to limit
-    HOMING_STATE_LOCATE,        // Slow precision homing
-    HOMING_STATE_PULLOFF,       // Retract from limit
-    HOMING_STATE_COMPLETE,      // Homing successful
-    HOMING_STATE_ALARM          // Homing failed
+    HOMING_STATE_IDLE = 0,          // No homing in progress
+    HOMING_STATE_SEEK,              // Fast move toward switch
+    HOMING_STATE_LOCATE_BACKOFF,    // Backing off after switch hit (switch still closed)
+    HOMING_STATE_LOCATE_REAPPROACH, // Slow re-approach toward switch (switch open)
+    HOMING_STATE_PULLOFF,           // Retract from switch after precision home
+    HOMING_STATE_COMPLETE,          // Homing successful
+    HOMING_STATE_ALARM              // Homing failed
 } HomingState;
 
 // Homing phase tracking
@@ -44,8 +45,6 @@ typedef struct {
     
     // Motion tracking
     bool motion_active;         // True when homing move in progress
-    bool locate_backing_off;    // True while backing off from switch (switch still closed)
-    bool locate_reapproaching;  // True while doing the slow re-approach (switch is open)
     uint32_t alarm_code;        // Non-zero if homing failed
 } HomingControl;
 
