@@ -21,6 +21,10 @@
 #include <stdbool.h>
 #include "data_structures.h"
 
+// Fixed backoff distance after SEEK limit hit — just enough to release the switch.
+// Re-approach uses $27 (homing_pull_off) which must be >= this value.
+#define HOMING_LOCATE_BACKOFF_MM  3.0f
+
 // Homing state machine
 typedef enum {
     HOMING_STATE_IDLE = 0,          // No homing in progress

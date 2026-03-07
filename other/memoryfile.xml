@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?> 
+<project>                                  
+  <executable name="../bins/CNC_V3">                 
+    <memory name="program">                 
+      <units>bytes</units>                 
+      <length>2098304</length>                 
+      <used>96304</used>                     
+      <free>2002000</free>                     
+    </memory>                              
+    <memory name="data">              
+      <units>bytes</units>                 
+      <length>524288</length>                 
+      <used>27584</used>                     
+      <free>496704</free>                     
+    </memory>                              
+  </executable>                            
+</project>                                 

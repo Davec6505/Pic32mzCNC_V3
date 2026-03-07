@@ -364,6 +364,7 @@ void MOTION_Arc(APP_DATA *appData)
 
     // Attempt to add the segment to the trajectory queue
     if (TRAJECTORY_AddMove(appData->arcCurrent, next, appData->arcFeedrate, 0.0f, 0.0f)) {
+        TRAJECTORY_LockLastMove();   // arc segments run at constant feedrate — no junction blending
         TRAJECTORY_Recalculate();
 
         appData->arcCurrent = next;
@@ -596,7 +597,9 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             float ea = event->data.arcMove.a;
 
             float fr = event->data.arcMove.feedrate;
-            if (fr < 1.0f) fr = s->max_rate[AXIS_X];
+            if (fr < 1.0f && s_modal_feedrate_mm_min >= 1.0f)
+                fr = s_modal_feedrate_mm_min;   // use modal feedrate (e.g. from prior G1 F1200)
+            if (fr < 1.0f) fr = s->max_rate[AXIS_X];  // absolute fallback
 
             // Radius from start to center
             float dx_s = start.coordinate[AXIS_X] - cx;

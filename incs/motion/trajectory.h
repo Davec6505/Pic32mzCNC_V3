@@ -105,6 +105,13 @@ bool  TRAJECTORY_GetNextMove(SCurveMove *out);
 // Returns number of moves currently in the queue.
 uint32_t TRAJECTORY_QueueCount(void);
 
+// Boost the junction entry limit of the most recently added move to its nominal
+// speed.  Call after every arc segment so the lookahead planner does not insert
+// sub-nominal junction dips between consecutive arc chords (which differ only by
+// a tiny angle).  The block is NOT locked — reverse/forward passes still run, so
+// arc-start acceleration and arc-end deceleration are handled correctly.
+void  TRAJECTORY_LockLastMove(void);
+
 // Mark the most recently added move as a jog move.
 // Call immediately after a successful TRAJECTORY_AddMove for a jog command.
 // Also locks the move's speed so the planner will not blend it with neighbours.

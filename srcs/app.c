@@ -482,71 +482,51 @@ void APP_Tasks ( void )
                     led2_homing_last = now;
                 }
 
-                // Check limit switch (using same logic as hard limits)
-                bool limit_current = MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert);
-                
-                // Update persistent state tracker
-                UTILS_HomingLimitUpdate(limit_current);
-                
-                DEBUG_EXEC_MOTION({
-                    static uint32_t limit_debug = 0;
-                    if (limit_debug++ % 50000 == 0) {
-                        DEBUG_PRINT_MOTION("[APP_HOMING] limit=%d, state=%d, queue=%lu\r\n",
-                                          limit_current, g_homing.state, 
-                                          (unsigned long)appData.motionQueueCount);
-                    }
-                });
-                
-                // ===== EDGE-BASED HOMING: Only edges matter, ignore limit state itself =====
-                
-                // RISING EDGE: Limit triggered (returns true once, then auto-clears)
-                if (UTILS_HomingLimitRisingEdge()) {
-                    DEBUG_PRINT_MOTION("[APP_HOMING] RISING EDGE detected\r\n");
-                    
-                    if (g_homing.state == HOMING_STATE_SEEK) {
-                        DEBUG_PRINT_MOTION("[APP_HOMING] SEEK→LOCATE: Stopping motion, starting backoff\r\n");
-                        
-                        // Stop current motion immediately
-                        TMR4_Stop();
-                        
-                        // Clear motion queue
-                        appData.motionQueueHead = 0;
-                        appData.motionQueueTail = 0;
-                        appData.motionQueueCount = 0;
-                        appData.currentSegment = NULL;
-                        
-                        g_homing.motion_active = false;
-                        g_homing.state = HOMING_STATE_LOCATE;
-                        HOMING_StartLocate(&appData);
-                    } else if (g_homing.state == HOMING_STATE_LOCATE) {
-                        DEBUG_PRINT_MOTION("[APP_HOMING] LOCATE→PULLOFF: Stopping motion, precision hit\r\n");
-                        
-                        // Stop current motion immediately
-                        TMR4_Stop();
-                        
-                        // Clear motion queue
-                        appData.motionQueueHead = 0;
-                        appData.motionQueueTail = 0;
-                        appData.motionQueueCount = 0;
-                        appData.currentSegment = NULL;
-                        
-                        g_homing.motion_active = false;
-                        g_homing.state = HOMING_STATE_PULLOFF;
-                        HOMING_StartPulloff(&appData);
-                    }
+                // Per-state limit handling — only sample when meaningful for that state.
+                switch (g_homing.state) {
+
+                    case HOMING_STATE_SEEK:
+                        // Fast approach: sample limit, looking for first contact.
+                        UTILS_HomingLimitUpdate(HOMING_IsLimitActiveNow());
+                        if (UTILS_HomingLimitRisingEdge()) {
+                            DEBUG_PRINT_MOTION("[APP_HOMING] SEEK: switch hit → LOCATE backoff\r\n");
+                            STEPPER_StopMotion();   // stops interpolator + flushes trajectory queue
+                            g_homing.motion_active = false;
+                            HOMING_StartLocate(&appData);   // queues backoff, kicks interpolator
+                        }
+                        break;
+
+                    case HOMING_STATE_LOCATE_BACKOFF:
+                        // Switch still physically closed — do NOT sample, would corrupt edge tracker.
+                        // HOMING_Tasks() watches queue-empty → calls HOMING_StartLocateReapproach().
+                        break;
+
+                    case HOMING_STATE_LOCATE_REAPPROACH:
+                        // Slow re-approach: sample limit, looking for precision contact.
+                        UTILS_HomingLimitUpdate(HOMING_IsLimitActiveNow());
+                        if (UTILS_HomingLimitRisingEdge()) {
+                            DEBUG_PRINT_MOTION("[APP_HOMING] LOCATE: precision hit → PULLOFF\r\n");
+                            STEPPER_StopMotion();   // stops interpolator + flushes trajectory queue
+                            g_homing.motion_active = false;
+                            // Zero step counter at the exact home point.
+                            {
+                                CNC_Settings* hset = SETTINGS_GetCurrent();
+                                bool home_positive  = (*g_homing_settings[g_homing.current_axis].homing_dir_mask
+                                                       >> g_homing.current_axis) & 0x01;
+                                float home_zero = home_positive
+                                                  ? hset->max_travel[g_homing.current_axis] : 0.0f;
+                                KINEMATICS_SetAxisMachinePosition(g_homing.current_axis, home_zero);
+                            }
+                            g_homing.state = HOMING_STATE_PULLOFF;
+                            HOMING_StartPulloff(&appData);
+                        }
+                        break;
+
+                    default:
+                        // HOMING_Tasks() drives PULLOFF → COMPLETE via queue-empty.
+                        // No limit sampling needed in remaining states.
+                        break;
                 }
-                // FALLING EDGE: Limit cleared (returns true once, then auto-clears)
-                else if (UTILS_HomingLimitFallingEdge()) {
-                    DEBUG_PRINT_MOTION("[APP_HOMING] FALLING EDGE detected\r\n");
-                    
-                    if (g_homing.state == HOMING_STATE_PULLOFF) {
-                        DEBUG_PRINT_MOTION("[APP_HOMING] PULLOFF→COMPLETE: Limit cleared\r\n");
-                        g_homing.motion_active = false;
-                        g_homing.state = HOMING_STATE_COMPLETE;
-                    }
-                }
-                
-                // No timeout checks during homing - we only care about edges!
             }
             // Normal motion: Check hard limits (ONLY when NOT homing)
             else {

@@ -211,9 +211,18 @@ void HOMING_StartSeek(APP_DATA* appData) {
     // Determine homing direction from $23 mask
     uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
     bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
-    
+
     DEBUG_PRINT_MOTION("[HOMING_SEEK] RAW: dir_mask=0x%02X\r\n", dir_mask);
-    
+
+    // If already on the limit switch, skip SEEK entirely and go straight to backoff.
+    // A rising edge will never occur if the switch is already closed on entry.
+    UTILS_HomingLimitReset();
+    if (HOMING_IsLimitActiveNow()) {
+        DEBUG_PRINT_MOTION("[HOMING_SEEK] limit already active on entry → skip to LOCATE backoff\r\n");
+        HOMING_StartLocate(appData);
+        return;
+    }
+
     // Calculate search distance based on $23 setting and $130-$133 max_travel.
     // $23=0 → home to MIN switch (negative direction) → search -max_travel
     // $23=1 → home to MAX switch (positive direction) → search +max_travel
@@ -247,8 +256,7 @@ void HOMING_StartLocate(APP_DATA* appData) {
     uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
     bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
 
-    float pull_off = *g_homing_settings[g_homing.current_axis].homing_pull_off;
-    float backoff_distance = home_positive ? -(pull_off * 10.0f) : (pull_off * 10.0f);
+    float backoff_distance = home_positive ? -HOMING_LOCATE_BACKOFF_MM : HOMING_LOCATE_BACKOFF_MM;
 
     DEBUG_PRINT_MOTION("[HOMING_LOCATE_BACKOFF] axis=%d, backoff=%.1f mm\r\n",
                        g_homing.current_axis, backoff_distance);
@@ -271,8 +279,9 @@ void HOMING_StartLocateReapproach(APP_DATA* appData) {
     uint8_t dir_mask = *g_homing_settings[g_homing.current_axis].homing_dir_mask;
     bool home_positive = (dir_mask >> g_homing.current_axis) & 0x01;
 
-    float pull_off = *g_homing_settings[g_homing.current_axis].homing_pull_off;
-    float reapproach = home_positive ? (pull_off * 3.0f) : -(pull_off * 3.0f);
+    // Travel 2x the fixed backoff — guaranteed to retrigger the switch.
+    // Limit detection in app.c LOCATE_REAPPROACH stops the move; distance is just a ceiling.
+    float reapproach = home_positive ? (HOMING_LOCATE_BACKOFF_MM * 2.0f) : -(HOMING_LOCATE_BACKOFF_MM * 2.0f);
 
     DEBUG_PRINT_MOTION("[HOMING_LOCATE_REAPPROACH] axis=%d, distance=%.1f mm\r\n",
                        g_homing.current_axis, reapproach);

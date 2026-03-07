@@ -566,6 +566,22 @@ uint32_t TRAJECTORY_QueueCount(void)
     return traj_count;
 }
 
+void TRAJECTORY_LockLastMove(void)
+{
+    if (traj_count == 0u) return;
+    uint32_t newest = (traj_head == 0u) ? (TRAJ_QUEUE_SIZE - 1u) : (traj_head - 1u);
+    SCurveMove *m = &traj_queue[newest];
+    // Raise the junction entry limit to allow full-speed arc-to-arc transitions.
+    // At a=5000 mm/s² a typical arc chord (~1.8mm) provides >1mm of braking room,
+    // so the reverse pass will still arrive at v_nom for interior segments, giving
+    // constant-speed arcs.  Crucially we do NOT set speed_locked or force
+    // entry_speed_sqr — the planner reverse/forward passes remain active and can
+    // correctly compute the deceleration ramp at the arc-start (if approaching from
+    // rest) and arc-end junction with following linear/arc moves.
+    m->max_entry_speed_sqr    = m->nominal_speed * m->nominal_speed;
+    m->max_junction_speed_sqr = m->nominal_speed * m->nominal_speed;
+}
+
 // ─── Jog support ─────────────────────────────────────────────────────────────
 
 void TRAJECTORY_TagLastAsJog(void)
