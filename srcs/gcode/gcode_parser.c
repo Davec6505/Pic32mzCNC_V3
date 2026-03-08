@@ -24,6 +24,7 @@
 #include "motion_utils.h" // For MOTION_UTILS_EnableAllAxes()
 #include "kinematics.h"
 #include "motion/homing.h"
+#include "motion/interpolator.h"
 #include "utils.h"
 #include "settings.h"
 #include "data_structures.h"
@@ -806,10 +807,17 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
 
     // Homing sentinel ($H): hold the $H ok until the homing cycle fully completes.
     // HOMING_IsActive() returns false for IDLE, COMPLETE (transient), and ALARM.
-    // COMPLETE is always resolved within the same HOMING_Tasks() call so after
-    // HOMING_Tasks() returns the state is either IDLE (done) or SEEK (next axis).
+    // Also hold while state == COMPLETE because the fall-through in HOMING_Tasks()
+    // resolves COMPLETE→IDLE atomically, but CheckDeferredOk can be called from the
+    // motionSegmentCompleted path which runs BEFORE HOMING_Tasks() in app.c.
+    // Also hold while INTERPOLATOR is still running — this guards the case where
+    // CheckDeferredOk is invoked (through the motionSegmentCompleted path) before
+    // HOMING_Tasks() has had a chance to see motionQueueCount == 0 and advance the
+    // homing state machine.
     if (s_homing_pending) {
         if (HOMING_IsActive()) return;  // still in progress — hold all oks
+        if (HOMING_GetState() == HOMING_STATE_COMPLETE) return;  // transitioning — hold
+        if (INTERPOLATOR_IsActive()) return;  // motion still running — hold
         s_homing_pending = false;
         if (HOMING_GetState() == HOMING_STATE_ALARM) {
             // Failure: discard the deferred $H ok slot, send ALARM:9 per GRBL spec.

@@ -8,6 +8,8 @@
 #include "motion/motion.h"
 #include "motion/stepper.h"
 #include "motion/motion_utils.h"
+#include "motion/interpolator.h"
+#include "motion/trajectory.h"
 #include "utils/utils.h"
 #include "utils/uart_utils.h"
 #include "settings/settings.h"
@@ -130,16 +132,32 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
             break;
             
         case HOMING_STATE_PULLOFF:
-            // Pulloff complete when motion queue drains — advance to COMPLETE.
-            // motion_active flag is NOT reliable here (set true by StartPulloff, never cleared
-            // by the ISR path), so check motionQueueCount alone.
-            if (appData->motionQueueCount == 0 && !appData->motionActive) {
+            // Pulloff complete when the s-curve interpolator and trajectory queue are both
+            // empty.  We check INTERPOLATOR_IsActive() and TRAJECTORY_QueueCount() directly
+            // rather than appData->motionQueueCount because motionQueueCount is a snapshot
+            // written once at the top of MOTION_Tasks().  When app.c sets HOMING_STATE_PULLOFF
+            // and calls HOMING_StartPulloff() AFTER MOTION_Tasks() has already run in the
+            // same main-loop iteration, motionQueueCount still reads 0 (the pre-pulloff
+            // value) even though INTERPOLATOR_IsActive() is already true.  Using the live
+            // volatile flags avoids the stale-snapshot false-positive that would cause an
+            // immediate PULLOFF→IDLE transition before the pulloff move runs.
+            if (!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u) {
                 DEBUG_PRINT_GCODE("[HOMING] PULLOFF complete → COMPLETE\r\n");
                 g_homing.motion_active = false;
                 g_homing.state = HOMING_STATE_COMPLETE;
+                // Fall through to HOMING_STATE_COMPLETE immediately.
+                // Without this, g_homing.state stays COMPLETE for one full main-loop
+                // iteration: HOMING_IsActive() returns false (COMPLETE is treated as
+                // inactive), so GCODE_CheckDeferredOk releases the $H ok and clears
+                // s_homing_pending — but HOMING_Start() on a second $H still sees
+                // state==COMPLETE (not IDLE) and returns false → error:8.
+                // By falling through we complete the COMPLETE→IDLE transition in the
+                // same call, so state is IDLE before any ok is released.
+            } else {
+                break;
             }
-            break;
-            
+            /* fall through */
+
         case HOMING_STATE_COMPLETE:
             // Homing complete - step counter was already zeroed at the LOCATE trigger
             // (machine position 0 = home switch). After pulloff, step counter reflects
