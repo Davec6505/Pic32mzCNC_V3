@@ -82,6 +82,7 @@ static uint32_t okPendingCount = 0;         // Flow control: count of deferred "
 // s_prev_consumed removed: deferred ok release is now space-based, not delta-based
 static bool     s_program_end_pending = false;  // M2/M30 drain sentinel
 static bool     s_homing_pending = false;   // $H ok held until homing cycle completes
+static bool     s_homing_started = false;   // true once HOMING_IsActive() first returns true after $H
 
 // Startup pre-fill gate.
 // On power-on or soft-reset the trajectory queue is empty.  We send "ok"
@@ -145,7 +146,15 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     }
 
     DEBUG_PRINT_GCODE("[SOFT RESET] Software reset - clearing buffers and state\r\n");
-    
+
+    /* 0. Detect alarm condition BEFORE stopping (state changes immediately after) */
+    uint8_t soft_reset_alarm = 0;
+    if (HOMING_IsActive()) {
+        soft_reset_alarm = 6;   // ALARM:6 — homing fail, reset during homing
+    } else if (INTERPOLATOR_IsActive()) {
+        soft_reset_alarm = 3;   // ALARM:3 — reset while in motion (abort cycle)
+    }
+
     /* 1. Stop all motion immediately */
     STEPPER_StopMotion();  // Disables steppers, stops TMR4, disables OC1
     HOMING_Abort();        // Abort homing if in progress
@@ -194,8 +203,14 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     appData->alarmCode = 0;
     grblAlarm = false;
     
-    /* 7. Reset application state to IDLE */
-    appData->state = APP_IDLE;
+    /* 7. Reset application state — ALARM if homing/motion was aborted, IDLE otherwise */
+    if (soft_reset_alarm != 0) {
+        UART_Printf("ALARM:%u\r\n", (unsigned)soft_reset_alarm);
+        appData->state = APP_ALARM;
+        appData->alarmCode = soft_reset_alarm;
+    } else {
+        appData->state = APP_IDLE;
+    }
     
     /* 8. Clear G-code command queue */
     cmdQueue->head = 0;
@@ -207,6 +222,8 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     okPendingCount = 0;         // Clear all deferred ok responses
     // (s_prev_consumed removed — no longer needed)
     s_program_end_pending = false;  // Clear program end pending flag
+    s_homing_pending = false;       // Clear homing sentinel
+    s_homing_started = false;       // Clear homing-started flag
     grblCheckMode = false;
     g_feed_hold_active  = false;  // Clear hold (defined in stepper.c / stepper.h)
     g_feed_hold_pending = false;  // Cancel any in-flight pending hold
@@ -715,7 +732,7 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         if (cmd[1] == 'H' && (cmd[2] == '\0' || cmd[2] == '\n' || cmd[2] == '\r')) {
             // $H - Home all axes command
             ev->type = GCODE_EVENT_HOMING;
-            ev->data.homing.axes_mask = 0x0F; // Home all axes (XYZA = bits 0-3)
+            ev->data.homing.axes_mask = SETTINGS_GetCurrent()->homing_enable; // axes bitmask from $22 (0x07=XYZ, 0x0F=XYZA)
             return true;
         }
     }
@@ -815,14 +832,16 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
     // HOMING_Tasks() has had a chance to see motionQueueCount == 0 and advance the
     // homing state machine.
     if (s_homing_pending) {
-        if (HOMING_IsActive()) return;  // still in progress — hold all oks
+        if (HOMING_IsActive()) { s_homing_started = true; return; }  // mark started, keep holding
+        if (!s_homing_started) return;  // $H queued but HOMING_Start() not yet called — hold
         if (HOMING_GetState() == HOMING_STATE_COMPLETE) return;  // transitioning — hold
         if (INTERPOLATOR_IsActive()) return;  // motion still running — hold
         s_homing_pending = false;
+        s_homing_started = false;
         if (HOMING_GetState() == HOMING_STATE_ALARM) {
-            // Failure: discard the deferred $H ok slot, send ALARM:9 per GRBL spec.
+            // Failure: discard the deferred $H ok slot, send the actual alarm code.
             if (okPendingCount > 0) okPendingCount--;
-            UART_Printf("ALARM:9\r\n");
+            UART_Printf("ALARM:%u\r\n", (unsigned)HOMING_GetAlarmCode());
             return;
         }
         // Success: fall through to release the one pending ok normally.
@@ -982,6 +1001,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 }
             }
             if (!has_terminator) break;
+            char saved_terminator = rxBuffer[terminator_pos]; // save for queue-full retry
             rxBuffer[terminator_pos] = '\0';
 
             // ✅ Check for control chars AFTER termination (handles '?' with newline)
@@ -1017,8 +1037,15 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 }
                 if (has_content) {
                     DEBUG_PRINT_GCODE("[IDLE] Processing line: '%s'\r\n", rxBuffer);
+                    uint32_t count_before_idle = cmdQueue->count;
                     cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
-                    
+                    if (cmdQueue->count == count_before_idle) {
+                        // Queue full — restore the line terminator so IDLE re-finds
+                        // it on the next iteration and retries without losing the line.
+                        rxBuffer[terminator_pos] = saved_terminator;
+                        DEBUG_PRINT_GCODE("[IDLE] Queue full — retrying next iteration\r\n");
+                        break;
+                    }
                     // ✅ Send "ok" for all lines with content
                     DEBUG_PRINT_GCODE("[IDLE] Sending ok for content line\r\n");
                     SendOrDeferOk(appData, cmdQueue);
@@ -1360,6 +1387,11 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             if (!MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
                 // Limits are clear - allow recovery
                 g_suppress_hard_limits = false;
+                // Clear non-hard-limit alarms (ALARM:3 motion abort, ALARM:6 homing abort, etc.)
+                if (appData->state == APP_ALARM && appData->alarmCode != 1) {
+                    appData->state = APP_IDLE;
+                    appData->alarmCode = 0;
+                }
                 DEBUG_PRINT_GCODE("[GCODE] Alarm cleared via $X - limits clear, recovery allowed\r\n");
             } else {
                 // Still on limit - cannot clear alarm
@@ -1591,7 +1623,17 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             if (rxBuffer[i] == '\0') { cmd_end = i; break; }
         }
         DEBUG_PRINT_GCODE("[GCODE_CMD] Processing command: '%s'\r\n", rxBuffer);
+
+        // Queue-full guard: track whether Extract actually enqueued anything.
+        // If count is unchanged the queue was full and the token was silently
+        // dropped.  Hold rxBuffer and retry next iteration WITHOUT sending ok.
+        // UGS is gated here (no ok → no new send) so no command is ever lost.
+        uint32_t count_before = cmdQueue->count;
         cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
+        if (cmdQueue->count == count_before) {
+            DEBUG_PRINT_GCODE("[GCODE_CMD] Queue full — holding for retry\r\n");
+            break;  // stay in GCODE_STATE_GCODE_COMMAND, do NOT send ok
+        }
 
         // Probe commands (G38.x) own their own ok: it is sent by app.c ONLY after
         // probe completion ([PRB:...] result line precedes the ok).  Suppress the

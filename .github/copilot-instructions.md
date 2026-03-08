@@ -696,9 +696,33 @@ $H                   # Home                          (unsigned long)appData->mot
 
 ## Common Pitfalls}
 
+### ❌ CRITICAL LESSON: Never Hardcode Homing Axes Mask — Read From $22 Setting
+
+**Mistake made (March 2026)**: `parse_command_to_event()` in `gcode_parser.c` had:
+```c
+ev->data.homing.axes_mask = 0x0F; // ❌ WRONG — includes A-axis
+```
+
+**Why it caused hours of debugging**:
+- `0x0F` = bits 0-3 = XYZA. The A-axis has **no limit switch** on this PCB.
+- Homing XYZ succeeded, then firmware tried to home A, sought max_travel distance, found nothing → `ALARM:9`.
+- Because state got stuck in `HOMING_STATE_ALARM`, a second `$H` returned `error:8`.
+- The symptom looked like a state-machine bug, not a settings bug. Wasted time tracing ok-timing and SEEK alarm logic when the real problem was the wrong constant.
+
+**Correct code — always read the setting**:
+```c
+ev->data.homing.axes_mask = SETTINGS_GetCurrent()->homing_enable; // ✅ from $22
+```
+
+**The setting `$22` (homing_enable) is already the per-axis bitmask**:
+- `$22=7`  → 0x07 = bits 0-2 = XYZ only (default, correct for this board)
+- `$22=15` → 0x0F = XYZA (only valid if A has a limit switch fitted)
+- `$22=1`  → UGS sends this meaning "enable", maps to 0x07 internally
+
+**Rule**: Any time you write code that iterates over homing axes or builds an axes mask for `$H`, read `settings->homing_enable` — **never** write a literal bitmask.
 
 
-### ÔØî Don't Modify Timer Config Without Understanding// Deferred ok check (gcode_parser.c)
+// Deferred ok check (gcode_parser.c)
 
 ```cvoid GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
 

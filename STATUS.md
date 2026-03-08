@@ -6,6 +6,129 @@
 
 ---
 
+## ✅ FIX: Arc geometry bug — G-code queue silent command drop (March 8, 2026)
+
+**Root cause**: In `GCODE_STATE_GCODE_COMMAND`, when the 64-slot G-code queue was full,
+`Extract_CommandLineFrom_Buffer` silently dropped the incoming token (hit the `break` guard),
+but the caller still called `SendOrDeferOk` and cleared `rxBuffer`. UGS received an "ok",
+believed the dropped command (e.g., `G2X50Y0I50J0`) was accepted, and the following `G3`
+sat at the queue head. The arc handler later peeked `G3` and ran it as if it were the `G2`,
+producing the wrong geometry (full circle in the -X direction) for every arc after the first.
+
+**Observable symptom**: In `09_arc_radius_sweep.gcode`, arcs 2–N all shot off in the -X
+direction and completed a full circle. Only arc 1 (empty queue at start) and the final arc
+were correct.
+
+**Fix** (`srcs/gcode/gcode_parser.c`):
+- `GCODE_STATE_GCODE_COMMAND` (line ~1630): compare `cmdQueue->count` before and after
+  `Extract_CommandLineFrom_Buffer`. If unchanged (nothing enqueued, queue was full), `break`
+  without sending ok and without clearing `rxBuffer`. State stays `GCODE_STATE_GCODE_COMMAND`.
+  Next iteration retries with the same rxBuffer. UGS is gated (no ok → no new send) so no
+  command is ever lost. Once the queue drains one slot, the retry succeeds and ok is sent.
+- `GCODE_STATE_IDLE` has_content path (line ~1040): same count_before/count_after guard.
+  If full: restore the line terminator byte (`saved_terminator`) before breaking so the IDLE
+  state re-finds the line terminator and retries on the next iteration.
+- `GCODE_STATE_IDLE` null-termination (line ~1005): save `char saved_terminator =
+  rxBuffer[terminator_pos]` before writing `'\0'`, so the IDLE retry can restore it.
+
+**Files changed**:
+- `srcs/gcode/gcode_parser.c:1005` — save `saved_terminator` before null-terminating
+- `srcs/gcode/gcode_parser.c:1040` — IDLE has_content queue-full retry with terminator restore
+- `srcs/gcode/gcode_parser.c:1630` — GCODE_STATE_GCODE_COMMAND queue-full retry guard
+
+---
+
+## 📋 REFERENCE: GRBL v1.1 ALARM Codes (March 8, 2026)
+
+ALARM codes are printed as `ALARM:X\r\n`. UGS and other senders display these
+and may refuse further commands until `$X` clears the alarm.
+
+### Codes sent by THIS firmware (search `ALARM:` in srcs/)
+
+| Code | File | Meaning |
+|------|------|---------|
+| 1    | `srcs/app.c` | Hard limit triggered during non-homing motion ($21 must be enabled) |
+| 2    | `srcs/motion/motion_bridge.c` | Soft limit exceeded — target outside max_travel ($20 must be enabled) |
+| 3    | `srcs/gcode/gcode_parser.c` | Ctrl+X (soft reset) received during active motion |
+| 5    | `srcs/app.c` | Probe fail — G38.2/G38.4 did not contact within travel |
+| 6    | `srcs/gcode/gcode_parser.c` | Ctrl+X (soft reset) received during active homing cycle |
+| 8    | `srcs/motion/homing.c` | Homing pull-off failed — limit switch still closed after $27 mm travel |
+| 9    | `srcs/gcode/gcode_parser.c` | Homing fail — limit switch not found within search distance |
+| 10   | `srcs/app.c` | E-Stop asserted |
+
+### Full GRBL v1.1 ALARM code list (for future implementation)
+
+| Code | GRBL meaning |
+|------|-------------|
+| 1    | Hard limit triggered — position lost, re-home recommended |
+| 2    | G-code motion target exceeds machine travel |
+| 3    | Reset while in motion — position lost |
+| 4    | Probe fail — probe not in expected initial state before cycle |
+| 5    | Probe fail — no contact within travel (G38.2/G38.4) |
+| 6    | Homing fail — reset during active homing cycle |
+| 7    | Homing fail — safety door opened during homing |
+| **8**| **Homing fail — failed to clear limit switch during pull-off** |
+| 9    | Homing fail — limit switch not found within search distance (1.5×max_travel seek, 5×pulloff locate) |
+| 10   | Homing fail — second limit switch not found (dual-axis self-squaring only) |
+
+### ALARM:8 — now correctly implemented (March 8, 2026)
+
+ALARM:8 = "limit switch still closed after pull-off move drained". This is the definitive
+test that $27 (pull-off distance) was sufficient to physically release the switch.
+
+**Implementation** (`srcs/motion/homing.c` HOMING_STATE_PULLOFF):
+- After `!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u` → sample `HOMING_IsLimitActiveNow()`
+- If still active → `ALARM:8\r\n`, state = `HOMING_STATE_ALARM`, `STEPPER_DisableAll()`
+- If clear → fall through to `HOMING_STATE_COMPLETE` as before
+- Recovery: increase `$27` (pull-off distance) or check wiring, then Ctrl+X + `$H`
+
+**Previous (wrong) note**: This was previously attributed to a UGS polling artefact.
+That was incorrect — the firmware simply never sent ALARM:8 at all. Now it does.
+
+---
+
+## ✅ FIX: Homing axes mask, ok timing, ALARM codes (current session)
+
+### Fix 1 — $H axes mask read from $22 setting instead of hardcoded 0x0F
+- **File**: `srcs/gcode/gcode_parser.c` (function `parse_command_to_event`)
+- **Old**: `ev->data.homing.axes_mask = 0x0F;`  — included A-axis which has no limit switch
+- **New**: `ev->data.homing.axes_mask = SETTINGS_GetCurrent()->homing_enable;`
+- **Effect**: Default 0x07 (XYZ) homes only the axes with limit switches. Change $22 bitmask to enable A.
+- **⚠️ Lesson learned**: The symptom (stale-state error:8 on second $H, ALARM:9 after XYZ
+  succeeded) was traced as a state-machine / timing bug for several sessions. The REAL cause
+  was simply that A-axis was included in the mask but has no limit switch. The seek ran its
+  full travel, found nothing, alarmed, and corrupted state for the next $H.
+  **Always read `settings->homing_enable` for the axes mask — never hardcode a bitmask.**
+
+### Fix 2 — Homing SEEK alarm used stale `motionQueueCount` snapshot
+- **File**: `srcs/motion/homing.c` (HOMING_STATE_SEEK case)
+- **Old**: `if (!g_homing.motion_active && appData->motionQueueCount == 0)`
+- **New**: `if (!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u)`
+- **Effect**: Same live-read pattern already used by PULLOFF case; eliminates false alarm on first SEEK.
+
+### Fix 3 — $H ok sent immediately (before HOMING_Start was called)
+- **File**: `srcs/gcode/gcode_parser.c` (statics + `GCODE_CheckDeferredOk`)
+- **Added**: `static bool s_homing_started = false;`
+- **Old**: On first eval of `s_homing_pending`: `HOMING_IsActive()` was `false` → ok released.
+- **New**: `if (!s_homing_started) return;` guards until `HOMING_IsActive()` has returned `true`
+  at least once (set `s_homing_started = true`). Cleared in both completion and `GCODE_SoftReset`.
+
+### Fix 4 — ALARM codes added (GRBL v1.1 compliant)
+- **ALARM:1** (`srcs/app.c` APP_IDLE): Hard limit triggered during non-homing motion.
+  Fires when `hard_limits_enable ($21)=1` and a limit switch closes outside homing.
+  Machine enters APP_ALARM; $X clears when switch is released.
+- **ALARM:2** (`srcs/motion/motion_bridge.c` GCODE_EVENT_LINEAR_MOVE): Soft limit exceeded.
+  Fires when `soft_limits_enable ($20)=1` and target machine position < 0 or > max_travel.
+  Machine enters APP_ALARM; $X clears.
+- **ALARM:3** (`srcs/gcode/gcode_parser.c` GCODE_SoftReset): Reset while in motion.
+  Fires when Ctrl+X received while INTERPOLATOR is active. Machine goes to APP_ALARM; $X clears.
+- **ALARM:6** (`srcs/gcode/gcode_parser.c` GCODE_SoftReset): Reset during homing.
+  Fires when Ctrl+X received while `HOMING_IsActive()`. Machine goes to APP_ALARM; $X clears.
+- **$X handler** (`srcs/gcode/gcode_parser.c`): Also clears ALARM:3/6 alarms (non-hard-limit)
+  by setting `appData->state = APP_IDLE` when `appData->alarmCode != 1`.
+
+---
+
 ## ✅ BUG FIX: $H repeat — error:8 on second homing without reset (March 8, 2026)
 
 **Problem**: `$H` worked once but a second `$H` returned `error:8` requiring a hard reset.

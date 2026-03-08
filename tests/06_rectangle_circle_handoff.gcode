@@ -29,7 +29,7 @@ G2 X3 Y0 I3 J0 F300
 G1 Z0 F2300         ; Pen up
 
 ; ── Full circle (two semicircles CW, centre X30 Y15, radius 10mm) ────────────
-G0 X40 Y15
+G1 X40 Y15 F300
 G1 Z13 F1300          ; Pen down
 
 G2 X20 Y15 I-10 J0 F300
@@ -38,14 +38,13 @@ G2 X40 Y15 I10 J0 F300
 G1 Z0 F2300         ; Pen up
 
 ; ── Return ───────────────────────────────────────────────────────────────────
-G0 X0 Y0
+G1 X0 Y0 F300
 
 
-; Return to origin
-G1 X0 Y0 F500
 
 G1 Z2 F1300
 
 ; Final position: (0, 0, 0) - at safe height
 
-M30
+M30;
+M0; 

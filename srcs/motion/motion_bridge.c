@@ -522,6 +522,23 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             // Convert work-space end to machine space
             CoordinatePoint end = KINEMATICS_WorkToMachine(end_work);
 
+            // Soft limit check: if enabled, verify target machine position is within travel
+            // Machine coordinates: 0 = home, max_travel = far end.
+            if (s->soft_limits_enable) {
+                for (int axis = 0; axis < NUM_AXIS; axis++) {
+                    float pos    = end.coordinate[axis];
+                    float travel = s->max_travel[axis];
+                    if (travel <= 0.0f) continue;  // skip unconfigured / rotary axes
+                    if (pos < -0.001f || pos > travel + 0.001f) {
+                        UART_Printf("ALARM:2\r\n");   // Soft limit exceeded
+                        STEPPER_StopMotion();
+                        appData->state   = APP_ALARM;
+                        appData->alarmCode = 2;
+                        return false;
+                    }
+                }
+            }
+
             // G0 rapid: use axis max_rate; G1 feed: use programmed F-word (modal)
             float fr = event->data.linearMove.feedrate;
             bool  rapid = event->data.linearMove.isRapid;

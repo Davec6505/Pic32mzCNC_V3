@@ -103,7 +103,7 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
         
         case HOMING_STATE_SEEK:
             // APP.C reads limit and edges — here we only alarm if travel exceeded
-            if (!g_homing.motion_active && appData->motionQueueCount == 0) {
+            if (!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u) {
                 DEBUG_PRINT_GCODE("[HOMING] SEEK motion complete without limit - ALARM\r\n");
                 g_homing.state = HOMING_STATE_ALARM;
                 g_homing.alarm_code = 9;
@@ -142,8 +142,18 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
             // volatile flags avoids the stale-snapshot false-positive that would cause an
             // immediate PULLOFF→IDLE transition before the pulloff move runs.
             if (!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u) {
-                DEBUG_PRINT_GCODE("[HOMING] PULLOFF complete → COMPLETE\r\n");
                 g_homing.motion_active = false;
+                // ALARM:8 — limit switch still active after pull-off completed.
+                // The pull-off distance in $27 was not enough to release the switch.
+                if (HOMING_IsLimitActiveNow()) {
+                    DEBUG_PRINT_GCODE("[HOMING] PULLOFF complete but limit still active — ALARM:8\r\n");
+                    g_homing.state = HOMING_STATE_ALARM;
+                    g_homing.alarm_code = 8;
+                    STEPPER_DisableAll();
+                    // UART_Printf is sent by GCODE_CheckDeferredOk using HOMING_GetAlarmCode()
+                    break;
+                }
+                DEBUG_PRINT_GCODE("[HOMING] PULLOFF complete → COMPLETE\r\n");
                 g_homing.state = HOMING_STATE_COMPLETE;
                 // Fall through to HOMING_STATE_COMPLETE immediately.
                 // Without this, g_homing.state stays COMPLETE for one full main-loop
@@ -214,6 +224,10 @@ bool HOMING_IsActive(void) {
 
 HomingState HOMING_GetState(void) {
     return g_homing.state;
+}
+
+uint32_t HOMING_GetAlarmCode(void) {
+    return g_homing.alarm_code;
 }
 
 void HOMING_ClearAlarm(void) {
