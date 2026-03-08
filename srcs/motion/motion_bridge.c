@@ -297,7 +297,10 @@ void MOTION_Tasks(APP_DATA *appData)
     // Also handles the kickstart case: interpolator idle but queue has entries
     // (first move after a command, or after a feed hold clear).
     bool move_done = INTERPOLATOR_MoveComplete();
-    bool needs_kickstart = !INTERPOLATOR_IsActive() && (TRAJECTORY_QueueCount() > 0u);
+   // bool needs_kickstart = !INTERPOLATOR_IsActive() && (TRAJECTORY_QueueCount() > 0u);
+   bool needs_kickstart = !INTERPOLATOR_IsActive() && 
+                       (TRAJECTORY_QueueCount() > 0u) &&
+                       (appData->arcGenState != ARC_GEN_ACTIVE);  // Don't kickstart if an arc is mid-generation — wait for the final segment
 
     if (move_done || needs_kickstart) {
         SCurveMove next_move;

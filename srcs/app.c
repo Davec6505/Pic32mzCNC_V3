@@ -323,6 +323,15 @@ void APP_Tasks ( void )
             // Read bytes, tokenize, and queue commands continuously
             GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
 
+
+            // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
+            // Generate arc segments one at a time when arc is active
+            // needs to run before motion tasks to keep the queue fed and avoid underrun during long arcs
+            if(appData.arcGenState == ARC_GEN_ACTIVE) {
+                MOTION_Arc(&appData);
+            }
+            
+
             // ===== MOTION CONTROLLER - RUNS BEFORE EVENT PROCESSING =====
             // ⚠️ CRITICAL: Motion must run EVERY iteration to keep ISR fed with segments
             // This runs even during dwell to complete existing motion before timer starts
@@ -335,12 +344,7 @@ void APP_Tasks ( void )
                 GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
             }
 
-            // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
-            // Generate arc segments one at a time when arc is active
-            if(appData.arcGenState == ARC_GEN_ACTIVE) {
-                MOTION_Arc(&appData);
-            }
-            
+
             // ===== PROBE MONITORING (G38.x COMMANDS) =====
             // Check probe input during motion and handle trigger/failure
             if (appData.probeState == PROBE_STATE_MOVING) {
@@ -445,12 +449,31 @@ void APP_Tasks ( void )
                         if (MOTION_ProcessGcodeEvent(&appData, &event)) {
                             // Event processed successfully - consume it from queue
                             GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
+
+                            // ✅ Release deferred ok immediately at the point of consumption.
+                            // ok release is tied to command slot consumption — not a periodic poll.
+                            // At this exact moment commands_consumed just incremented so freed=1,
+                            // and q->count just decremented (arc commands included), so the
+                            // free-space fallback also fires if queue is below HIGH_WATER.
+                            // This is the key fix for arc-to-arc stalls: the arc command is
+                            // consumed here, releasing 1 ok so UGS can send the next command,
+                            // even though the arc generator will run for many more iterations.
+                            GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
+
+                            // ✅ CRITICAL FIX: If new arc just started, generate first segment IMMEDIATELY
+                            // This prevents 1-iteration gap between arcs which drains queue
+                            if (event.type == GCODE_EVENT_ARC_MOVE && 
+                                appData.arcGenState == ARC_GEN_ACTIVE) {
+                                MOTION_Arc(&appData);
+                            }
                         } else if (event.type == GCODE_EVENT_PROGRAM_END) {
                             // ✅ CRITICAL FIX: M0, M2, M30 (program end) - not handled by motion
                             // Consume the event and remain in IDLE state
                             // This prevents machine from getting stuck after file completion
                             DEBUG_PRINT_APP("[APP] Program end (M0/M2/M30) - file complete\r\n");
-                            GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
+                            GCODE_MarkProgramEnd();                         // ← hold ok until motion drains
+                            GCODE_ConsumeEvent(&appData.gcodeCommandQueue); // ← increments commands_consumed
+                            GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue); // s_program_end_pending guards this
                         }
                         // If processing failed (queue full), leave event in queue for next iteration
                     }

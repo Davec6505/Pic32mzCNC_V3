@@ -78,6 +78,8 @@ GCODE_Data gcodeData = {
 };
 
 static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
+static uint32_t s_prev_consumed = 0;   // ← ADD: tracks commands_consumed delta
+static bool     s_program_end_pending = false;  // ← ADD: M2/M30 drain sentinel
 
 // Startup pre-fill gate.
 // On power-on or soft-reset the trajectory queue is empty.  We send "ok"
@@ -200,7 +202,9 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     cmdQueue->commands_consumed = 0;
     
     /* 9. Reset G-code parser state */
-    okPendingCount = 0;       // Clear all deferred ok responses
+    okPendingCount = 0;         // Clear all deferred ok responses
+    s_prev_consumed = 0;        // Reset consumed counter to sync with empty queue
+    s_program_end_pending = false;  // Clear program end pending flag
     grblCheckMode = false;
     g_feed_hold_active  = false;  // Clear hold (defined in stepper.c / stepper.h)
     g_feed_hold_pending = false;  // Cancel any in-flight pending hold
@@ -791,12 +795,7 @@ void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue)
  * a dense section of linear moves generates.
  */
 void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
-    // Use the monotonically-increasing commands_consumed counter to determine
-    // how many OKs to release.  This is correct even when new commands arrive
-    // simultaneously (which makes the raw q->count delta unreliable — the
-    // depth can stay flat while commands flow through, starving UGS).
-    static uint32_t prev_consumed = 0;
-    uint32_t curr_consumed = q->commands_consumed;
+    if (appData == NULL || q == NULL) return;
 
     // Do NOT release deferred oks while a G4 dwell is in progress.
     if (MOTION_IsDwellActive()) {
@@ -804,35 +803,68 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
         return;
     }
 
-    if (okPendingCount == 0) {
-        // Nothing to release — keep prev_consumed in sync so we don't get a
-        // spurious burst (uint32 wraparound) when commands_consumed is reset
-        // on soft-reset but prev_consumed still holds the old value.
-        prev_consumed = curr_consumed;
-        return;
-    }
-
-    if (curr_consumed != prev_consumed) {
-        // Commands were consumed since last check — release one ok per command.
-        uint32_t consumed = curr_consumed - prev_consumed; // wraps safely (uint32)
-        prev_consumed = curr_consumed;
-        while (consumed > 0 && okPendingCount > 0) {
-            if (!UART_SendOK()) break;
-            DEBUG_PRINT_GCODE("[DEFERRED] Command consumed, sent ok (pending=%lu)\r\n",
-                              (unsigned long)(okPendingCount - 1));
-            okPendingCount--;
-            consumed--;
+    // Program-end sentinel (M2/M30): hold ALL remaining oks until motion fully
+    // drains — trajectory empty AND arc generation complete.
+    // Only then flush every pending ok in one burst (the M2/M30 ok is the last).
+    if (s_program_end_pending) {
+        if (appData->motionQueueCount != 0 || appData->arcGenState != ARC_GEN_IDLE) {
+            return;  // still moving — wait
         }
-    } else if (q->count == 0 && okPendingCount > 0) {
-        // Queue drained to zero with no new consumption detected this call.
-        // Flush remaining so UGS is never permanently blocked on the last batch.
-        DEBUG_PRINT_GCODE("[DEFERRED] Queue empty — flushing %lu remaining oks\r\n",
+        DEBUG_PRINT_GCODE("[DEFERRED] Program end drain — flushing %lu oks\r\n",
                           (unsigned long)okPendingCount);
         while (okPendingCount > 0) {
             if (!UART_SendOK()) break;
             okPendingCount--;
         }
+        s_program_end_pending = false;
+        s_prev_consumed = q->commands_consumed;  // re-sync after reset
+        return;
     }
+
+    if (okPendingCount == 0) {
+        s_prev_consumed = q->commands_consumed;  // keep in sync on soft-reset
+        return;
+    }
+
+    // Primary: 1-for-1 by consumed delta (works for linear move streaming;
+    // UGS refills each freed slot immediately, keeping queue near HIGH_WATER).
+    uint32_t curr = q->commands_consumed;
+    uint32_t freed = curr - s_prev_consumed;  // wraps safely (uint32 arithmetic)
+    s_prev_consumed = curr;
+
+    // Fallback: free-space release.
+    // During arc generation a single gcode queue slot spawns many trajectory
+    // segments with NO further queue removals (commands_consumed is frozen for
+    // the entire arc duration — can be 100s of ms for a large arc).
+    // Without this path, deferred oks freeze the instant an arc starts:
+    //   freed = 0  →  no oks sent  →  UGS send window hits 0  →  stops sending
+    //   →  gcode queue drains to 0 while arc still running
+    //   →  arc finishes  →  nothing queued  →  machine idles mid-file.
+    // This is most visible on arc→arc transitions (2nd arc always stalls).
+    // Fix: whenever the gcode queue has dropped below HIGH_WATER there IS room
+    // for UGS to send more commands, so release enough oks to let it refill.
+    if (freed == 0 && q->count < (uint32_t)GCODE_QUEUE_HIGH_WATER) {
+        freed = (uint32_t)GCODE_QUEUE_HIGH_WATER - q->count;
+    }
+
+    while (freed > 0 && okPendingCount > 0) {
+        if (!UART_SendOK()) break;
+        okPendingCount--;
+        freed--;
+    }
+}
+
+/**
+ * @brief Signal that M2/M30 end-of-program was received.
+ *
+ * Prevents the ok for M2/M30 (and any remaining deferred oks) from being
+ * released until all trajectory + arc motion has drained to zero.
+ * Called from app.c before GCODE_ConsumeEvent() for PROGRAM_END events.
+ */
+void GCODE_MarkProgramEnd(void)
+{
+    s_program_end_pending = true;
+    DEBUG_PRINT_GCODE("[FLOW] Program end marked — holding oks until motion drains\r\n");
 }
 
 /**

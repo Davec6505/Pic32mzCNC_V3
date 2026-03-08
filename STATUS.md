@@ -1,9 +1,31 @@
-# Pic32mzCNC_V3 - Development Status Trac
-**PINOUT**: `Enable pin needs to be controled by setting direction bit.
-
+# Pic32mzCNC_V3 - Development Status Tracker
+**PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
 **Last Updated**: March 8, 2026
+
+---
+
+## ✅ BUG FIX: Arc-to-arc streaming stall — ok released at point of consumption (March 8, 2026)
+
+**Symptom**: Machine stopped mid-file at `MPos:30.031,50.013,0.000` (always same spot) during arc→arc transitions. First arc ran fine; second arc never started. UGS showed `<Idle>` prematurely.
+
+**Root cause — architectural**: The deferred-ok system was polling `commands_consumed` delta at the **top** of `GCODE_Tasks()` (every main loop iteration). During arc generation, a single gcode queue slot (the arc command) spawns hundreds of trajectory segments with no further queue removals — `commands_consumed` is frozen for the entire arc duration. The periodic poll always saw `freed = 0` → no oks released → UGS send window exhausted → gcode queue drained → machine idled. This was an arc-to-arc issue specifically because arc 2 sits at the queue head blocked (arc 2 is not consumed until arc 1 finishes), so the queue never dropped below HIGH_WATER either.
+
+**Root cause — structural**: Deferred-ok release was not tied to the event that causes it (command consumption). It was inferred indirectly via a counter diff, guaranteed to lag by at least one iteration and broken entirely when `commands_consumed` stopped advancing.
+
+**Fix**: Moved `GCODE_CheckDeferredOk()` to fire immediately after each `GCODE_ConsumeEvent()` in `srcs/app.c`. At the exact moment a gcode slot is freed, `commands_consumed` has just incremented → `freed = 1` → ok released immediately. The ok is now causally tied to its command slot, not to a polling interval.
+
+Also kept the free-space fallback in `GCODE_CheckDeferredOk()` as belt-and-braces: if `freed == 0` AND `q->count < HIGH_WATER`, release `HIGH_WATER - q->count` oks. This handles any remaining edge cases.
+
+**Validated**: Full run of `tests/07_complex_long_run_fast.gcode` completed to `MPos:0.000,0.000,0.000` — all sections including dense arc sequences, arc→arc transitions, G4 dwells, and high-speed linear sweeps.
+
+**Files changed**:
+- `srcs/app.c:~451` — Added `GCODE_CheckDeferredOk()` call immediately after `GCODE_ConsumeEvent()` in the successful-process branch
+- `srcs/app.c:~465` — Added `GCODE_CheckDeferredOk()` call immediately after `GCODE_ConsumeEvent()` in the PROGRAM_END branch
+- `srcs/gcode/gcode_parser.c` — `GCODE_CheckDeferredOk()`: added free-space fallback (`if freed==0 && q->count < HIGH_WATER`)
+
+---
 
 ---
 
@@ -303,6 +325,20 @@ queue never approaches high-water, so `ok` responses flow without deferral and U
 | R=10 quarter | 16 segs | 3 segs |
 | R=20 quarter | 63 segs ← stall | 4 segs ✓ |
 | R=30 semicircle | 189 segs | 9 segs ✓ |
+
+---
+
+## ✅ FIXED: Deferred-ok hysteresis regression blocked final arc submission in chained arc section — March 7, 2026
+
+**Files**:
+- `srcs/gcode/gcode_parser.c` — `GCODE_CheckDeferredOk()` now releases deferred `ok` responses by actual queue-depth hysteresis (`HIGH_WATER=48`, `LOW_WATER=16`) and only flushes the final pending responses after `motionQueueCount == 0` and `arcGenState == ARC_GEN_IDLE`
+- `README.md` — Flow Control section updated to document the restored high-water / low-water behavior and motion-complete final flush
+
+**Symptom**: `tests/07_complex_long_run_fast.gcode` reproducibly stalled at `MPos:30.031,50.013` after `G2 X30 Y50 I20 J0`. The next programmed line, `G2 X50 Y30 I0 J-20`, never reached the firmware because the sender stopped waiting for one missing deferred `ok`.
+
+**Root cause**: The comments and constants still described queue-depth hysteresis flow control, but `GCODE_CheckDeferredOk()` had been changed to a `commands_consumed` edge-based release path. In steady streaming that can miss one release opportunity and strand a deferred `ok`, leaving the sender blocked mid-file.
+
+**Fix**: Restored queue-depth hysteresis: defer at `HIGH_WATER`, release a burst when the queue falls to `LOW_WATER`, and flush the final deferred acknowledgements only after physical motion and arc generation are both complete.
 
 ---
 

@@ -186,11 +186,17 @@ Per-segment planner fields stored in `MotionSegment`: `unit_vec[NUM_AXIS]`, `ent
 
 ```
 Command received
-  motionQueueCount > 0? → defer "ok" (okPending = true)
-  motionQueueCount == 0? → send "ok" immediately
+  gcodeQ >= HIGH_WATER (48)? → defer "ok"
+  gcodeQ <  HIGH_WATER (48)? → send "ok" immediately
 
-Segment completes (motionSegmentCompleted flag set in ISR)
-  → CheckDeferredOk(): if okPending && count==0 → send "ok"
+During streaming
+  gcodeQ <= LOW_WATER (16)? → burst deferred "ok" responses
+                               until sender can refill back toward HIGH_WATER
+
+Queue drained to zero
+  only flush final deferred "ok" responses after:
+    - trajectory/interpolator motion is complete
+    - arc generation is idle
 ```
 
 ---
