@@ -6,6 +6,33 @@
 
 ---
 
+## ✅ BUG FIX: $H repeat — error:8 on second homing without reset (March 8, 2026)
+
+**Problem**: `$H` worked once but a second `$H` returned `error:8` requiring a hard reset.
+Machine status showed `<Run>` instead of `<Idle>` after homing completed.
+
+**Root Cause — Part 1 (homing.c PULLOFF check stale snapshot)**:
+`HOMING_STATE_PULLOFF` completion used `appData->motionQueueCount` which is written
+once per main-loop iteration at the top of `MOTION_Tasks()`.  When `app.c` calls
+`HOMING_StartPulloff()` **after** `MOTION_Tasks()` has already run in the same iteration,
+`motionQueueCount` still reads 0 (pre-pulloff value) even though `INTERPOLATOR_IsActive()`
+is already `true`.  The very next `HOMING_Tasks()` call saw `0 == 0` and fell through
+`PULLOFF→IDLE` immediately — before the pulloff physically executed.
+
+**Root Cause — Part 2 (CheckDeferredOk COMPLETE-state race)**:
+`GCODE_CheckDeferredOk()` ran (via the `motionSegmentCompleted` path) **before**
+`HOMING_Tasks()`.  If `HOMING_STATE_COMPLETE` was still live (the fall-through transition
+hadn't completed for that call), `HOMING_IsActive()` returned `false` and the deferred ok
+was released prematurely.  A rapid second `$H` arrived with state still `COMPLETE` →
+`HOMING_Start()` returned `false` → `error:8`.
+
+**Fix**:
+- `srcs/motion/homing.c` — `HOMING_STATE_PULLOFF` case: replaced `appData->motionQueueCount == 0 && !appData->motionActive` with `!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u` (live volatile reads, never stale). Added `#include "motion/interpolator.h"` and `"motion/trajectory.h"`.
+- `srcs/gcode/gcode_parser.c` — `GCODE_CheckDeferredOk()`: added `HOMING_STATE_COMPLETE` guard and `INTERPOLATOR_IsActive()` guard inside the `s_homing_pending` block so the ok is never released mid-transition. Added `#include "motion/interpolator.h"`.
+- Commit: `800f459`
+
+---
+
 ## ✅ BUG FIX: Arc-to-arc streaming stall — ok released at point of consumption (March 8, 2026)
 
 **Symptom**: Machine stopped mid-file at `MPos:30.031,50.013,0.000` (always same spot) during arc→arc transitions. First arc ran fine; second arc never started. UGS showed `<Idle>` prematurely.
