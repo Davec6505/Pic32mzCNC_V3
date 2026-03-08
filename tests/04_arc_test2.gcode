@@ -89,7 +89,7 @@ G0 Z5
 G0 X0 Y0
 
 M5 ; spindle off
-
+M0 ; file complete
 ; ========================================
 ; Validation Checklist:
 ; ========================================

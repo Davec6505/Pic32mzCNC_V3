@@ -55,6 +55,11 @@ static uint32_t   traj_count = 0;   // number of moves in queue
 static float prev_unit_vec[NUM_AXIS] = {0};
 static float prev_nominal_speed = 0.0f;
 
+// Exit speed² of the last move handed to the interpolator.
+// Used as the forward-pass starting condition in TRAJECTORY_Recalculate so that
+// the new oldest queued block inherits the correct entry speed instead of 0.
+static float s_last_exit_speed_sqr = 0.0f;
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 // Clamp a float to [lo, hi].
@@ -362,6 +367,7 @@ void TRAJECTORY_Initialize(void)
     memset(traj_queue, 0, sizeof(traj_queue));
     memset(prev_unit_vec, 0, sizeof(prev_unit_vec));
     prev_nominal_speed = 0.0f;
+    s_last_exit_speed_sqr = 0.0f;
 }
 
 void TRAJECTORY_Reset(void)
@@ -502,8 +508,11 @@ void TRAJECTORY_Recalculate(void)
 
     // ── Pass 2: Forward (oldest → newest) ────────────────────────────────────
     // Propagate maximum achievable acceleration forward.
+    // Start from the exit speed of the last move handed to the interpolator so
+    // that arc chord handoffs (and any continuous streaming) do not force the
+    // new oldest queued block to re-accelerate from zero on every recalculation.
     {
-        float prev_entry_sqr = 0.0f;  // entry of queue start = 0 (machine at rest)
+        float prev_entry_sqr = s_last_exit_speed_sqr;
         float prev_accel     = 0.0f;
         float prev_dist      = 0.0f;
 
@@ -556,6 +565,9 @@ bool TRAJECTORY_GetNextMove(SCurveMove *out)
 {
     if (traj_count == 0u) return false;
     *out = traj_queue[traj_tail];
+    // Remember this move's exit speed so TRAJECTORY_Recalculate's forward pass
+    // can start from the correct handoff speed rather than 0.
+    s_last_exit_speed_sqr = out->v_exit * out->v_exit;
     traj_tail  = (traj_tail + 1u) % TRAJ_QUEUE_SIZE;
     traj_count--;
     return true;
