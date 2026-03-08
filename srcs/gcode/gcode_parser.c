@@ -78,7 +78,7 @@ GCODE_Data gcodeData = {
 };
 
 static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
-static uint32_t s_prev_consumed = 0;        // tracks commands_consumed delta
+// s_prev_consumed removed: deferred ok release is now space-based, not delta-based
 static bool     s_program_end_pending = false;  // M2/M30 drain sentinel
 static bool     s_homing_pending = false;   // $H ok held until homing cycle completes
 
@@ -204,7 +204,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     
     /* 9. Reset G-code parser state */
     okPendingCount = 0;         // Clear all deferred ok responses
-    s_prev_consumed = 0;        // Reset consumed counter to sync with empty queue
+    // (s_prev_consumed removed — no longer needed)
     s_program_end_pending = false;  // Clear program end pending flag
     grblCheckMode = false;
     g_feed_hold_active  = false;  // Clear hold (defined in stepper.c / stepper.h)
@@ -835,40 +835,26 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
             okPendingCount--;
         }
         s_program_end_pending = false;
-        s_prev_consumed = q->commands_consumed;  // re-sync after reset
         return;
     }
 
-    if (okPendingCount == 0) {
-        s_prev_consumed = q->commands_consumed;  // keep in sync on soft-reset
-        return;
-    }
+    if (okPendingCount == 0) return;
 
-    // Primary: 1-for-1 by consumed delta (works for linear move streaming;
-    // UGS refills each freed slot immediately, keeping queue near HIGH_WATER).
-    uint32_t curr = q->commands_consumed;
-    uint32_t freed = curr - s_prev_consumed;  // wraps safely (uint32 arithmetic)
-    s_prev_consumed = curr;
-
-    // Fallback: free-space release.
-    // During arc generation a single gcode queue slot spawns many trajectory
-    // segments with NO further queue removals (commands_consumed is frozen for
-    // the entire arc duration — can be 100s of ms for a large arc).
-    // Without this path, deferred oks freeze the instant an arc starts:
-    //   freed = 0  →  no oks sent  →  UGS send window hits 0  →  stops sending
-    //   →  gcode queue drains to 0 while arc still running
-    //   →  arc finishes  →  nothing queued  →  machine idles mid-file.
-    // This is most visible on arc→arc transitions (2nd arc always stalls).
-    // Fix: whenever the gcode queue has dropped below HIGH_WATER there IS room
-    // for UGS to send more commands, so release enough oks to let it refill.
-    if (freed == 0 && q->count < (uint32_t)GCODE_QUEUE_HIGH_WATER) {
-        freed = (uint32_t)GCODE_QUEUE_HIGH_WATER - q->count;
-    }
-
-    while (freed > 0 && okPendingCount > 0) {
+    // Space-based release: send one deferred ok for every gcode queue slot that
+    // is currently free (below HIGH_WATER).  This replaces the broken
+    // delta-based (freed = commands_consumed - s_prev_consumed) approach which
+    // froze during arc generation: while the trajectory queue is full no new
+    // gcode events can be consumed, so commands_consumed stops advancing even
+    // though the gcode queue has plenty of room for UGS to send more commands.
+    //
+    // Space-based release is inherently correct:
+    //   q->count < HIGH_WATER  →  UGS CAN legally send one more command
+    //                          →  send one deferred ok to invite it
+    // Called once per main-loop iteration from app.c (after GCODE_Tasks) so
+    // the release rate is controlled and does not burst.
+    while (okPendingCount > 0 && q->count < (uint32_t)GCODE_QUEUE_HIGH_WATER) {
         if (!UART_SendOK()) break;
         okPendingCount--;
-        freed--;
     }
 }
 
@@ -933,9 +919,11 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
     GCODE_CommandQueue* cmdQueue = commandQueue;
     uint32_t nBytesAvailable = 0;
 
-    // ✅ CRITICAL: Check deferred "ok" ONCE at entry using FRESH count
-    // If buffer drained and okPending, send "ok" immediately then continue processing
-    GCODE_CheckDeferredOk(appData, cmdQueue);
+    // NOTE: GCODE_CheckDeferredOk is called causally in app.c immediately after
+    // GCODE_ConsumeEvent(), which is the only safe place to call it.  Calling it
+    // here (every main-loop iteration) caused the free-space fallback to fire
+    // thousands of times per second, draining okPendingCount far ahead of actual
+    // command consumption and causing UGS to consider streaming complete mid-file.
 
     switch (gcodeData.state)
     {
