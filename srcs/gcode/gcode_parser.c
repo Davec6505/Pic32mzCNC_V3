@@ -840,21 +840,31 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
 
     if (okPendingCount == 0) return;
 
-    // Space-based release: send one deferred ok for every gcode queue slot that
-    // is currently free (below HIGH_WATER).  This replaces the broken
-    // delta-based (freed = commands_consumed - s_prev_consumed) approach which
-    // froze during arc generation: while the trajectory queue is full no new
-    // gcode events can be consumed, so commands_consumed stops advancing even
-    // though the gcode queue has plenty of room for UGS to send more commands.
+    // Slot-limited release: compute how many G-code commands UGS can safely
+    // send without pushing q->count above HIGH_WATER, and release exactly
+    // that many deferred oks — no more.
     //
-    // Space-based release is inherently correct:
-    //   q->count < HIGH_WATER  →  UGS CAN legally send one more command
-    //                          →  send one deferred ok to invite it
-    // Called once per main-loop iteration from app.c (after GCODE_Tasks) so
-    // the release rate is controlled and does not burst.
-    while (okPendingCount > 0 && q->count < (uint32_t)GCODE_QUEUE_HIGH_WATER) {
-        if (!UART_SendOK()) break;
-        okPendingCount--;
+    // Why NOT a while-loop: q->count is a snapshot that does not change
+    // during the loop body.  A while loop would release ALL okPendingCount
+    // oks when q->count < HIGH_WATER, potentially projecting q->count above
+    // GCODE_MAX_COMMANDS (64).  The overflow guard in queue_command() silently
+    // drops those extra commands and prints error:20; UGS never gets oks for
+    // the dropped commands → deadlock / premature connection close.
+    //
+    // Slot-limited approach: release at most (HIGH_WATER - q->count) oks per
+    // call.  UGS sends exactly that many new commands; q->count reaches
+    // HIGH_WATER and stops.  On the next iteration (after a command executes
+    // and q->count drops by 1) exactly one more ok is released — steady-state
+    // 1-for-1 pipeline without bursts or overflow.
+    {
+        uint32_t slots = (q->count < (uint32_t)GCODE_QUEUE_HIGH_WATER)
+                       ? ((uint32_t)GCODE_QUEUE_HIGH_WATER - q->count)
+                       : 0u;
+        uint32_t to_release = (okPendingCount < slots) ? okPendingCount : slots;
+        for (uint32_t i = 0u; i < to_release; i++) {
+            if (!UART_SendOK()) break;
+            okPendingCount--;
+        }
     }
 }
 
