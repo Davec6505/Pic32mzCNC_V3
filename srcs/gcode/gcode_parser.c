@@ -1005,11 +1005,18 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     DEBUG_PRINT_GCODE("[IDLE] Sending ok for content line\r\n");
                     SendOrDeferOk(appData, cmdQueue);
                 } else {
-                    // ✅ GRBL v1.1 behavior: Blank lines get "ok" response
-                    // UGS counts ALL lines including blanks, so we must respond
-                    // Flow control applies - will defer if motion queue has content
-                    DEBUG_PRINT_GCODE("[IDLE] Blank/comment line - sending ok with flow control\r\n");
-                    SendOrDeferOk(appData, cmdQueue);
+                    // ✅ GRBL v1.1 behavior: Blank/comment lines get "ok" response.
+                    // CRITICAL: blank/comment lines do NOT occupy a gcode queue slot
+                    // (Extract_CommandLineFrom_Buffer is not called, q->count unchanged).
+                    // Therefore we must NEVER defer their ok via SendOrDeferOk — doing
+                    // so inflates okPendingCount independently of q->count.  When those
+                    // phantom oks later burst-release they invite UGS to send commands
+                    // that push q->count past GCODE_MAX_COMMANDS, silently dropping them.
+                    // Pure arc tests hide this because they have almost no blank lines;
+                    // mixed-content files (sections separated by comment blocks) expose it.
+                    // Solution: always send ok immediately for blank/comment lines.
+                    DEBUG_PRINT_GCODE("[IDLE] Blank/comment line - sending ok immediately (no queue slot)\r\n");
+                    (void)UART_SendOK();
                 }
                 uint32_t skip_pos = terminator_pos + 1;
                 while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
