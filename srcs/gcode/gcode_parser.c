@@ -78,8 +78,9 @@ GCODE_Data gcodeData = {
 };
 
 static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
-static uint32_t s_prev_consumed = 0;   // ← ADD: tracks commands_consumed delta
-static bool     s_program_end_pending = false;  // ← ADD: M2/M30 drain sentinel
+static uint32_t s_prev_consumed = 0;        // tracks commands_consumed delta
+static bool     s_program_end_pending = false;  // M2/M30 drain sentinel
+static bool     s_homing_pending = false;   // $H ok held until homing cycle completes
 
 // Startup pre-fill gate.
 // On power-on or soft-reset the trajectory queue is empty.  We send "ok"
@@ -803,6 +804,23 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
         return;
     }
 
+    // Homing sentinel ($H): hold the $H ok until the homing cycle fully completes.
+    // HOMING_IsActive() returns false for IDLE, COMPLETE (transient), and ALARM.
+    // COMPLETE is always resolved within the same HOMING_Tasks() call so after
+    // HOMING_Tasks() returns the state is either IDLE (done) or SEEK (next axis).
+    if (s_homing_pending) {
+        if (HOMING_IsActive()) return;  // still in progress — hold all oks
+        s_homing_pending = false;
+        if (HOMING_GetState() == HOMING_STATE_ALARM) {
+            // Failure: discard the deferred $H ok slot, send ALARM:9 per GRBL spec.
+            if (okPendingCount > 0) okPendingCount--;
+            UART_Printf("ALARM:9\r\n");
+            return;
+        }
+        // Success: fall through to release the one pending ok normally.
+        DEBUG_PRINT_GCODE("[FLOW] Homing complete — releasing $H ok\r\n");
+    }
+
     // Program-end sentinel (M2/M30): hold ALL remaining oks until motion fully
     // drains — trajectory empty AND arc generation complete.
     // Only then flush every pending ok in one burst (the M2/M30 ok is the last).
@@ -1259,6 +1277,11 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 cmdQueue->count++;
             }
             handled = true;
+            // Defer the ok: send ONLY after homing succeeds (IDLE) or
+            // send ALARM:9 on failure.  Do NOT send ok immediately.
+            send_ok = false;
+            s_homing_pending = true;
+            okPendingCount++;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'L') {
             // $L - Debug command: Show limit switch states

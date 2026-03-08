@@ -27,6 +27,23 @@ Also kept the free-space fallback in `GCODE_CheckDeferredOk()` as belt-and-brace
 
 ---
 
+## ✅ FEATURE: GRBL-compliant $H ok timing — deferred until homing completes (March 8, 2026)
+
+**Problem**: `$H` (homing) sent its `ok` response immediately when the command arrived — before the homing cycle ran. GRBL v1.1 spec requires the ok only after homing succeeds, or `ALARM:9` on failure. Pre-existing bug, unaffected by but discovered during the arc streaming audit.
+
+**Fix**:
+- `$H` QUERY_CHARS handler: `send_ok = false` + `s_homing_pending = true` + `okPendingCount++` (defer the ok into the standard pending pool)
+- `GCODE_CheckDeferredOk()`: new homing gate inserted after the dwell gate. While `HOMING_IsActive()` all ok releases are suppressed. When homing finishes:
+  - **Success** (`HOMING_STATE_IDLE`): clear sentinel, fall through to release exactly 1 ok
+  - **Failure** (`HOMING_STATE_ALARM`): discard the ok slot, print `ALARM:9\r\n`, return — no ok sent
+
+**Note on `HOMING_IsActive()`**: returns false for IDLE, ALARM, and COMPLETE. COMPLETE is a purely transient state resolved within the same `HOMING_Tasks()` call frame; it is never visible to `GCODE_CheckDeferredOk` after `HOMING_Tasks()` returns.
+
+**Files changed**:
+- `srcs/gcode/gcode_parser.c` — Added `static bool s_homing_pending = false;`
+- `srcs/gcode/gcode_parser.c:~1253` — `$H` handler: suppress immediate ok, arm sentinel
+- `srcs/gcode/gcode_parser.c:~GCODE_CheckDeferredOk` — Added homing gate block
+
 ---
 
 ## ✅ BUG FIX: LOCATE phase freezes — event-driven backoff redesign (March 8, 2026)
