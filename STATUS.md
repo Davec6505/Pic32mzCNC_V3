@@ -6,6 +6,25 @@
 
 ---
 
+## ✅ HARDWARE VALIDATED: Arc stress test + concentric arcs — smooth continuous motion (March 9, 2026)
+
+**Tests run on current `49e1bf6` build:**
+
+**Test A — `08_arc_cw_ccw_stress.gcode`** (36 circles: 6 passes × 6 arcs, alternating G2/G3):
+- Feedrate F3000, diameter 60mm, centre (30,30)
+- `*** Finished sending file in 00:02:18`  — final `<Idle|MPos:0.000,0.000,0.000>`
+- Smooth continuous `<Run|MPos:...>` throughout — **zero stop-starts between arcs**
+
+**Test B — Concentric decreasing-radius semicircles** (new test, 2× consecutive runs):
+- Centre X70,Y70; radii 60→10mm in 10mm steps; alternating G2/G3 pairs at F1500
+- Run 1: `*** Finished sending file in 00:00:56`  — `<Idle|MPos:70.031,70.000,0.000>`
+- Run 2: `*** Finished sending file in 00:00:55`  — `<Idle|MPos:70.031,70.000,0.000>`
+- Arc-to-arc transitions (G0 rapid → G2 → G3 repeating) all smooth; X error <0.031mm
+
+**Overall**: All arc streaming behaviour confirmed stable in pipeline mode.
+
+---
+
 ## ✅ HARDWARE VALIDATED: Pipelined streaming mode — all arc fixes confirmed (March 9, 2026)
 
 **Test**: `07_complex_long_run_fast.gcode` run twice back-to-back:
