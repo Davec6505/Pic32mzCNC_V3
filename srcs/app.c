@@ -174,7 +174,7 @@ void APP_Initialize ( void )
     appData.arcClockwise = false;
     appData.arcPlane = 0;  // XY plane
     appData.arcFeedrate = 0.0f;
-    
+
     // ✅ Initialize UART utilities (callback-based non-blocking output)
     UART_Initialize();
     
@@ -340,10 +340,9 @@ void APP_Tasks ( void )
             // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
             // Generate arc segments one at a time when arc is active
             // needs to run before motion tasks to keep the queue fed and avoid underrun during long arcs
-            if(appData.arcGenState == ARC_GEN_ACTIVE) {
+            if (appData.arcGenState == ARC_GEN_ACTIVE) {
                 MOTION_Arc(&appData);
             }
-            
 
             // ===== MOTION CONTROLLER - RUNS BEFORE EVENT PROCESSING =====
             // ⚠️ CRITICAL: Motion must run EVERY iteration to keep ISR fed with segments
@@ -446,26 +445,27 @@ void APP_Tasks ( void )
                 if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
                     DEBUG_PRINT_GCODE("[APP] Event retrieved: type=%d (1=LINEAR,2=ARC)\r\n", event.type);
                     
-                    // ⚠️ CRITICAL: Don't process ARC events while another arc is generating
-                    // But allow non-arc commands (dwell, linear, etc.) to process
+                    // ⚠️ CRITICAL: Don't process ARC events while another arc is generating.
+                    // Instead of leaving the arc at the gcode queue head (which blocks
+                    // flow control — q->count stays high → no oks released → UGS stalls),
+                    // pre-consume it into the pending arc ring buffer immediately.
+                    // Don't process arc events while another arc is generating —
+                    // arc2 waits at the gcode queue head until arc1 finishes.
+                    // Flow control is unaffected: UGS already has its ok (sent at
+                    // receive time in GCODE_Tasks), so it keeps streaming the rest
+                    // of the file into the remaining 63 gcode queue slots.
                     bool should_process = true;
                     if (event.type == GCODE_EVENT_ARC_MOVE && appData.arcGenState == ARC_GEN_ACTIVE) {
-                        should_process = false;  // Defer arc until current arc completes
+                        should_process = false;
                     }
-                    
+
                     if (should_process) {
                         // Process event - only consume if successful
                         if (MOTION_ProcessGcodeEvent(&appData, &event)) {
                             // Event processed successfully - consume it from queue
                             GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
-                            // ✅ Causal ok release: fire BEFORE UGS can refill the freed slot.
-                            // Without this, UGS immediately sends another command on the same
-                            // iteration, q->count stays at HIGH_WATER, and the deferred ok for
-                            // arc 2 is never released → deterministic arc-to-arc stall on run 2.
-                            GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
-                            // ✅ CRITICAL FIX: If new arc just started, generate first segment IMMEDIATELY
-                            // This prevents 1-iteration gap between arcs which drains queue
-                            if (event.type == GCODE_EVENT_ARC_MOVE && 
+                            // Kick arc generation immediately so trajectory queue stays fed
+                            if (event.type == GCODE_EVENT_ARC_MOVE &&
                                 appData.arcGenState == ARC_GEN_ACTIVE) {
                                 MOTION_Arc(&appData);
                             }
@@ -476,7 +476,6 @@ void APP_Tasks ( void )
                             DEBUG_PRINT_APP("[APP] Program end (M0/M2/M30) - file complete\r\n");
                             GCODE_MarkProgramEnd();                         // ← hold ok until motion drains
                             GCODE_ConsumeEvent(&appData.gcodeCommandQueue); // ← increments commands_consumed
-                            GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);                       
                         }
                         // If processing failed (queue full), leave event in queue for next iteration
                     }

@@ -859,7 +859,7 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
     // Only then flush every pending ok in one burst (the M2/M30 ok is the last).
     if (s_program_end_pending) {
         if (appData->motionQueueCount != 0 || appData->arcGenState != ARC_GEN_IDLE) {
-            return;  // still moving — wait
+            return;  // still moving or arc generation pending — wait
         }
         DEBUG_PRINT_GCODE("[DEFERRED] Program end drain — flushing %lu oks\r\n",
                           (unsigned long)okPendingCount);
@@ -873,31 +873,13 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
 
     if (okPendingCount == 0) return;
 
-    // Slot-limited release: compute how many G-code commands UGS can safely
-    // send without pushing q->count above HIGH_WATER, and release exactly
-    // that many deferred oks — no more.
-    //
-    // Why NOT a while-loop: q->count is a snapshot that does not change
-    // during the loop body.  A while loop would release ALL okPendingCount
-    // oks when q->count < HIGH_WATER, potentially projecting q->count above
-    // GCODE_MAX_COMMANDS (64).  The overflow guard in queue_command() silently
-    // drops those extra commands and prints error:20; UGS never gets oks for
-    // the dropped commands → deadlock / premature connection close.
-    //
-    // Slot-limited approach: release at most (HIGH_WATER - q->count) oks per
-    // call.  UGS sends exactly that many new commands; q->count reaches
-    // HIGH_WATER and stops.  On the next iteration (after a command executes
-    // and q->count drops by 1) exactly one more ok is released — steady-state
-    // 1-for-1 pipeline without bursts or overflow.
-    {
-        uint32_t slots = (q->count < (uint32_t)GCODE_QUEUE_HIGH_WATER)
-                       ? ((uint32_t)GCODE_QUEUE_HIGH_WATER - q->count)
-                       : 0u;
-        uint32_t to_release = (okPendingCount < slots) ? okPendingCount : slots;
-        for (uint32_t i = 0u; i < to_release; i++) {
-            if (!UART_SendOK()) break;
-            okPendingCount--;
-        }
+    // Drain remaining deferred oks (dwell, homing, G38.x completions).
+    // Normal commands no longer defer — they send ok at receive time in
+    // SendOrDeferOk.  Only special sentinels (dwell, M2/M30, homing, G38.x)
+    // accumulate here, and they drain one-at-a-time as motion completes.
+    while (okPendingCount > 0) {
+        if (!UART_SendOK()) break;
+        okPendingCount--;
     }
 }
 
@@ -915,35 +897,33 @@ void GCODE_MarkProgramEnd(void)
 }
 
 /**
- * @brief Decide whether to send "ok" immediately or defer it
+ * @brief Send "ok" at command-receive time.
  *
- * Gates purely on gcode command queue depth:
- *   >= HIGH_WATER → defer (stop filling UGS send window)
- *   <  HIGH_WATER → send immediately (keep UGS pushing commands)
+ * Ok is issued the moment a command enters the gcode queue (64 slots).
+ * Natural backpressure: if all 64 slots are full, Extract_CommandLineFrom_Buffer
+ * fails → no ok → UGS stops sending.  No HIGH_WATER math needed.
  *
- * The trajectory planner queue is managed independently (MOTION_Arc backs
- * off at 62/64) — it does NOT gate UGS flow here.
+ * Special deferred cases (accumulate okPendingCount, drained by
+ * GCODE_CheckDeferredOk when their condition clears):
+ *   - G4 dwell active: must wait for dwell timer to expire
+ *   - Homing ($H): held until HOMING completes (sentinel in CheckDeferredOk)
+ *   - M2/M30: held until motion fully drains (sentinel in CheckDeferredOk)
+ *   - G38.x probe: held until probe triggers or fails (released in app.c)
  */
 static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 {
-    // While a G4 dwell is active, always defer.
+    (void)q;  // no longer used — backpressure is natural (64-slot gcode queue)
+
+    // While a G4 dwell is active, defer — drained when dwell timer expires.
     if (MOTION_IsDwellActive()) {
         DEBUG_PRINT_GCODE("[FLOW] Dwell active — deferring ok\r\n");
         okPendingCount++;
         return;
     }
 
-    // Gate purely on gcode queue depth: one ok per one accepted command.
-    if (q->count >= GCODE_QUEUE_HIGH_WATER) {
-        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (gcodeQ=%lu >= HIGH=%d, pending=%lu)\r\n",
-                          (unsigned long)q->count, GCODE_QUEUE_HIGH_WATER,
-                          (unsigned long)(okPendingCount + 1));
-        okPendingCount++;
-    } else {
-        DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (gcodeQ=%lu < HIGH=%d)\r\n",
-                          (unsigned long)q->count, GCODE_QUEUE_HIGH_WATER);
-        (void)UART_SendOK();
-    }
+    // Send immediately — UGS flow is controlled purely by gcode queue capacity.
+    DEBUG_PRINT_GCODE("[FLOW] ok sent at receive time\r\n");
+    (void)UART_SendOK();
 }
 
 /* -------------------------------------------------------------------------- */

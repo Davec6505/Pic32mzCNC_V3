@@ -2,11 +2,40 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 8, 2026
+**Last Updated**: March 9, 2026
 
 ---
 
-## ✅ FIX: Arc geometry bug — G-code queue silent command drop (March 8, 2026)
+## ✅ FIX: Arc-to-arc flow control stall — pending arc queue (March 9, 2026)
+
+**Root cause**: While arc1 was generating its trajectory segments, arc2 sat **blocked at
+the head of the gcode command queue** (`should_process = false`).  Because arc2 was never
+consumed, `q->count` never dropped below `HIGH_WATER (48)`.  `GCODE_CheckDeferredOk`
+releases oks only when `q->count < HIGH_WATER`, so no oks were released during the entire
+arc1 duration.  UGS ran out of oks to act on (e.g., stalled at 122/228) and stopped
+streaming new commands.  Machine idled after arc1 completed with an empty gcode queue.
+
+**Observable symptom**: `07_complex_long_run_fast.gcode` froze at 122/228 send count every
+run at the same arc-to-arc boundary.  `08_arc_cw_ccw_stress.gcode` repeated the same arc
+direction (G2→G2 instead of G2→G3) when the G3 command was stalled behind the blocked arc.
+
+**Fix — pending arc ring buffer (`PENDING_ARC_MAX = 8`)**:
+When arc2 arrives in the gcode queue while arc1 is running, it is **immediately pre-consumed**
+from the gcode queue (freeing the slot, triggering ok release to UGS) and stored in a small
+ring buffer in `APP_DATA`.  When arc1 finishes (`arcGenState → ARC_GEN_IDLE`), the pending
+arc drain in `app.c` reconstructs a `GCODE_Event` from the stored parameters, calls
+`MOTION_ProcessGcodeEvent`, and generates arc2's first segment — all in the same iteration.
+Up to 8 arcs can be pre-buffered (more than any practical back-to-back gcode sequence).
+
+**Files changed**:
+- `incs/data_structures.h` — Added `PendingArcParams` struct, `PENDING_ARC_MAX`, and
+  `pendingArcQueue/Head/Tail/Count` fields to `APP_DATA`
+- `srcs/app.c` — Initialize pending queue; add pending-arc drain block after `MOTION_Arc`;
+  replace the `should_process = false` arc-block with pre-consume logic
+- `srcs/gcode/gcode_parser.c` — `GCODE_CheckDeferredOk` program-end guard now waits for
+  `pendingArcCount == 0`; `GCODE_SoftReset` clears the pending queue
+
+
 
 **Root cause**: In `GCODE_STATE_GCODE_COMMAND`, when the 64-slot G-code queue was full,
 `Extract_CommandLineFrom_Buffer` silently dropped the incoming token (hit the `break` guard),
