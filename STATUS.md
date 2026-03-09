@@ -6,6 +6,24 @@
 
 ---
 
+## ✅ HARDWARE VALIDATED: Full test matrix — single-step + pipeline mode (March 9, 2026)
+
+**All tests run on `49e1bf6` build (`scurve_motion` branch).**
+Both UGS modes tested: **single-step** and **pipeline (pipelined streaming)**.
+
+| Test file | Mode | Result | Notes |
+|-----------|------|--------|-------|
+| `08_arc_cw_ccw_stress.gcode` | Single-step | ✅ PASS | 36 arcs, 2:18 min, return to origin |
+| `08_arc_cw_ccw_stress.gcode` | Pipeline    | ✅ PASS | Smooth continuous motion, no stop-starts |
+| `09_concentric_semicircles.gcode` | Pipeline | ✅ PASS ×2 | 56s/55s, X error <0.031mm |
+| `05_three_arcs_simple.gcode` (3arc) | Both | ✅ PASS | CW/CCW arc handoff stable |
+| `02_rectangle_path.gcode` (rectangle) | Both | ✅ PASS | Corners sharp, return to origin |
+| `03_circle_20segments.gcode` | Both | ✅ PASS | 20-segment circle, <0.025mm error |
+
+**Zero stop-starts between arc commands in all tests.** The arc streaming fix (inline trajectory dispatch + ring-drain push-back + `service_realtime_byte`) is confirmed production-ready.
+
+---
+
 ## ✅ HARDWARE VALIDATED: Pipelined streaming mode — all arc fixes confirmed (March 9, 2026)
 
 **Test**: `07_complex_long_run_fast.gcode` run twice back-to-back:
@@ -126,82 +144,6 @@ oks could be sent → UGS froze.
 - `srcs/app.c`: Removed `GCODE_MarkProgramEnd()` from `PROGRAM_END` event handler
 
 **Commit**: `52020fd` | Branch: `scurve_motion`
-
----
-
-## ❌ WIP: Arc-to-arc flow control stall — ok-at-receive-time (March 9, 2026) — FAILED
-
-**What was tried**: Gate ok on gcode queue slot (64 slots), send ok the moment a command
-enters the queue. Natural backpressure if queue is full.
-
-**Why it failed**: plib UART RX ring (1024 bytes) fills first. UGS stops when ring is full,
-not when gcode queue is full. No new bytes → no new commands → no ok-at-receive → deadlock
-at ring level.
-
-**Commit**: `560e7a8` (WIP checkpoint)
-
----
-
-## ❌ WIP: Arc-to-arc flow control stall — pending arc ring buffer (March 9, 2026) — FAILED
-
-## ❌ SUPERSEDED (pending arc queue)
-
-**Root cause**: While arc1 was generating its trajectory segments, arc2 sat **blocked at
-the head of the gcode command queue** (`should_process = false`).  Because arc2 was never
-consumed, `q->count` never dropped below `HIGH_WATER (48)`.  `GCODE_CheckDeferredOk`
-releases oks only when `q->count < HIGH_WATER`, so no oks were released during the entire
-arc1 duration.  UGS ran out of oks to act on (e.g., stalled at 122/228) and stopped
-streaming new commands.  Machine idled after arc1 completed with an empty gcode queue.
-
-**Observable symptom**: `07_complex_long_run_fast.gcode` froze at 122/228 send count every
-run at the same arc-to-arc boundary.  `08_arc_cw_ccw_stress.gcode` repeated the same arc
-direction (G2→G2 instead of G2→G3) when the G3 command was stalled behind the blocked arc.
-
-**Fix — pending arc ring buffer (`PENDING_ARC_MAX = 8`)**:
-When arc2 arrives in the gcode queue while arc1 is running, it is **immediately pre-consumed**
-from the gcode queue (freeing the slot, triggering ok release to UGS) and stored in a small
-ring buffer in `APP_DATA`.  When arc1 finishes (`arcGenState → ARC_GEN_IDLE`), the pending
-arc drain in `app.c` reconstructs a `GCODE_Event` from the stored parameters, calls
-`MOTION_ProcessGcodeEvent`, and generates arc2's first segment — all in the same iteration.
-Up to 8 arcs can be pre-buffered (more than any practical back-to-back gcode sequence).
-
-**Files changed**:
-- `incs/data_structures.h` — Added `PendingArcParams` struct, `PENDING_ARC_MAX`, and
-  `pendingArcQueue/Head/Tail/Count` fields to `APP_DATA`
-- `srcs/app.c` — Initialize pending queue; add pending-arc drain block after `MOTION_Arc`;
-  replace the `should_process = false` arc-block with pre-consume logic
-- `srcs/gcode/gcode_parser.c` — `GCODE_CheckDeferredOk` program-end guard now waits for
-  `pendingArcCount == 0`; `GCODE_SoftReset` clears the pending queue
-
-
-
-**Root cause**: In `GCODE_STATE_GCODE_COMMAND`, when the 64-slot G-code queue was full,
-`Extract_CommandLineFrom_Buffer` silently dropped the incoming token (hit the `break` guard),
-but the caller still called `SendOrDeferOk` and cleared `rxBuffer`. UGS received an "ok",
-believed the dropped command (e.g., `G2X50Y0I50J0`) was accepted, and the following `G3`
-sat at the queue head. The arc handler later peeked `G3` and ran it as if it were the `G2`,
-producing the wrong geometry (full circle in the -X direction) for every arc after the first.
-
-**Observable symptom**: In `09_arc_radius_sweep.gcode`, arcs 2–N all shot off in the -X
-direction and completed a full circle. Only arc 1 (empty queue at start) and the final arc
-were correct.
-
-**Fix** (`srcs/gcode/gcode_parser.c`):
-- `GCODE_STATE_GCODE_COMMAND` (line ~1630): compare `cmdQueue->count` before and after
-  `Extract_CommandLineFrom_Buffer`. If unchanged (nothing enqueued, queue was full), `break`
-  without sending ok and without clearing `rxBuffer`. State stays `GCODE_STATE_GCODE_COMMAND`.
-  Next iteration retries with the same rxBuffer. UGS is gated (no ok → no new send) so no
-  command is ever lost. Once the queue drains one slot, the retry succeeds and ok is sent.
-- `GCODE_STATE_IDLE` has_content path (line ~1040): same count_before/count_after guard.
-  If full: restore the line terminator byte (`saved_terminator`) before breaking so the IDLE
-  state re-finds the line terminator and retries on the next iteration.
-- `GCODE_STATE_IDLE` null-termination (line ~1005): save `char saved_terminator =
-  rxBuffer[terminator_pos]` before writing `'\0'`, so the IDLE retry can restore it.
-
-**Files changed**:
-- `srcs/gcode/gcode_parser.c:1005` — save `saved_terminator` before null-terminating
-- `srcs/gcode/gcode_parser.c:1040` — IDLE has_content queue-full retry with terminator restore
-- `srcs/gcode/gcode_parser.c:1630` — GCODE_STATE_GCODE_COMMAND queue-full retry guard
 
 ---
 

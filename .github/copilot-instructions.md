@@ -2140,87 +2140,49 @@ make clean                  # Clean current BUILD_CONFIG artifacts
 
 No further Makefile changes planned - current structure works well and follows standard practices.
 
-## ­ƒÄ» PRODUCTION DEPLOYMENT STATUS (November 13, 2025)
+## 🏁 PRODUCTION DEPLOYMENT STATUS (March 9, 2026)
 
 ### **GitHub Repository Status**
-- **Branch**: master
-- **Commit**: 9f9ad4b (latest)
-- **Status**: Ô£à **TESTING - DEPLOYED**
-- **Last Push**: November 13, 2025
+- **Branch**: `scurve_motion` → **merge to master pending**
+- **HEAD commit**: `95e4c4e` — "docs: full test matrix — all tests pass both modes"
+- **Status**: ✅ **PRODUCTION READY — pending final merge to master**
+- **Last validated**: March 9, 2026
 
-### **Successfully Deployed Features**
-All critical features merged from patch1 branch and pushed to GitHub:
+### **Validated Build**
+- **Commit**: `49e1bf6` — arc-to-arc streaming stall fix + pipelined mode validation
+- **Firmware**: `bins/CNC_V3.hex`
+- **Architecture**: S-curve velocity profiling, inline G-code dispatch, DDS interpolator
 
-1. **Ô£à Flow Control System (CRITICAL FIX)**
-   - Counter-based deferred ok system
-   - Single-threshold flow control (defer when queue > 0)
-   - Motion completion synchronization with `motionSegmentCompleted` flag
-   - Prevents UGS premature "Finished" state
-   - Enables automatic file completion
+### **Hardware Validated Test Matrix**
+All tests run in both UGS **single-step** and **pipelined streaming** modes:
 
-2. **Ô£à GRBL v1.1 Protocol Compliance**
-   - Blank line handling ("ok" response for all lines)
-   - Comment line handling (proper "ok" responses)
-   - Real-time character cleanup (no spurious "ok" for `?` queries)
-   - Control character CR/LF consumption
-   - Full protocol compliance validated
+| Test file | Mode | Result | Notes |
+|-----------|------|--------|-------|
+| `08_arc_cw_ccw_stress.gcode` | Single-step | ✅ PASS | 36 arcs, 2:18 min, return to origin |
+| `08_arc_cw_ccw_stress.gcode` | Pipeline    | ✅ PASS | Smooth continuous, zero stop-starts |
+| `09_concentric_semicircles.gcode` | Pipeline | ✅ PASS ×2 | 56s/55s, X error <0.031mm |
+| `05_three_arcs_simple.gcode` | Both | ✅ PASS | CW/CCW arc handoff stable |
+| `02_rectangle_path.gcode` | Both | ✅ PASS | Corners sharp, return to origin |
+| `03_circle_20segments.gcode` | Both | ✅ PASS | 20-segment circle, <0.025mm error |
+| `07_complex_long_run_fast.gcode` | Both | ✅ PASS | Full pipeline: arcs, linears, G4, return |
 
-3. **Ô£à Arc Radius Compensation**
-   - $13 arc_tolerance setting (default 0.002mm)
-   - Radius averaging for CAM software tolerance
-   - SETTINGS_VERSION = 2 (structure validation)
-   - GRBL v1.1 compatible implementation
+### **Key Arc Streaming Fixes (March 2026)**
+1. **Inline trajectory dispatch** — G-code bypasses 64-slot queue; backpressure at trajectory level prevents arc-to-arc stall
+2. **`service_realtime_byte()`** — `?` status answered during arc retry; UGS never times out
+3. **Push-back slot + drain gate** — first G-code byte preserved across retry; pipelined bytes safe in ring
 
-4. **Ô£à Soft Reset Recovery**
-   - OC1/TMR4 hardware validation guards
-   - Motion automatically restarts after Ctrl+X
-   - Optimal timer configuration (1:64 prescaler, 2.5┬Ás pulses)
+### **Architecture (Current)**
+```
+UART RX → Parser (inline dispatch) → Trajectory (64-slot S-curve) → Interpolator → TMR4_ISR
+```
+- `srcs/gcode/gcode_parser.c` — inline dispatch, `service_realtime_byte`, push-back slot
+- `srcs/motion/motion_bridge.c` — G-code event → trajectory move bridge
+- `srcs/motion/trajectory.c` — S-curve planner, 3-pass lookahead (GRBL-exact)
+- `srcs/motion/interpolator.c` — fixed-rate DDS step generator (100 kHz TMR4 ISR)
+- `srcs/motion/kinematics.c` — coordinate transforms (Work ↔ Machine) only
+- `srcs/motion/homing.c` — event-driven 4-phase homing with INTERPOLATOR_Stop/TRAJECTORY_Reset
 
-5. **Ô£à Complete Test Suite**
-   - PowerShell test scripts (test_double_rectangle.ps1, etc.)
-   - Rectangle test validation (double iteration)
-   - Circle test (20 segments)
-   - Arc compensation test
-   - Back-to-back execution test
-
-### **Production Test Results**
-- **Rectangle Test**: Ô£à PASS (both iterations complete, final position 0,0,0)
-- **Circle Test**: Ô£à PASS (20 segments, 0.025mm final error)
-- **Arc Compensation**: Ô£à PASS (0.001mm radius mismatch handled)
-- **Back-to-Back Files**: Ô£à PASS (automatic sequential execution)
-- **GRBL Protocol**: Ô£à PASS (full v1.1 compliance)
-
-### **Files Modified in Production Release**
-Major changes (40 files total, 2,499 insertions, 217 deletions):
-- `srcs/gcode/gcode_parser.c` - Flow control and protocol compliance
-- `srcs/motion/motion.c` - Segment completion triggers
-- `srcs/app.c` - Deferred ok check in IDLE loop
-- `incs/data_structures.h` - Added motionSegmentCompleted flag
-- `srcs/settings/settings.c` - Arc tolerance integration, user settings
-- `bins/Release/CS23.hex` - Production firmware (958,260 bytes)
-
-### **Documentation Added**
-- `docs/DEVLOG_2025-11-13.md` - Complete development session log
-- Multiple test G-code files (01_simple_90deg_junction.gcode, etc.)
-- PowerShell test suite expansion
-
-### **System Capabilities Validated**
-- Ô£à **File Streaming**: UGS, Candle, bCNC compatible
-- Ô£à **Automatic Completion**: No manual intervention required
-- Ô£à **Real-time Visualization**: Continuous status updates during motion
-- Ô£à **Arc Processing**: GRBL v1.1 compliant with tolerance compensation
-- Ô£à **Multi-file Execution**: Back-to-back runs without reset
-- Ô£à **Emergency Stop**: Ctrl+X with proper recovery
-- Ô£à **Position Tracking**: Accurate MPos/WPos reporting
-
-### **Recommended Next Steps**
-1. **Production Testing**: Deploy to actual CNC machine
-2. **Complex Toolpath Validation**: Test with CAM-generated programs
-3. **Performance Monitoring**: Validate sustained operation
-4. **User Documentation**: Create operator's guide for G-code senders
-
-**System Status**: ­ƒÜÇ **READY FOR PRODUCTION CNC OPERATIONS**
-
+### **System Status**: 🚀 **READY FOR PRODUCTION CNC OPERATIONS**
 
 ---
 
