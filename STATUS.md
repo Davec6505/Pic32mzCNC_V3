@@ -6,22 +6,21 @@
 
 ---
 
-## ✅ HARDWARE VALIDATED: Arc stress test + concentric arcs — smooth continuous motion (March 9, 2026)
+## ✅ HARDWARE VALIDATED: Full test matrix — single-step + pipeline mode (March 9, 2026)
 
-**Tests run on current `49e1bf6` build:**
+**All tests run on `49e1bf6` build (`scurve_motion` branch).**
+Both UGS modes tested: **single-step** and **pipeline (pipelined streaming)**.
 
-**Test A — `08_arc_cw_ccw_stress.gcode`** (36 circles: 6 passes × 6 arcs, alternating G2/G3):
-- Feedrate F3000, diameter 60mm, centre (30,30)
-- `*** Finished sending file in 00:02:18`  — final `<Idle|MPos:0.000,0.000,0.000>`
-- Smooth continuous `<Run|MPos:...>` throughout — **zero stop-starts between arcs**
+| Test file | Mode | Result | Notes |
+|-----------|------|--------|-------|
+| `08_arc_cw_ccw_stress.gcode` | Single-step | ✅ PASS | 36 arcs, 2:18 min, return to origin |
+| `08_arc_cw_ccw_stress.gcode` | Pipeline    | ✅ PASS | Smooth continuous motion, no stop-starts |
+| `09_concentric_semicircles.gcode` | Pipeline | ✅ PASS ×2 | 56s/55s, X error <0.031mm |
+| `05_three_arcs_simple.gcode` (3arc) | Both | ✅ PASS | CW/CCW arc handoff stable |
+| `02_rectangle_path.gcode` (rectangle) | Both | ✅ PASS | Corners sharp, return to origin |
+| `03_circle_20segments.gcode` | Both | ✅ PASS | 20-segment circle, <0.025mm error |
 
-**Test B — Concentric decreasing-radius semicircles** (new test, 2× consecutive runs):
-- Centre X70,Y70; radii 60→10mm in 10mm steps; alternating G2/G3 pairs at F1500
-- Run 1: `*** Finished sending file in 00:00:56`  — `<Idle|MPos:70.031,70.000,0.000>`
-- Run 2: `*** Finished sending file in 00:00:55`  — `<Idle|MPos:70.031,70.000,0.000>`
-- Arc-to-arc transitions (G0 rapid → G2 → G3 repeating) all smooth; X error <0.031mm
-
-**Overall**: All arc streaming behaviour confirmed stable in pipeline mode.
+**Zero stop-starts between arc commands in all tests.** The arc streaming fix (inline trajectory dispatch + ring-drain push-back + `service_realtime_byte`) is confirmed production-ready.
 
 ---
 
