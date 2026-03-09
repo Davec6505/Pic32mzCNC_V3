@@ -96,6 +96,13 @@ static bool     s_homing_started = false;   // true once HOMING_IsActive() first
 
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
+
+/* 1-byte push-back slot used by the GCODE_STATE_GCODE_COMMAND retry drain.    */
+/* When the drain reads a non-real-time byte (first byte of a G-code command)  */
+/* it puts it here rather than losing it.  GCODE_STATE_IDLE injects it back    */
+/* at the front of rxBuffer before reading more bytes from the UART ring.      */
+static uint8_t  s_rxPushback     = 0;
+static bool     s_rxHasPushback  = false;
 // g_feed_hold_active is in stepper.h (defined in stepper.c) — global, gated in app.c APP_IDLE
 static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
 static bool unitsInches  = false;           /* false=mm (G21), true=inches (G20) */
@@ -221,6 +228,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     okPendingCount = 0;         // Clear all deferred ok responses
     s_homing_pending = false;       // Clear homing sentinel
     s_homing_started = false;       // Clear homing-started flag
+    s_rxHasPushback  = false;       // Clear any pending push-back byte
     grblCheckMode = false;
     g_feed_hold_active  = false;  // Clear hold (defined in stepper.c / stepper.h)
     g_feed_hold_pending = false;  // Cancel any in-flight pending hold
@@ -251,6 +259,7 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
     okPendingCount = 0;       // Clear all deferred ok responses
+    s_rxHasPushback = false;  // Clear any pending push-back byte
     gcodeData.state = GCODE_STATE_IDLE;
     unitsInches = false;
     grblCheckMode = false;
@@ -910,6 +919,187 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Real-time byte handler (? ! ~ 0x18 0x85)                                  */
+/*                                                                             */
+/* Called from GCODE_STATE_CONTROL_CHAR and from the GCODE_STATE_GCODE_COMMAND */
+/* retry path so that status queries are answered even while the parser is    */
+/* blocked waiting for the trajectory to accept an arc command.               */
+/* -------------------------------------------------------------------------- */
+static void service_realtime_byte(APP_DATA* appData, uint8_t c)
+{
+    switch (c) {
+        case '?': {
+            StepperPosition* pos = STEPPER_GetPosition();
+            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
+            float mpos[NUM_AXIS];
+            float wpos[NUM_AXIS];
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
+                wpos[axis] = mpos[axis] - GET_COORDINATE_AXIS(&wcs->offset, axis);
+            }
+            const char* state = "Idle";
+            if (grblAlarm)                         { state = "Alarm"; }
+            else if (g_feed_hold_pending)           { state = "Hold:1"; }
+            else if (g_feed_hold_active)            { state = "Hold:0"; }
+            else if (MOTION_IsJogging())            { state = "Jog"; }
+            else if (appData->arcGenState == ARC_GEN_ACTIVE) { state = "Run"; }
+            else if ((T4CON & _T4CON_ON_MASK) != 0) { state = "Run"; }
+            else if (appData->motionQueueCount > 0) { state = "Run"; }
+            float feedrate_mm_min = 0.0f;
+            if (state[0] == 'R' || state[0] == 'J') {
+                feedrate_mm_min = STEPPER_GetCurrentFeedrateMmMin();
+                if (feedrate_mm_min < 1.0f)
+                    feedrate_mm_min = (appData->modalFeedrate > 0.0f) ? appData->modalFeedrate : 0.0f;
+            }
+            uint32_t feed_display    = (uint32_t)(feedrate_mm_min + 0.5f);
+            uint32_t spindle_display = appData->modalSpindleRPM;
+            uint32_t response_len = (uint32_t)snprintf((char*)txBuffer, sizeof(txBuffer),
+                "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%lu,%lu%s%s>\r\n",
+                state,
+                mpos[AXIS_X], mpos[AXIS_Y], mpos[AXIS_Z],
+                wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
+                (unsigned long)feed_display, (unsigned long)spindle_display,
+                grblCheckMode ? "|Cm:1" : "", "");
+            UART3_Write(txBuffer, response_len);
+            break;
+        }
+        case '~':
+            if (g_feed_hold_active || g_feed_hold_pending) {
+                STEPPER_ResumeMotion();
+                DEBUG_PRINT_GCODE("[GCODE] Feed hold released — motion resuming\r\n");
+            }
+            break;
+        case '!':
+            if (!g_feed_hold_active && !g_feed_hold_pending) {
+                STEPPER_PauseMotion();
+                DEBUG_PRINT_GCODE("[GCODE] Feed hold active\r\n");
+            }
+            break;
+        case 0x85:
+            MOTION_JogCancel();
+            break;
+        default:
+            /* Override bytes (0x90-0x99), XON/XOFF — silently ignore */
+            break;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Inline command-dispatch helpers (bypass the 64-slot gcode command queue)  */
+/*                                                                             */
+/* Architecture: parse one line → try MOTION_ProcessGcodeEvent for each      */
+/* event immediately.  If any event is rejected (trajectory full / arc        */
+/* active) return false so GCODE_STATE_GCODE_COMMAND keeps rxBuffer and       */
+/* retries next iteration.  No ok is sent until all events are accepted.      */
+/* This ties backpressure directly to the trajectory queue, not a 64-slot    */
+/* intermediate buffer.  Arc-to-arc stall is eliminated because arc2 waits   */
+/* in rxBuffer (not in the gcode queue), so the queue never fills up and     */
+/* UGS's character-count flow control provides natural backpressure.          */
+/* -------------------------------------------------------------------------- */
+
+/* Dispatch a single already-split token to the motion bridge.
+ * Returns true  = event dispatched (or is a harmless no-op).
+ * Returns false = motion bridge cannot accept right now; caller should retry. */
+static bool dispatch_one_token(APP_DATA* appData, const char* token, bool* io_is_probe)
+{
+    GCODE_Event ev;
+    if (!parse_command_to_event(token, &ev)) return true; /* bad syntax — skip silently */
+    if (ev.type == GCODE_EVENT_NONE)          return true; /* no-op (G20/G21 unit set, etc.) */
+
+    /* Program-end events (M0/M2/M30): motion doesn't handle them; always "accepted". */
+    if (ev.type == GCODE_EVENT_PROGRAM_END)   return true;
+
+    /* Tag probe commands so ok is suppressed until probe completes. */
+    if (ev.type == GCODE_EVENT_PROBE_TOWARD || ev.type == GCODE_EVENT_PROBE_AWAY) {
+        if (io_is_probe) *io_is_probe = true;
+    }
+
+    return MOTION_ProcessGcodeEvent(appData, &ev);
+}
+
+/* Like split_and_queue_multi_modal but dispatches directly instead of queuing.
+ * Returns false if any sub-token is rejected by the motion bridge. */
+static bool split_and_dispatch_multi_modal_inline(APP_DATA* appData, char* token, bool* io_is_probe)
+{
+    size_t len = strlen(token);
+    if (len < 3U) {
+        return dispatch_one_token(appData, token, io_is_probe);
+    }
+
+    /* Collect positions of G/M designators within the token */
+    uint8_t pos[8]; uint8_t posCount = 0;
+    for (size_t i = 0; i < len && posCount < 8U; i++) {
+        if (token[i] == 'G' || token[i] == 'M') pos[posCount++] = (uint8_t)i;
+    }
+    if (posCount <= 1U) {
+        return dispatch_one_token(appData, token, io_is_probe);
+    }
+
+    /* Dispatch each modal prefix as a separate sub-token */
+    char sub[GCODE_BUFFER_SIZE];
+    for (uint8_t i = 0; i < posCount - 1U; i++) {
+        size_t sublen = (size_t)(pos[i + 1U] - pos[i]);
+        if (sublen >= GCODE_BUFFER_SIZE) sublen = GCODE_BUFFER_SIZE - 1U;
+        memcpy(sub, &token[pos[i]], sublen);
+        sub[sublen] = '\0';
+        if (!dispatch_one_token(appData, sub, io_is_probe)) return false;
+    }
+    /* Last piece: from last modal designator to end of token */
+    return dispatch_one_token(appData, &token[pos[posCount - 1U]], io_is_probe);
+}
+
+/* Parse and dispatch an entire G-code command line directly to the motion bridge.
+ * Returns true  = all events accepted → caller sends ok and clears rxBuffer.
+ * Returns false = at least one event blocked → caller retries next iteration. */
+static bool dispatch_command_line(APP_DATA* appData,
+                                   const uint8_t* buf, uint32_t length,
+                                   bool* out_is_probe)
+{
+    *out_is_probe = false;
+    char line_buffer[256];
+    uint32_t safe_length = (length < (uint32_t)(sizeof(line_buffer) - 1U))
+                         ? length : (uint32_t)(sizeof(line_buffer) - 1U);
+    memcpy(line_buffer, buf, safe_length);
+    line_buffer[safe_length] = '\0';
+
+    /* Uppercase */
+    for (uint32_t i = 0; i < safe_length; i++) {
+        char c = line_buffer[i];
+        if (c >= 'a' && c <= 'z') line_buffer[i] = (char)(c - 'a' + 'A');
+    }
+    /* Strip non-printable */
+    uint32_t write_pos = 0;
+    for (uint32_t i = 0; i < safe_length; i++) {
+        char c = line_buffer[i];
+        if ((c >= 32 && c <= 126) || c == '\r' || c == '\n' || c == '\t')
+            line_buffer[write_pos++] = c;
+    }
+    line_buffer[write_pos] = '\0';
+
+    TokenArray tokens;
+    uint32_t token_count = UTILS_TokenizeGcodeLine(line_buffer, &tokens);
+
+    for (uint32_t i = 0; i < token_count; i++) {
+        if (UTILS_IsEmptyString(tokens.tokens[i]) || UTILS_IsComment(tokens.tokens[i])) continue;
+
+        /* Detect combined-modal tokens like "G90G1X10" or "G21G90" */
+        bool combined = false;
+        if (tokens.tokens[i][0] == 'G' || tokens.tokens[i][0] == 'M') {
+            for (char* p = tokens.tokens[i] + 1; *p; ++p) {
+                if (*p == 'G' || *p == 'M') { combined = true; break; }
+            }
+        }
+
+        bool accepted = combined
+            ? split_and_dispatch_multi_modal_inline(appData, tokens.tokens[i], out_is_probe)
+            : dispatch_one_token(appData, tokens.tokens[i], out_is_probe);
+
+        if (!accepted) return false; /* motion blocked — caller retries */
+    }
+    return true; /* all events dispatched (or line was empty) */
+}
+
+/* -------------------------------------------------------------------------- */
 /* Main G-code / Protocol Tasks                                               */
 /* -------------------------------------------------------------------------- */
 void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
@@ -936,6 +1126,12 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
     switch (gcodeData.state)
     {
     case GCODE_STATE_IDLE:
+        // Inject any pushed-back byte first (from the GCODE_COMMAND drain loop).
+        if (s_rxHasPushback && nBytesRead < sizeof(rxBuffer) - 1U) {
+            rxBuffer[nBytesRead++] = s_rxPushback;
+            rxBuffer[nBytesRead]   = '\0';
+            s_rxHasPushback = false;
+        }
         nBytesAvailable = UART3_ReadCountGet();
         if (nBytesAvailable > 0) {
             uint32_t space = (uint32_t)(sizeof(rxBuffer) - 1U - nBytesRead);
@@ -1056,107 +1252,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         if (gcodeData.state != GCODE_STATE_CONTROL_CHAR) break;
 
         uint8_t c = rxBuffer[0];
-        switch (c) {
-            case '?': {
-                StepperPosition* pos = STEPPER_GetPosition();
-                WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-
-                // Array-based position calculation with loop for scalability
-                float mpos[NUM_AXIS];
-                float wpos[NUM_AXIS];
-                
-                for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-                    mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
-                    wpos[axis] = mpos[axis] - GET_COORDINATE_AXIS(&wcs->offset, axis);
-                }
-
-                const char* state = "Idle";
-                if (grblAlarm) {
-                    state = "Alarm";
-                } else if (g_feed_hold_pending) {
-                    state = "Hold:1";  // GRBL v1.1: Hold:1 = draining / decelerating
-                } else if (g_feed_hold_active) {
-                    state = "Hold:0";  // GRBL v1.1: Hold:0 = fully stopped
-                } else if (MOTION_IsJogging()) {
-                    state = "Jog";
-                } else if (appData->arcGenState == ARC_GEN_ACTIVE) {
-                    // Arc generator active → still processing arc segments
-                    state = "Run";
-                } else if ((T4CON & _T4CON_ON_MASK) != 0) {
-                    // Hardware timer running → motion in progress (or about to start)
-                    state = "Run";
-                } else if (appData->motionQueueCount > 0) {
-                    // Motion queue has segments waiting
-                    state = "Run";
-                }
-
-                // FS feedrate: read actual step_interval from the executing ISR segment.
-                // prep_current_speed tracks the look-ahead preparation cursor, NOT
-                // the segment currently clocking through the ISR, so it lags/leads
-                // the real executing speed.  STEPPER_GetCurrentFeedrateMmMin() reads
-                // the hardware timer ticks directly – zero ambiguity.
-                float feedrate_mm_min = 0.0f;
-                if (state[0] == 'R' || state[0] == 'J') {
-                    feedrate_mm_min = STEPPER_GetCurrentFeedrateMmMin();
-                    if (feedrate_mm_min < 1.0f) {
-                        // Fallback: use modal feedrate if step_interval not yet loaded
-                        feedrate_mm_min = (appData->modalFeedrate > 0.0f) ? appData->modalFeedrate : 0.0f;
-                    }
-                }
-                // ✅ FIX: XC32 -msingle-float ABI mismatch — printf lib expects 8-byte double
-                // for %f/%g but caller passes 4-byte float.  Convert both to uint32_t and
-                // use %lu so there is zero float/double argument-size ambiguity.
-                uint32_t feed_display   = (uint32_t)(feedrate_mm_min + 0.5f);
-                uint32_t spindle_display = appData->modalSpindleRPM;
-
-                uint32_t response_len = (uint32_t)snprintf((char*)txBuffer, sizeof(txBuffer),
-                    "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%lu,%lu%s%s>\r\n",
-                    state, 
-                    mpos[AXIS_X], mpos[AXIS_Y], mpos[AXIS_Z], 
-                    wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
-                    (unsigned long)feed_display, (unsigned long)spindle_display,
-                    grblCheckMode ? "|Cm:1" : "",
-                    "");  // Hold state reported via state string (Hold:0), not separate flag
-                UART3_Write(txBuffer, response_len);
-                
-                // ⚠️ Real-time commands NEVER trigger deferred ok checks
-                // The deferred ok will be sent by IDLE loop (line 668) or next command
-                break;
-            }
-            case '~': /* Cycle start / resume */
-                if (g_feed_hold_active || g_feed_hold_pending) {
-                    STEPPER_ResumeMotion();  // Cancels pending OR restarts from full stop
-                    DEBUG_PRINT_GCODE("[GCODE] Feed hold released — motion resuming\r\n");
-                }
-                break;
-            case '!': /* Feed hold */
-                if (!g_feed_hold_active && !g_feed_hold_pending) {
-                    STEPPER_PauseMotion();   // Sets pending (drain) or immediate if queue empty
-                    DEBUG_PRINT_GCODE("[GCODE] Feed hold active\r\n");
-                }
-                break;
-            case 0x18: /* Soft reset (Ctrl+X) */
-            {
-                GCODE_SoftReset(appData, cmdQueue);
-                break;
-            }
-            case 0x85: /* Jog cancel — flush queued jog moves, no alarm */
-                MOTION_JogCancel();
-                // No response per GRBL v1.1 spec
-                break;
-            case 0x95: /* XOFF - flow control, ignore */
-            case 0x90: /* DLE - data link escape, ignore */
-            case 0x99: /* Unknown control char - ignore */
-            case 0x11: /* XON - flow control, ignore */
-            case 0x13: /* DC3/XOFF - flow control, ignore */
-                // Flow control characters - silently consume without "ok" response
-                // These are not G-code commands and don't require acknowledgment
-                DEBUG_PRINT_GCODE("[GCODE] Ignoring flow control byte: 0x%02X\r\n", rxBuffer[0]);
-                break;
-            default:
-                // Unknown control character - ignore
-                DEBUG_PRINT_GCODE("[GCODE] Unknown control char: 0x%02X\r\n", rxBuffer[0]);
-                break;
+        if (c == 0x18) {
+            GCODE_SoftReset(appData, cmdQueue);
+        } else {
+            service_realtime_byte(appData, c);
         }
 
         // ✅ GRBL PROTOCOL: Real-time commands (? ! ~) NEVER generate "ok" responses
@@ -1595,28 +1694,51 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         }
         DEBUG_PRINT_GCODE("[GCODE_CMD] Processing command: '%s'\r\n", rxBuffer);
 
-        // Queue-full guard: track whether Extract actually enqueued anything.
-        // If count is unchanged the queue was full and the token was silently
-        // dropped.  Hold rxBuffer and retry next iteration WITHOUT sending ok.
-        // UGS is gated here (no ok → no new send) so no command is ever lost.
-        uint32_t count_before = cmdQueue->count;
-        cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
-        if (cmdQueue->count == count_before) {
-            DEBUG_PRINT_GCODE("[GCODE_CMD] Queue full — holding for retry\r\n");
-            break;  // stay in GCODE_STATE_GCODE_COMMAND, do NOT send ok
+        // Inline dispatch: parse every event in this line and try to send each
+        // directly to the motion bridge (trajectory).  If the bridge rejects any
+        // event (arc active, trajectory full, or motion drain pending) we stay in
+        // this state and retry next iteration — rxBuffer is preserved, no ok sent.
+        // Back-pressure: UGS gets no ok → stops sending → UART ring fills slowly.
+        // This eliminates the arc-to-arc stall: arc2 waits here (1 slot) instead
+        // of piling up behind 64 gcode-queue entries while ok credits are already
+        // exhausted.
+        bool is_probe_cmd = false;
+        if (!dispatch_command_line(appData, rxBuffer, cmd_end, &is_probe_cmd)) {
+            DEBUG_PRINT_GCODE("[GCODE_CMD] Motion blocked — holding for retry\r\n");
+            // Drain real-time control bytes (primarily '?') from the ring ONLY on the
+            // first retry iteration (when the pushback slot is empty).  In pipelined
+            // mode UGS has already sent the next G-code commands into the ring; each
+            // retry consumes one more ring byte and overwrites the pushback slot,
+            // destroying the queued G-code data byte-by-byte.  Stopping once the slot
+            // is filled guarantees ring integrity from that point on.
+            //
+            // In single-step mode the ring only contains '?' bytes so this path
+            // services them correctly on every retry iteration (the pushback never
+            // gets set because no G-code bytes arrive until the ok is sent).
+            //
+            // '?' bytes that arrive after the pushback is set stay in the ring behind
+            // the G-code bytes.  They are processed correctly by GCODE_STATE_IDLE
+            // once the arc finishes and arc2 is dispatched.
+            if (!s_rxHasPushback) {
+                uint8_t rt;
+                while (UART3_ReadCountGet() > 0) {
+                    if (UART3_Read(&rt, 1) != 1) break;
+                    if (rt == 0x18) { GCODE_SoftReset(appData, cmdQueue); return; }
+                    if (!is_control_char(rt)) {
+                        // First byte of a G-code command — push it back and stop.
+                        // All subsequent ring bytes (rest of that command + further
+                        // commands) remain intact for GCODE_STATE_IDLE to pick up.
+                        s_rxPushback    = rt;
+                        s_rxHasPushback = true;
+                        break;
+                    }
+                    service_realtime_byte(appData, rt);
+                }
+            }
+            break;  // stay in GCODE_STATE_GCODE_COMMAND, retry next iteration
         }
 
-        // Probe commands (G38.x) own their own ok: it is sent by app.c ONLY after
-        // probe completion ([PRB:...] result line precedes the ok).  Suppress the
-        // normal SendOrDeferOk here so UGS does not receive a premature ok.
-        bool is_probe_cmd = false;
-        for (uint32_t pi = 0; pi + 2 < nBytesRead && rxBuffer[pi] != '\0'; pi++) {
-            if ((rxBuffer[pi] == 'G' || rxBuffer[pi] == 'g') &&
-                 rxBuffer[pi+1] == '3' && rxBuffer[pi+2] == '8') {
-                is_probe_cmd = true;
-                break;
-            }
-        }
+        // All events dispatched — send ok (probe commands own their ok via app.c)
         if (!is_probe_cmd) {
             DEBUG_PRINT_GCODE("[GCODE_CMD] Normal flow control\r\n");
             SendOrDeferOk(appData, cmdQueue);

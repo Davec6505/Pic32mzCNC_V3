@@ -445,39 +445,22 @@ void APP_Tasks ( void )
                 if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
                     DEBUG_PRINT_GCODE("[APP] Event retrieved: type=%d (1=LINEAR,2=ARC)\r\n", event.type);
                     
-                    // ⚠️ CRITICAL: Don't process ARC events while another arc is generating.
-                    // Instead of leaving the arc at the gcode queue head (which blocks
-                    // flow control — q->count stays high → no oks released → UGS stalls),
-                    // pre-consume it into the pending arc ring buffer immediately.
-                    // Don't process arc events while another arc is generating —
-                    // arc2 waits at the gcode queue head until arc1 finishes.
-                    // Flow control is unaffected: UGS already has its ok (sent at
-                    // receive time in GCODE_Tasks), so it keeps streaming the rest
-                    // of the file into the remaining 63 gcode queue slots.
-                    bool should_process = true;
-                    if (event.type == GCODE_EVENT_ARC_MOVE && appData.arcGenState == ARC_GEN_ACTIVE) {
-                        should_process = false;
-                    }
-
-                    if (should_process) {
-                        // Process event - only consume if successful
-                        if (MOTION_ProcessGcodeEvent(&appData, &event)) {
-                            // Event processed successfully - consume it from queue
-                            GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
-                            // Kick arc generation immediately so trajectory queue stays fed
-                            if (event.type == GCODE_EVENT_ARC_MOVE &&
-                                appData.arcGenState == ARC_GEN_ACTIVE) {
-                                MOTION_Arc(&appData);
-                            }
-                        } else if (event.type == GCODE_EVENT_PROGRAM_END) {
-                            // ✅ CRITICAL FIX: M0, M2, M30 (program end) - not handled by motion
-                            // Consume the event and remain in IDLE state
-                            // This prevents machine from getting stuck after file completion
-                            DEBUG_PRINT_APP("[APP] Program end (M0/M2/M30) - file complete\r\n");
-                            GCODE_ConsumeEvent(&appData.gcodeCommandQueue); // ← increments commands_consumed
+                    // Process event - only consume if successful
+                    if (MOTION_ProcessGcodeEvent(&appData, &event)) {
+                        // Event processed successfully - consume it from queue
+                        GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
+                        // Kick arc generation immediately so trajectory queue stays fed
+                        if (event.type == GCODE_EVENT_ARC_MOVE &&
+                            appData.arcGenState == ARC_GEN_ACTIVE) {
+                            MOTION_Arc(&appData);
                         }
-                        // If processing failed (queue full), leave event in queue for next iteration
+                    } else if (event.type == GCODE_EVENT_PROGRAM_END) {
+                        // M0, M2, M30 (program end) - not handled by motion
+                        // Consume the event and remain in IDLE state
+                        DEBUG_PRINT_APP("[APP] Program end (M0/M2/M30) - file complete\r\n");
+                        GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
                     }
+                    // If processing failed, leave event in queue for next iteration
                 }
             }
 

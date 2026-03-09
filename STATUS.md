@@ -6,7 +6,145 @@
 
 ---
 
-## ✅ FIX: Arc-to-arc flow control stall — pending arc queue (March 9, 2026)
+## ✅ HARDWARE VALIDATED: Pipelined streaming mode — all arc fixes confirmed (March 9, 2026)
+
+**Test**: `07_complex_long_run_fast.gcode` run twice back-to-back:
+- Pass 1 — UGS **single-step mode**: `*** Finished sending file in 00:02:00`, final `<Idle|MPos:0.000,0.000,0.000>`
+- Pass 2 — UGS **pipelined streaming mode**: `*** Finished sending file in 00:02:00`, final `<Idle|MPos:0.000,0.000,0.000>`
+
+Both passes exercised:
+- Full 360° circles via 4-quadrant consecutive G3/G2 arcs (arc-to-arc handoff)
+- Mixed CW/CCW arc sequences in streaming
+- Linear hatch fills and nested rectangle patterns at up to 8000 mm/min
+- G4 dwell integration between motion blocks
+- Motion returning exactly to origin after every section
+
+**All three arc fixes validated in pipelined mode**:
+1. Inline trajectory dispatch (no false `ok` before trajectory accepts arc)
+2. `service_realtime_byte()` — `?` answered during arc retry, UGS never times out
+3. Push-back slot + drain gate — ring bytes preserved across retries, no lost G-code bytes
+
+**Firmware**: `bins/CNC_V3.hex` (current build, `scurve_motion` branch)
+
+---
+
+## ✅ FIX: Ring-drain consumed G-code bytes during arc-to-arc retry (March 9, 2026)
+
+**Root cause**: The drain loop in `GCODE_STATE_GCODE_COMMAND` (retry path) called
+`service_realtime_byte()` on every ring byte. `service_realtime_byte` silently ignores
+non-real-time bytes, so G-code command bytes (e.g. `G1 X0 Y0`) that UGS had already sent
+within its 127-byte character-count window were consumed and lost. Files stopped mid-run
+exactly where the missing command was (08: at end of section 5, 07: same).
+
+**Fix — 1-byte push-back slot**:
+- Added `s_rxPushback` / `s_rxHasPushback` static vars in `gcode_parser.c` (~line 97)
+- Drain loop (retry path): when byte is NOT `is_control_char()`, store it in
+  `s_rxPushback`, set `s_rxHasPushback = true`, and `break` — the first byte of a
+  G-code command is preserved, and the rest remains intact in the ring
+- `GCODE_STATE_IDLE` read: before reading from UART ring, if `s_rxHasPushback` is set,
+  inject the pushed-back byte at `rxBuffer[nBytesRead]` first, then read ring normally
+- Push-back cleared on soft-reset (`GCODE_SoftReset`) and USART init
+
+**Behaviour**: `?` chars (1 byte, from UGS polling thread) are the only bytes that arrive in
+the ring during arc retry under proper 127-byte character-count flow control. Any G-code byte
+that does arrive is now safely preserved for the next IDLE iteration.
+
+**Files changed**:
+- `srcs/gcode/gcode_parser.c`:
+  - Added `s_rxPushback` / `s_rxHasPushback` static vars
+  - Drain loop: push-back on non-control byte instead of silently ignoring
+  - `GCODE_STATE_IDLE`: inject push-back before ring read
+  - `GCODE_SoftReset` / `GCODE_USART_Initialize`: clear push-back slot
+
+---
+
+## ✅ FIX: `?` status unresponsive + motion abort during arc-to-arc blocking (March 9, 2026)
+
+**Root cause**: `GCODE_STATE_GCODE_COMMAND` held `rxBuffer` during retry (arc blocked) and
+never read new ring bytes.  UGS background-polling `?` chars accumulated unprocessed.
+After several seconds with no status reply, UGS timed out and aborted the stream mid-file.
+
+**Fix — `service_realtime_byte()` + ring drain in retry path**:
+- `srcs/gcode/gcode_parser.c` — added `service_realtime_byte(APP_DATA* appData, uint8_t c)`
+  before the inline-dispatch helpers block (~line 912). Contains the complete `?` status
+  reply, `!` feed hold, `~` resume, and `0x85` jog-cancel logic.
+- `GCODE_STATE_CONTROL_CHAR` simplified: the `switch` body replaced by two lines —
+  `0x18` calls `GCODE_SoftReset` directly; all other chars call `service_realtime_byte`.
+- `GCODE_STATE_GCODE_COMMAND` retry break-path extended: after `dispatch_command_line`
+  returns false, a `while (UART3_ReadCountGet() > 0)` loop drains the ring and calls
+  `service_realtime_byte` for each byte. `0x18` in the loop triggers `GCODE_SoftReset`
+  and `return` (rxBuffer already cleared). Arc stress test (`08_arc_cw_ccw_stress.gcode`)
+  and longer multi-arc files now stream without UGS connection loss.
+
+**Files changed**:
+- `srcs/gcode/gcode_parser.c`:
+  - Added `service_realtime_byte()` helper (before `dispatch_one_token`)
+  - Simplified `GCODE_STATE_CONTROL_CHAR` inner switch to two lines
+  - Added ring-drain loop to `GCODE_STATE_GCODE_COMMAND` retry path
+
+---
+
+## ✅ FIX: Arc-to-arc stall — inline trajectory dispatch (March 2026)
+
+**Root cause (final, hardware-confirmed)**:
+`GCODE_STATE_GCODE_COMMAND` sent `ok` when a command entered the 64-slot gcode command
+queue, NOT when it was accepted by the trajectory.  Arc2 sat blocked at the queue HEAD
+(`MOTION_ProcessGcodeEvent` returned false while arc1 was generating).  Commands 2–64
+piled up in the queue behind arc2 with ok already spent.  When the queue filled, no more
+oks could be sent → UGS froze.
+
+**Fix — inline trajectory dispatch (bypass 64-slot gcode queue for normal commands)**:
+- Added three static helpers in `gcode_parser.c` before `GCODE_Tasks`:
+  - `dispatch_one_token`: parses a single G-code token → calls `MOTION_ProcessGcodeEvent` directly
+  - `split_and_dispatch_multi_modal_inline`: handles combined tokens like `G90G1X10`
+  - `dispatch_command_line`: tokenizes + dispatches an entire line; returns false if any
+    event is rejected by the motion bridge
+- `GCODE_STATE_GCODE_COMMAND` now calls `dispatch_command_line` instead of
+  `Extract_CommandLineFrom_Buffer`.  If rejected → holds `rxBuffer`, retries next
+  iteration. If accepted → `SendOrDeferOk` → clear rxBuffer.
+- Removed `should_process = false` arc guard from `app.c` event dispatch loop
+  (now redundant; `MOTION_ProcessGcodeEvent` itself has the arc guard).
+- The 64-slot `GCODE_CommandQueue` is preserved for `$N` startup lines and the
+  unusual `GCODE_STATE_IDLE` has_content path, but is no longer the flow-control
+  bottleneck for normal G-code streaming.
+
+**Backpressure path (new)**:
+  arc2 arrives → dispatch_command_line returns false → rxBuffer held → no `ok` →
+  UGS stalls at its character-count limit (≤127 bytes in-flight) → ring barely fills →
+  arc1 finishes → retry succeeds → `ok` → UGS sends arc3
+
+**Files changed**:
+- `srcs/gcode/gcode_parser.c`: Added `dispatch_one_token`, `split_and_dispatch_multi_modal_inline`,
+  `dispatch_command_line`; rewrote `GCODE_STATE_GCODE_COMMAND` case
+- `srcs/app.c`: Removed `should_process` guard and dead `bool should_process = true` variable
+
+**Previous (failed) approach** — ring-buffer backpressure gate:
+
+- `srcs/gcode/gcode_parser.c`: `SendOrDeferOk` ring-buffer gate; `GCODE_CheckDeferredOk`
+  simplified drain (one per call, ring-gated); removed program-end sentinel; drain call
+  added at top of `GCODE_Tasks`
+- `srcs/app.c`: Removed `GCODE_MarkProgramEnd()` from `PROGRAM_END` event handler
+
+**Commit**: `52020fd` | Branch: `scurve_motion`
+
+---
+
+## ❌ WIP: Arc-to-arc flow control stall — ok-at-receive-time (March 9, 2026) — FAILED
+
+**What was tried**: Gate ok on gcode queue slot (64 slots), send ok the moment a command
+enters the queue. Natural backpressure if queue is full.
+
+**Why it failed**: plib UART RX ring (1024 bytes) fills first. UGS stops when ring is full,
+not when gcode queue is full. No new bytes → no new commands → no ok-at-receive → deadlock
+at ring level.
+
+**Commit**: `560e7a8` (WIP checkpoint)
+
+---
+
+## ❌ WIP: Arc-to-arc flow control stall — pending arc ring buffer (March 9, 2026) — FAILED
+
+## ❌ SUPERSEDED (pending arc queue)
 
 **Root cause**: While arc1 was generating its trajectory segments, arc2 sat **blocked at
 the head of the gcode command queue** (`should_process = false`).  Because arc2 was never
