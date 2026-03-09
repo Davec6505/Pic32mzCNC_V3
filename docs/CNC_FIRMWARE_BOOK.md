@@ -31,6 +31,10 @@ The goal is simple: by the time you finish reading, you should be able to open a
 6. [Chapter 6: The Motion Pipeline — From G-Code to Step Pulse](#chapter-6-the-motion-pipeline)
 7. [Chapter 7: Coordinate Systems and Kinematics](#chapter-7-coordinate-systems)
 8. [Chapter 8: The Flow Control System — Keeping the Conversation Polite](#chapter-8-flow-control)
+   - [8.1 How UGS Actually Pipelines Commands](#81-how-ugs-actually-pipelines-commands)
+   - [8.8 Arc-to-Arc Streaming Stall — Inline Retry](#88-arc-to-arc-streaming-stall--inline-retry)
+   - [8.9 Real-Time Bytes During Retry — service_realtime_byte()](#89-real-time-bytes-during-retry--service_realtime_byte)
+   - [8.10 The Push-Back Slot and Drain Gate](#810-the-push-back-slot-and-drain-gate)
 9. [Chapter 9: The Application State Machine — The Conductor](#chapter-9-the-application-state-machine)
 10. [Chapter 10: Safety, Alarms, and Homing](#chapter-10-safety-alarms-homing)
 11. [Chapter 11: Settings — The Machine's Personality](#chapter-11-settings)
@@ -1004,11 +1008,80 @@ ADD_COORDINATE_AXIS(&target, current_axis, step_distance);
 
 ## Chapter 8: The Flow Control System — Keeping the Conversation Polite
 
-### 8.1 The Problem of Pipelining
+### 8.1 How UGS Actually Pipelines Commands
 
-A G-code sender like UGS does not wait for each "ok" before sending the next command. Instead, it maintains a **credit window** — it sends commands in advance until the window is fill, then pauses to wait for "ok" responses. When "ok" arrives, one credit is freed and another command can be sent.
+Understanding the flow control system requires knowing exactly how Universal G-Code Sender (UGS) decides how many commands to send before waiting for "ok" responses. This section is based on reading the UGS source code directly — specifically `GrblUtils.java`, `GrblCommunicator.java`, and `BufferedCommunicator.java`.
 
-This means at any given moment, many commands may already be in the firmware's G-code queue. If the firmware sends "ok" too eagerly (before the queue has room), UGS overfills the queue and commands are dropped. If the firmware withholds "ok" too aggressively, UGS's credit window drains and the machine starves of commands — it will idle mid-program.
+#### The Character-Count Window (128 bytes — hardcoded)
+
+UGS uses a **character-count** window, not a command-count window. The key constant is in `GrblUtils.java`:
+
+```java
+// GrblUtils.java
+public static final int GRBL_RX_BUFFER_SIZE = 128;   // hardcoded
+```
+
+`GrblCommunicator.getBufferSize()` returns this constant. `BufferedCommunicator.streamCommands()` uses it as the gate:
+
+```java
+// BufferedCommunicator.java — streamCommands():
+while (getNextCommand() != null
+        && !isPaused()
+        && CommUtils.checkRoomInBuffer(
+               this.sentBufferSize,
+               this.getNextCommand().getCommandString(),
+               this.getBufferSize())       // ← 128, always
+        && allowMoreCommands()) {
+
+    GcodeCommand command = getNextCommand();
+    String commandString = command.getCommandString();
+    this.activeCommandList.add(command);
+    this.sentBufferSize += (commandString.length() + 1);  // +1 for '\n'
+    connection.sendStringToComm(commandString + "\n");
+    nextCommand = null;
+}
+```
+
+`checkRoomInBuffer` simply checks `sentBufferSize + nextCommand.length() + 1 <= 128`. When UGS has accumulated 128 unacknowledged bytes in-flight, it stops sending.
+
+When an "ok" arrives, `handleResponseForActiveCommand()` pops the completed command from `activeCommandList` and subtracts its length from `sentBufferSize`, freeing room for more:
+
+```java
+GcodeCommand command = activeCommandList.pop();
+sentBufferSize -= (command.getCommandString().length() + 1);
+if (!isPaused()) { streamCommands(); }   // immediately try to send more
+```
+
+#### The `[OPT:...]` Field Is Ignored for Pipelining
+
+When the firmware sends `$I` build information, it includes:
+```
+[OPT:VHM,35,1024,4]
+```
+The third field (1024) is the RX buffer size. **UGS ignores this field for streaming decisions.** The 128-byte constant in `GrblUtils.java` is not derived from the firmware's report — it is a hardcoded value that matches real GRBL's hardware buffer. Our firmware's 1024-byte UART3 ring therefore has **8× the headroom** UGS assumes.
+
+#### Real-Time Bytes Bypass the Window Entirely
+
+Real-time characters (`?`, `!`, `~`, `0x18`) are sent via `comm.sendByteImmediately(b)` in UGS — a separate code path that goes directly to the serial connection without touching `sentBufferSize`. They are never counted against the 128-byte window and arrive in the firmware's UART3 ring interleaved with G-code bytes at any time.
+
+This is significant: while the firmware is blocking on a full trajectory queue (withholding an arc's "ok"), UGS continues to send `?` status poll bytes every 200 ms via `sendByteImmediately`. These bytes accumulate in the UART3 ring behind the pending G-code bytes.
+
+#### Maximum Pipelined Commands During a Retry
+
+With the 128-byte window and typical arc commands (`G2 X60.000 Y30.000 I30.000 J0.000\n` ≈ 36 bytes):
+
+```
+arc1 sent → sentBufferSize = 36   (ok withheld, window still open)
+arc2 sent → sentBufferSize = 72   (still < 128)
+arc3 sent → sentBufferSize = 108  (still < 128)
+arc4 would → 108 + 36 = 144 > 128 → UGS STOPS
+```
+
+So at most **3 pipelined commands (~108 bytes)** sit in the UART3 ring during a retry window. Our 1024-byte ring holds them comfortably.
+
+#### The Problem Pipelining Creates
+
+Despite the comfortable buffer margin, pipelining creates a subtle challenge for the firmware: when the firmware must block on an arc command (trajectory queue full — see Section 8.8), those 3 pending commands are already sitting in the UART3 ring. Every retry iteration of `GCODE_Tasks()` that naively reads from the ring will consume and potentially discard these bytes — destroying the command stream that UGS has already sent. The solution to this is described in Sections 8.9 and 8.10.
 
 ### 8.2 The Two-Queue Architecture
 
@@ -1141,6 +1214,167 @@ A `G4 P1.0` command (dwell for 1 second) requires special handling. The dwell is
 5. After the dwell completes, resume normal ok flow
 
 If OKs were released during the dwell, UGS might send the next batch of commands before the dwell finishes, potentially executing cutting moves before the paused operation is complete.
+
+### 8.8 Arc-to-Arc Streaming Stall — Inline Retry
+
+#### The Problem
+
+Arc moves (G2/G3) are the most demanding commands in the pipeline. A single arc with default `$12=0.500 mm` tolerance can generate 10–40 trajectory segments. The trajectory queue holds 64 segments. A long arc that generates more segments than there is free space will cause the motion bridge to block — `dispatch_command_line()` returns false because `TRAJECTORY_QueueCount() >= TRAJ_QUEUE_SIZE - 2`.
+
+In the original implementation, when dispatch returned false, the parser would:
+1. Abandon the current command buffer contents
+2. Return to `GCODE_STATE_IDLE`
+3. Start reading bytes from the UART3 ring again
+
+This fragmented `rxBuffer` — the arc command string was half-parsed and then discarded. On the next cycle through IDLE, the firmware would try to read more bytes from the ring, but the beginning of the G-code line was already gone. The command would never complete. UGS would wait indefinitely for an "ok" that never came. **Motion stalled.**
+
+#### The Fix — Stay In Place
+
+The fix is **inline retry**: when `dispatch_command_line()` returns false, the parser stays in `GCODE_STATE_GCODE_COMMAND` with `rxBuffer` unchanged. On the next `GCODE_Tasks()` call it tries dispatch again. This repeats — potentially hundreds of thousands of times per second at 200 MHz — until the trajectory queue drains enough for the arc segments to be accepted.
+
+```c
+// GCODE_STATE_GCODE_COMMAND — simplified dispatch path:
+if (!dispatch_command_line(appData, rxBuffer, cmd_end, &is_probe_cmd)) {
+    // Trajectory queue full — do NOT clear rxBuffer, do NOT send ok.
+    // Fall through to drain/retry handling (see Section 8.9).
+    // ...
+    break;  // stay in GCODE_STATE_GCODE_COMMAND on next call
+}
+// Success: send ok, clear buffer, return to GCODE_STATE_IDLE
+SendOrDeferOk(appData, cmdQueue);
+nBytesRead = 0;
+gcodeData.state = GCODE_STATE_IDLE;
+```
+
+The `break` at the end of the failed-dispatch path keeps the state machine in `GCODE_STATE_GCODE_COMMAND`. `rxBuffer` is never touched. The arc command string remains intact. As soon as the ISR consumes segments from the trajectory queue and `dispatch_command_line()` succeeds, the command is processed normally.
+
+**Why this works with UGS pipelining:** UGS has already sent arc2, arc3 (and possibly arc4) into the UART3 ring. Those bytes sit there safely while arc1 retries. Once arc1 dispatches, its "ok" goes out, UGS gets the credit back, and arc2 bytes are waiting in the ring for immediate pickup by `GCODE_STATE_IDLE`.
+
+### 8.9 Real-Time Bytes During Retry — `service_realtime_byte()`
+
+#### The Problem
+
+While the firmware is stuck retrying an arc command, UGS's status poll timer fires every ~200 ms and sends a `?` byte via `sendByteImmediately()`. This byte lands in the UART3 ring behind the pipelined G-code bytes. Without special handling, it would stay there unserviced for the entire duration of the retry — potentially seconds for a long arc series. UGS times out its status poll and, in some versions, interprets the silence as a disconnection.
+
+#### The Fix — Drain Loop with Real-Time Servicing
+
+On the **first** retry iteration (see Section 8.10 for why it is only the first), a drain loop reads bytes from the UART3 ring and services any real-time characters:
+
+```c
+static void service_realtime_byte(APP_DATA* appData, uint8_t c)
+{
+    switch (c) {
+        case '?':   // status report — send <State|MPos:...|WPos:...|FS:...> immediately
+            {
+                char  buf[120];
+                // ... build GRBL v1.1 status string ...
+                UART_Write((uint8_t*)buf, strlen(buf));
+            }
+            break;
+        case '~':   // resume — clear feed hold
+            if (g_feed_hold_active || g_feed_hold_pending)
+                STEPPER_ResumeMotion();
+            break;
+        case '!':   // feed hold — pause motion
+            if (!g_feed_hold_active && !g_feed_hold_pending)
+                STEPPER_PauseMotion();
+            break;
+        case 0x85:  // jog cancel
+            MOTION_JogCancel();
+            break;
+        default:
+            break;
+    }
+}
+```
+
+This function is called for every byte in the ring that satisfies `is_control_char()` — the same predicate used in `GCODE_STATE_CONTROL_CHAR`. It is also called from a simplified `GCODE_STATE_CONTROL_CHAR` handler, replacing what was previously duplicated switch logic in both places.
+
+### 8.10 The Push-Back Slot and Drain Gate
+
+#### The Problem (Subtle and Critical)
+
+With the drain loop in place, there is still a failure mode specific to UGS **pipelined** mode (non-single-step).
+
+In single-step mode, UGS sends one command, waits for "ok", then sends the next. During the retry window (while arc1's ok is withheld), the UART3 ring contains only `?` poll bytes — no G-code bytes. The drain loop services them all correctly, over and over, on every retry iteration. Everything works.
+
+In pipelined mode, arc2, arc3 (and possibly arc4) are already in the UART3 ring. The drain loop runs on **every retry iteration**. At 200 MHz, `GCODE_Tasks()` is called millions of times per second. On iteration 1, the drain reads `G` (first byte of arc2) — a non-control byte. It must stop. On iteration 2, even if it stops, the ring still contains `2`, ` `, `X`... At this rate the drain loop would consume the entire arc2 command string byte by byte — leaving only fragments that `GCODE_STATE_IDLE` cannot reassemble. Arc2 is destroyed. Motion stops.
+
+This is why **single-step mode worked but pipelined mode failed** before the fix — in single-step mode there were no G-code bytes in the ring to destroy.
+
+#### The Fix — Push-Back Slot and Run-Once Gate
+
+The solution has two parts:
+
+**Part 1 — Push-back slot:**
+
+```c
+static uint8_t  s_rxPushback    = 0;
+static bool     s_rxHasPushback = false;
+```
+
+When the drain loop encounters the first non-control byte (the `G` of arc2), it does not discard it. It stores it in `s_rxPushback` and sets `s_rxHasPushback = true`, then `break`s. The rest of the ring — the 35 remaining bytes of arc2, plus all of arc3, plus partials of arc4 — is left completely untouched.
+
+**Part 2 — Run-once gate:**
+
+```c
+// Retry path in GCODE_STATE_GCODE_COMMAND:
+if (!s_rxHasPushback) {                     // ← gate: ONLY run on first retry
+    uint8_t rt;
+    while (UART3_ReadCountGet() > 0) {
+        if (UART3_Read(&rt, 1) != 1) break;
+        if (rt == 0x18) {                   // soft reset — always immediate
+            GCODE_SoftReset(appData, cmdQueue);
+            return;
+        }
+        if (!is_control_char(rt)) {
+            s_rxPushback    = rt;           // save first G-code byte
+            s_rxHasPushback = true;
+            break;                          // stop — rest of ring untouched
+        }
+        service_realtime_byte(appData, rt); // handle ?, !, ~
+    }
+}
+break;  // stay in GCODE_STATE_GCODE_COMMAND
+```
+
+After `s_rxHasPushback` is true, every subsequent retry iteration skips the drain loop entirely. The UART3 ring is frozen — no bytes are consumed from it. `?` bytes that arrive after the pushback is set also stay in the ring, behind the G-code bytes, and are processed later when IDLE takes over.
+
+**Part 3 — Injection in IDLE:**
+
+When arc1 finally dispatches, the parser returns to `GCODE_STATE_IDLE`. Before reading any bytes from the UART3 ring, IDLE injects the saved byte back into `rxBuffer`:
+
+```c
+case GCODE_STATE_IDLE:
+    // Reassemble the byte that was saved during retry
+    if (s_rxHasPushback && nBytesRead < sizeof(rxBuffer) - 1U) {
+        rxBuffer[nBytesRead++] = s_rxPushback;
+        rxBuffer[nBytesRead]   = '\0';
+        s_rxHasPushback        = false;   // consumed
+    }
+    // Then read remaining bytes from ring as normal
+    nBytesAvailable = UART3_ReadCountGet();
+    // ...
+```
+
+IDLE reads `G` from the pushback slot, then reads `2 X60.000...\n` from the ring, assembles the complete `G2 X60.000...` line, and dispatches arc2 normally.
+
+#### Capacity Analysis
+
+| Item | Value |
+|------|-------|
+| UGS window | 128 bytes (hardcoded in `GrblUtils.GRBL_RX_BUFFER_SIZE`) |
+| Typical arc command length | ~36 bytes |
+| Max commands pipelined | `⌊128/36⌋ = 3` |
+| Max bytes in ring during retry | ~108 bytes |
+| UART3 ring size | 1024 bytes |
+| Headroom | **9.5×** |
+
+The push-back slot requires only **1 byte of storage** regardless of how many commands are pipelined. The rest remain in the 1024-byte ring with ample headroom.
+
+#### Reset Behaviour
+
+`s_rxPushback` and `s_rxHasPushback` are cleared in both `GCODE_SoftReset()` and `GCODE_USART_Initialize()`, so a soft reset (`Ctrl+X`) always leaves the parser in a clean state.
 
 ---
 
@@ -1559,9 +1793,11 @@ Configured limits are far below hardware limits:
 | Parity | None |
 | Stop bits | 1 |
 | TX buffer | 1,024 bytes |
-| RX buffer | 512 bytes |
+| RX buffer | 1,024 bytes |
 
 **Why 1024 bytes TX?** The `$$` settings dump is ~500 bytes. This must fit in one TX buffer fill. A 256-byte buffer (MCC default) causes `$$` to truncate — senders disconnect. Always verify the TX buffer size is 1024 after any MCC regeneration.
+
+**Why 1024 bytes RX?** The firmware advertises `[OPT:VHM,35,1024,4]` in the `$I` response. Although UGS ignores this value for its own pipelining decisions (UGS always uses its hardcoded 128-byte window), keeping the ring at 1024 bytes provides 8× headroom over UGS's maximum in-flight payload. This is critical for the arc-to-arc retry window: while the firmware holds an arc's "ok", up to ~108 bytes of pipelined G-code may sit in the ring. The 1024-byte ring accommodates this with room to spare. **Important**: the PLIB ring buffer uses `in+1 == out` as its full condition, so the usable capacity is 1023 bytes, not 1024. This is still well above the 108-byte worst case.
 
 ---
 
@@ -1610,6 +1846,6 @@ By the time you have followed this thread, you will have read the most critical 
 
 ---
 
-*This book documents the Pic32mzCNC_V3 firmware as of commit `72423f1` on branch `scurve_motion`, March 2026.*
+*This book documents the Pic32mzCNC_V3 firmware as of branch `scurve_motion`, March 2026. Sections 8.1, 8.8, 8.9, and 8.10 reflect verified UGS source behaviour (GrblUtils.java, BufferedCommunicator.java, GrblCommunicator.java) and the arc-to-arc stall / pushback-drain-gate fixes applied during the March 2026 development session.*
 
 *For corrections, additions, or questions, open an issue on the GitHub repository.*

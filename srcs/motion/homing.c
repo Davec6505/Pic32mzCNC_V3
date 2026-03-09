@@ -8,6 +8,8 @@
 #include "motion/motion.h"
 #include "motion/stepper.h"
 #include "motion/motion_utils.h"
+#include "motion/interpolator.h"
+#include "motion/trajectory.h"
 #include "utils/utils.h"
 #include "utils/uart_utils.h"
 #include "settings/settings.h"
@@ -101,7 +103,7 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
         
         case HOMING_STATE_SEEK:
             // APP.C reads limit and edges — here we only alarm if travel exceeded
-            if (!g_homing.motion_active && appData->motionQueueCount == 0) {
+            if (!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u) {
                 DEBUG_PRINT_GCODE("[HOMING] SEEK motion complete without limit - ALARM\r\n");
                 g_homing.state = HOMING_STATE_ALARM;
                 g_homing.alarm_code = 9;
@@ -130,16 +132,42 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
             break;
             
         case HOMING_STATE_PULLOFF:
-            // Pulloff complete when motion queue drains — advance to COMPLETE.
-            // motion_active flag is NOT reliable here (set true by StartPulloff, never cleared
-            // by the ISR path), so check motionQueueCount alone.
-            if (appData->motionQueueCount == 0 && !appData->motionActive) {
-                DEBUG_PRINT_GCODE("[HOMING] PULLOFF complete → COMPLETE\r\n");
+            // Pulloff complete when the s-curve interpolator and trajectory queue are both
+            // empty.  We check INTERPOLATOR_IsActive() and TRAJECTORY_QueueCount() directly
+            // rather than appData->motionQueueCount because motionQueueCount is a snapshot
+            // written once at the top of MOTION_Tasks().  When app.c sets HOMING_STATE_PULLOFF
+            // and calls HOMING_StartPulloff() AFTER MOTION_Tasks() has already run in the
+            // same main-loop iteration, motionQueueCount still reads 0 (the pre-pulloff
+            // value) even though INTERPOLATOR_IsActive() is already true.  Using the live
+            // volatile flags avoids the stale-snapshot false-positive that would cause an
+            // immediate PULLOFF→IDLE transition before the pulloff move runs.
+            if (!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u) {
                 g_homing.motion_active = false;
+                // ALARM:8 — limit switch still active after pull-off completed.
+                // The pull-off distance in $27 was not enough to release the switch.
+                if (HOMING_IsLimitActiveNow()) {
+                    DEBUG_PRINT_GCODE("[HOMING] PULLOFF complete but limit still active — ALARM:8\r\n");
+                    g_homing.state = HOMING_STATE_ALARM;
+                    g_homing.alarm_code = 8;
+                    STEPPER_DisableAll();
+                    // UART_Printf is sent by GCODE_CheckDeferredOk using HOMING_GetAlarmCode()
+                    break;
+                }
+                DEBUG_PRINT_GCODE("[HOMING] PULLOFF complete → COMPLETE\r\n");
                 g_homing.state = HOMING_STATE_COMPLETE;
+                // Fall through to HOMING_STATE_COMPLETE immediately.
+                // Without this, g_homing.state stays COMPLETE for one full main-loop
+                // iteration: HOMING_IsActive() returns false (COMPLETE is treated as
+                // inactive), so GCODE_CheckDeferredOk releases the $H ok and clears
+                // s_homing_pending — but HOMING_Start() on a second $H still sees
+                // state==COMPLETE (not IDLE) and returns false → error:8.
+                // By falling through we complete the COMPLETE→IDLE transition in the
+                // same call, so state is IDLE before any ok is released.
+            } else {
+                break;
             }
-            break;
-            
+            /* fall through */
+
         case HOMING_STATE_COMPLETE:
             // Homing complete - step counter was already zeroed at the LOCATE trigger
             // (machine position 0 = home switch). After pulloff, step counter reflects
@@ -196,6 +224,10 @@ bool HOMING_IsActive(void) {
 
 HomingState HOMING_GetState(void) {
     return g_homing.state;
+}
+
+uint32_t HOMING_GetAlarmCode(void) {
+    return g_homing.alarm_code;
 }
 
 void HOMING_ClearAlarm(void) {

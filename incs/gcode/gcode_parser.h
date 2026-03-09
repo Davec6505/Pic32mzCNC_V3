@@ -144,7 +144,6 @@ void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue);  // Consume event after s
 
 // Check and send deferred "ok" responses (for flow control and startup deferral)
 void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* cmdQueue);
-void GCODE_MarkProgramEnd(void);  // Signal M2/M30: hold oks until motion drains
 
 
 #endif // GCODE_PARSER_H

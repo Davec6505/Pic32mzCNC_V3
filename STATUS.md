@@ -2,7 +2,324 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 8, 2026
+**Last Updated**: March 9, 2026
+
+---
+
+## ✅ HARDWARE VALIDATED: Pipelined streaming mode — all arc fixes confirmed (March 9, 2026)
+
+**Test**: `07_complex_long_run_fast.gcode` run twice back-to-back:
+- Pass 1 — UGS **single-step mode**: `*** Finished sending file in 00:02:00`, final `<Idle|MPos:0.000,0.000,0.000>`
+- Pass 2 — UGS **pipelined streaming mode**: `*** Finished sending file in 00:02:00`, final `<Idle|MPos:0.000,0.000,0.000>`
+
+Both passes exercised:
+- Full 360° circles via 4-quadrant consecutive G3/G2 arcs (arc-to-arc handoff)
+- Mixed CW/CCW arc sequences in streaming
+- Linear hatch fills and nested rectangle patterns at up to 8000 mm/min
+- G4 dwell integration between motion blocks
+- Motion returning exactly to origin after every section
+
+**All three arc fixes validated in pipelined mode**:
+1. Inline trajectory dispatch (no false `ok` before trajectory accepts arc)
+2. `service_realtime_byte()` — `?` answered during arc retry, UGS never times out
+3. Push-back slot + drain gate — ring bytes preserved across retries, no lost G-code bytes
+
+**Firmware**: `bins/CNC_V3.hex` (current build, `scurve_motion` branch)
+
+---
+
+## ✅ FIX: Ring-drain consumed G-code bytes during arc-to-arc retry (March 9, 2026)
+
+**Root cause**: The drain loop in `GCODE_STATE_GCODE_COMMAND` (retry path) called
+`service_realtime_byte()` on every ring byte. `service_realtime_byte` silently ignores
+non-real-time bytes, so G-code command bytes (e.g. `G1 X0 Y0`) that UGS had already sent
+within its 127-byte character-count window were consumed and lost. Files stopped mid-run
+exactly where the missing command was (08: at end of section 5, 07: same).
+
+**Fix — 1-byte push-back slot**:
+- Added `s_rxPushback` / `s_rxHasPushback` static vars in `gcode_parser.c` (~line 97)
+- Drain loop (retry path): when byte is NOT `is_control_char()`, store it in
+  `s_rxPushback`, set `s_rxHasPushback = true`, and `break` — the first byte of a
+  G-code command is preserved, and the rest remains intact in the ring
+- `GCODE_STATE_IDLE` read: before reading from UART ring, if `s_rxHasPushback` is set,
+  inject the pushed-back byte at `rxBuffer[nBytesRead]` first, then read ring normally
+- Push-back cleared on soft-reset (`GCODE_SoftReset`) and USART init
+
+**Behaviour**: `?` chars (1 byte, from UGS polling thread) are the only bytes that arrive in
+the ring during arc retry under proper 127-byte character-count flow control. Any G-code byte
+that does arrive is now safely preserved for the next IDLE iteration.
+
+**Files changed**:
+- `srcs/gcode/gcode_parser.c`:
+  - Added `s_rxPushback` / `s_rxHasPushback` static vars
+  - Drain loop: push-back on non-control byte instead of silently ignoring
+  - `GCODE_STATE_IDLE`: inject push-back before ring read
+  - `GCODE_SoftReset` / `GCODE_USART_Initialize`: clear push-back slot
+
+---
+
+## ✅ FIX: `?` status unresponsive + motion abort during arc-to-arc blocking (March 9, 2026)
+
+**Root cause**: `GCODE_STATE_GCODE_COMMAND` held `rxBuffer` during retry (arc blocked) and
+never read new ring bytes.  UGS background-polling `?` chars accumulated unprocessed.
+After several seconds with no status reply, UGS timed out and aborted the stream mid-file.
+
+**Fix — `service_realtime_byte()` + ring drain in retry path**:
+- `srcs/gcode/gcode_parser.c` — added `service_realtime_byte(APP_DATA* appData, uint8_t c)`
+  before the inline-dispatch helpers block (~line 912). Contains the complete `?` status
+  reply, `!` feed hold, `~` resume, and `0x85` jog-cancel logic.
+- `GCODE_STATE_CONTROL_CHAR` simplified: the `switch` body replaced by two lines —
+  `0x18` calls `GCODE_SoftReset` directly; all other chars call `service_realtime_byte`.
+- `GCODE_STATE_GCODE_COMMAND` retry break-path extended: after `dispatch_command_line`
+  returns false, a `while (UART3_ReadCountGet() > 0)` loop drains the ring and calls
+  `service_realtime_byte` for each byte. `0x18` in the loop triggers `GCODE_SoftReset`
+  and `return` (rxBuffer already cleared). Arc stress test (`08_arc_cw_ccw_stress.gcode`)
+  and longer multi-arc files now stream without UGS connection loss.
+
+**Files changed**:
+- `srcs/gcode/gcode_parser.c`:
+  - Added `service_realtime_byte()` helper (before `dispatch_one_token`)
+  - Simplified `GCODE_STATE_CONTROL_CHAR` inner switch to two lines
+  - Added ring-drain loop to `GCODE_STATE_GCODE_COMMAND` retry path
+
+---
+
+## ✅ FIX: Arc-to-arc stall — inline trajectory dispatch (March 2026)
+
+**Root cause (final, hardware-confirmed)**:
+`GCODE_STATE_GCODE_COMMAND` sent `ok` when a command entered the 64-slot gcode command
+queue, NOT when it was accepted by the trajectory.  Arc2 sat blocked at the queue HEAD
+(`MOTION_ProcessGcodeEvent` returned false while arc1 was generating).  Commands 2–64
+piled up in the queue behind arc2 with ok already spent.  When the queue filled, no more
+oks could be sent → UGS froze.
+
+**Fix — inline trajectory dispatch (bypass 64-slot gcode queue for normal commands)**:
+- Added three static helpers in `gcode_parser.c` before `GCODE_Tasks`:
+  - `dispatch_one_token`: parses a single G-code token → calls `MOTION_ProcessGcodeEvent` directly
+  - `split_and_dispatch_multi_modal_inline`: handles combined tokens like `G90G1X10`
+  - `dispatch_command_line`: tokenizes + dispatches an entire line; returns false if any
+    event is rejected by the motion bridge
+- `GCODE_STATE_GCODE_COMMAND` now calls `dispatch_command_line` instead of
+  `Extract_CommandLineFrom_Buffer`.  If rejected → holds `rxBuffer`, retries next
+  iteration. If accepted → `SendOrDeferOk` → clear rxBuffer.
+- Removed `should_process = false` arc guard from `app.c` event dispatch loop
+  (now redundant; `MOTION_ProcessGcodeEvent` itself has the arc guard).
+- The 64-slot `GCODE_CommandQueue` is preserved for `$N` startup lines and the
+  unusual `GCODE_STATE_IDLE` has_content path, but is no longer the flow-control
+  bottleneck for normal G-code streaming.
+
+**Backpressure path (new)**:
+  arc2 arrives → dispatch_command_line returns false → rxBuffer held → no `ok` →
+  UGS stalls at its character-count limit (≤127 bytes in-flight) → ring barely fills →
+  arc1 finishes → retry succeeds → `ok` → UGS sends arc3
+
+**Files changed**:
+- `srcs/gcode/gcode_parser.c`: Added `dispatch_one_token`, `split_and_dispatch_multi_modal_inline`,
+  `dispatch_command_line`; rewrote `GCODE_STATE_GCODE_COMMAND` case
+- `srcs/app.c`: Removed `should_process` guard and dead `bool should_process = true` variable
+
+**Previous (failed) approach** — ring-buffer backpressure gate:
+
+- `srcs/gcode/gcode_parser.c`: `SendOrDeferOk` ring-buffer gate; `GCODE_CheckDeferredOk`
+  simplified drain (one per call, ring-gated); removed program-end sentinel; drain call
+  added at top of `GCODE_Tasks`
+- `srcs/app.c`: Removed `GCODE_MarkProgramEnd()` from `PROGRAM_END` event handler
+
+**Commit**: `52020fd` | Branch: `scurve_motion`
+
+---
+
+## ❌ WIP: Arc-to-arc flow control stall — ok-at-receive-time (March 9, 2026) — FAILED
+
+**What was tried**: Gate ok on gcode queue slot (64 slots), send ok the moment a command
+enters the queue. Natural backpressure if queue is full.
+
+**Why it failed**: plib UART RX ring (1024 bytes) fills first. UGS stops when ring is full,
+not when gcode queue is full. No new bytes → no new commands → no ok-at-receive → deadlock
+at ring level.
+
+**Commit**: `560e7a8` (WIP checkpoint)
+
+---
+
+## ❌ WIP: Arc-to-arc flow control stall — pending arc ring buffer (March 9, 2026) — FAILED
+
+## ❌ SUPERSEDED (pending arc queue)
+
+**Root cause**: While arc1 was generating its trajectory segments, arc2 sat **blocked at
+the head of the gcode command queue** (`should_process = false`).  Because arc2 was never
+consumed, `q->count` never dropped below `HIGH_WATER (48)`.  `GCODE_CheckDeferredOk`
+releases oks only when `q->count < HIGH_WATER`, so no oks were released during the entire
+arc1 duration.  UGS ran out of oks to act on (e.g., stalled at 122/228) and stopped
+streaming new commands.  Machine idled after arc1 completed with an empty gcode queue.
+
+**Observable symptom**: `07_complex_long_run_fast.gcode` froze at 122/228 send count every
+run at the same arc-to-arc boundary.  `08_arc_cw_ccw_stress.gcode` repeated the same arc
+direction (G2→G2 instead of G2→G3) when the G3 command was stalled behind the blocked arc.
+
+**Fix — pending arc ring buffer (`PENDING_ARC_MAX = 8`)**:
+When arc2 arrives in the gcode queue while arc1 is running, it is **immediately pre-consumed**
+from the gcode queue (freeing the slot, triggering ok release to UGS) and stored in a small
+ring buffer in `APP_DATA`.  When arc1 finishes (`arcGenState → ARC_GEN_IDLE`), the pending
+arc drain in `app.c` reconstructs a `GCODE_Event` from the stored parameters, calls
+`MOTION_ProcessGcodeEvent`, and generates arc2's first segment — all in the same iteration.
+Up to 8 arcs can be pre-buffered (more than any practical back-to-back gcode sequence).
+
+**Files changed**:
+- `incs/data_structures.h` — Added `PendingArcParams` struct, `PENDING_ARC_MAX`, and
+  `pendingArcQueue/Head/Tail/Count` fields to `APP_DATA`
+- `srcs/app.c` — Initialize pending queue; add pending-arc drain block after `MOTION_Arc`;
+  replace the `should_process = false` arc-block with pre-consume logic
+- `srcs/gcode/gcode_parser.c` — `GCODE_CheckDeferredOk` program-end guard now waits for
+  `pendingArcCount == 0`; `GCODE_SoftReset` clears the pending queue
+
+
+
+**Root cause**: In `GCODE_STATE_GCODE_COMMAND`, when the 64-slot G-code queue was full,
+`Extract_CommandLineFrom_Buffer` silently dropped the incoming token (hit the `break` guard),
+but the caller still called `SendOrDeferOk` and cleared `rxBuffer`. UGS received an "ok",
+believed the dropped command (e.g., `G2X50Y0I50J0`) was accepted, and the following `G3`
+sat at the queue head. The arc handler later peeked `G3` and ran it as if it were the `G2`,
+producing the wrong geometry (full circle in the -X direction) for every arc after the first.
+
+**Observable symptom**: In `09_arc_radius_sweep.gcode`, arcs 2–N all shot off in the -X
+direction and completed a full circle. Only arc 1 (empty queue at start) and the final arc
+were correct.
+
+**Fix** (`srcs/gcode/gcode_parser.c`):
+- `GCODE_STATE_GCODE_COMMAND` (line ~1630): compare `cmdQueue->count` before and after
+  `Extract_CommandLineFrom_Buffer`. If unchanged (nothing enqueued, queue was full), `break`
+  without sending ok and without clearing `rxBuffer`. State stays `GCODE_STATE_GCODE_COMMAND`.
+  Next iteration retries with the same rxBuffer. UGS is gated (no ok → no new send) so no
+  command is ever lost. Once the queue drains one slot, the retry succeeds and ok is sent.
+- `GCODE_STATE_IDLE` has_content path (line ~1040): same count_before/count_after guard.
+  If full: restore the line terminator byte (`saved_terminator`) before breaking so the IDLE
+  state re-finds the line terminator and retries on the next iteration.
+- `GCODE_STATE_IDLE` null-termination (line ~1005): save `char saved_terminator =
+  rxBuffer[terminator_pos]` before writing `'\0'`, so the IDLE retry can restore it.
+
+**Files changed**:
+- `srcs/gcode/gcode_parser.c:1005` — save `saved_terminator` before null-terminating
+- `srcs/gcode/gcode_parser.c:1040` — IDLE has_content queue-full retry with terminator restore
+- `srcs/gcode/gcode_parser.c:1630` — GCODE_STATE_GCODE_COMMAND queue-full retry guard
+
+---
+
+## 📋 REFERENCE: GRBL v1.1 ALARM Codes (March 8, 2026)
+
+ALARM codes are printed as `ALARM:X\r\n`. UGS and other senders display these
+and may refuse further commands until `$X` clears the alarm.
+
+### Codes sent by THIS firmware (search `ALARM:` in srcs/)
+
+| Code | File | Meaning |
+|------|------|---------|
+| 1    | `srcs/app.c` | Hard limit triggered during non-homing motion ($21 must be enabled) |
+| 2    | `srcs/motion/motion_bridge.c` | Soft limit exceeded — target outside max_travel ($20 must be enabled) |
+| 3    | `srcs/gcode/gcode_parser.c` | Ctrl+X (soft reset) received during active motion |
+| 5    | `srcs/app.c` | Probe fail — G38.2/G38.4 did not contact within travel |
+| 6    | `srcs/gcode/gcode_parser.c` | Ctrl+X (soft reset) received during active homing cycle |
+| 8    | `srcs/motion/homing.c` | Homing pull-off failed — limit switch still closed after $27 mm travel |
+| 9    | `srcs/gcode/gcode_parser.c` | Homing fail — limit switch not found within search distance |
+| 10   | `srcs/app.c` | E-Stop asserted |
+
+### Full GRBL v1.1 ALARM code list (for future implementation)
+
+| Code | GRBL meaning |
+|------|-------------|
+| 1    | Hard limit triggered — position lost, re-home recommended |
+| 2    | G-code motion target exceeds machine travel |
+| 3    | Reset while in motion — position lost |
+| 4    | Probe fail — probe not in expected initial state before cycle |
+| 5    | Probe fail — no contact within travel (G38.2/G38.4) |
+| 6    | Homing fail — reset during active homing cycle |
+| 7    | Homing fail — safety door opened during homing |
+| **8**| **Homing fail — failed to clear limit switch during pull-off** |
+| 9    | Homing fail — limit switch not found within search distance (1.5×max_travel seek, 5×pulloff locate) |
+| 10   | Homing fail — second limit switch not found (dual-axis self-squaring only) |
+
+### ALARM:8 — now correctly implemented (March 8, 2026)
+
+ALARM:8 = "limit switch still closed after pull-off move drained". This is the definitive
+test that $27 (pull-off distance) was sufficient to physically release the switch.
+
+**Implementation** (`srcs/motion/homing.c` HOMING_STATE_PULLOFF):
+- After `!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u` → sample `HOMING_IsLimitActiveNow()`
+- If still active → `ALARM:8\r\n`, state = `HOMING_STATE_ALARM`, `STEPPER_DisableAll()`
+- If clear → fall through to `HOMING_STATE_COMPLETE` as before
+- Recovery: increase `$27` (pull-off distance) or check wiring, then Ctrl+X + `$H`
+
+**Previous (wrong) note**: This was previously attributed to a UGS polling artefact.
+That was incorrect — the firmware simply never sent ALARM:8 at all. Now it does.
+
+---
+
+## ✅ FIX: Homing axes mask, ok timing, ALARM codes (current session)
+
+### Fix 1 — $H axes mask read from $22 setting instead of hardcoded 0x0F
+- **File**: `srcs/gcode/gcode_parser.c` (function `parse_command_to_event`)
+- **Old**: `ev->data.homing.axes_mask = 0x0F;`  — included A-axis which has no limit switch
+- **New**: `ev->data.homing.axes_mask = SETTINGS_GetCurrent()->homing_enable;`
+- **Effect**: Default 0x07 (XYZ) homes only the axes with limit switches. Change $22 bitmask to enable A.
+- **⚠️ Lesson learned**: The symptom (stale-state error:8 on second $H, ALARM:9 after XYZ
+  succeeded) was traced as a state-machine / timing bug for several sessions. The REAL cause
+  was simply that A-axis was included in the mask but has no limit switch. The seek ran its
+  full travel, found nothing, alarmed, and corrupted state for the next $H.
+  **Always read `settings->homing_enable` for the axes mask — never hardcode a bitmask.**
+
+### Fix 2 — Homing SEEK alarm used stale `motionQueueCount` snapshot
+- **File**: `srcs/motion/homing.c` (HOMING_STATE_SEEK case)
+- **Old**: `if (!g_homing.motion_active && appData->motionQueueCount == 0)`
+- **New**: `if (!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u)`
+- **Effect**: Same live-read pattern already used by PULLOFF case; eliminates false alarm on first SEEK.
+
+### Fix 3 — $H ok sent immediately (before HOMING_Start was called)
+- **File**: `srcs/gcode/gcode_parser.c` (statics + `GCODE_CheckDeferredOk`)
+- **Added**: `static bool s_homing_started = false;`
+- **Old**: On first eval of `s_homing_pending`: `HOMING_IsActive()` was `false` → ok released.
+- **New**: `if (!s_homing_started) return;` guards until `HOMING_IsActive()` has returned `true`
+  at least once (set `s_homing_started = true`). Cleared in both completion and `GCODE_SoftReset`.
+
+### Fix 4 — ALARM codes added (GRBL v1.1 compliant)
+- **ALARM:1** (`srcs/app.c` APP_IDLE): Hard limit triggered during non-homing motion.
+  Fires when `hard_limits_enable ($21)=1` and a limit switch closes outside homing.
+  Machine enters APP_ALARM; $X clears when switch is released.
+- **ALARM:2** (`srcs/motion/motion_bridge.c` GCODE_EVENT_LINEAR_MOVE): Soft limit exceeded.
+  Fires when `soft_limits_enable ($20)=1` and target machine position < 0 or > max_travel.
+  Machine enters APP_ALARM; $X clears.
+- **ALARM:3** (`srcs/gcode/gcode_parser.c` GCODE_SoftReset): Reset while in motion.
+  Fires when Ctrl+X received while INTERPOLATOR is active. Machine goes to APP_ALARM; $X clears.
+- **ALARM:6** (`srcs/gcode/gcode_parser.c` GCODE_SoftReset): Reset during homing.
+  Fires when Ctrl+X received while `HOMING_IsActive()`. Machine goes to APP_ALARM; $X clears.
+- **$X handler** (`srcs/gcode/gcode_parser.c`): Also clears ALARM:3/6 alarms (non-hard-limit)
+  by setting `appData->state = APP_IDLE` when `appData->alarmCode != 1`.
+
+---
+
+## ✅ BUG FIX: $H repeat — error:8 on second homing without reset (March 8, 2026)
+
+**Problem**: `$H` worked once but a second `$H` returned `error:8` requiring a hard reset.
+Machine status showed `<Run>` instead of `<Idle>` after homing completed.
+
+**Root Cause — Part 1 (homing.c PULLOFF check stale snapshot)**:
+`HOMING_STATE_PULLOFF` completion used `appData->motionQueueCount` which is written
+once per main-loop iteration at the top of `MOTION_Tasks()`.  When `app.c` calls
+`HOMING_StartPulloff()` **after** `MOTION_Tasks()` has already run in the same iteration,
+`motionQueueCount` still reads 0 (pre-pulloff value) even though `INTERPOLATOR_IsActive()`
+is already `true`.  The very next `HOMING_Tasks()` call saw `0 == 0` and fell through
+`PULLOFF→IDLE` immediately — before the pulloff physically executed.
+
+**Root Cause — Part 2 (CheckDeferredOk COMPLETE-state race)**:
+`GCODE_CheckDeferredOk()` ran (via the `motionSegmentCompleted` path) **before**
+`HOMING_Tasks()`.  If `HOMING_STATE_COMPLETE` was still live (the fall-through transition
+hadn't completed for that call), `HOMING_IsActive()` returned `false` and the deferred ok
+was released prematurely.  A rapid second `$H` arrived with state still `COMPLETE` →
+`HOMING_Start()` returned `false` → `error:8`.
+
+**Fix**:
+- `srcs/motion/homing.c` — `HOMING_STATE_PULLOFF` case: replaced `appData->motionQueueCount == 0 && !appData->motionActive` with `!INTERPOLATOR_IsActive() && TRAJECTORY_QueueCount() == 0u` (live volatile reads, never stale). Added `#include "motion/interpolator.h"` and `"motion/trajectory.h"`.
+- `srcs/gcode/gcode_parser.c` — `GCODE_CheckDeferredOk()`: added `HOMING_STATE_COMPLETE` guard and `INTERPOLATOR_IsActive()` guard inside the `s_homing_pending` block so the ok is never released mid-transition. Added `#include "motion/interpolator.h"`.
+- Commit: `800f459`
 
 ---
 
@@ -26,6 +343,23 @@ Also kept the free-space fallback in `GCODE_CheckDeferredOk()` as belt-and-brace
 - `srcs/gcode/gcode_parser.c` — `GCODE_CheckDeferredOk()`: added free-space fallback (`if freed==0 && q->count < HIGH_WATER`)
 
 ---
+
+## ✅ FEATURE: GRBL-compliant $H ok timing — deferred until homing completes (March 8, 2026)
+
+**Problem**: `$H` (homing) sent its `ok` response immediately when the command arrived — before the homing cycle ran. GRBL v1.1 spec requires the ok only after homing succeeds, or `ALARM:9` on failure. Pre-existing bug, unaffected by but discovered during the arc streaming audit.
+
+**Fix**:
+- `$H` QUERY_CHARS handler: `send_ok = false` + `s_homing_pending = true` + `okPendingCount++` (defer the ok into the standard pending pool)
+- `GCODE_CheckDeferredOk()`: new homing gate inserted after the dwell gate. While `HOMING_IsActive()` all ok releases are suppressed. When homing finishes:
+  - **Success** (`HOMING_STATE_IDLE`): clear sentinel, fall through to release exactly 1 ok
+  - **Failure** (`HOMING_STATE_ALARM`): discard the ok slot, print `ALARM:9\r\n`, return — no ok sent
+
+**Note on `HOMING_IsActive()`**: returns false for IDLE, ALARM, and COMPLETE. COMPLETE is a purely transient state resolved within the same `HOMING_Tasks()` call frame; it is never visible to `GCODE_CheckDeferredOk` after `HOMING_Tasks()` returns.
+
+**Files changed**:
+- `srcs/gcode/gcode_parser.c` — Added `static bool s_homing_pending = false;`
+- `srcs/gcode/gcode_parser.c:~1253` — `$H` handler: suppress immediate ok, arm sentinel
+- `srcs/gcode/gcode_parser.c:~GCODE_CheckDeferredOk` — Added homing gate block
 
 ---
 

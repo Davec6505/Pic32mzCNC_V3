@@ -612,7 +612,9 @@ bool SETTINGS_GetWorkCoordinateSystem(uint8_t wcs_number, float* x, float* y, fl
     return false;
 }
 
-/* Set work coordinate system offset and save to flash */
+/* Set work coordinate system offset in RAM only.
+ * Use $SAVE to persist to flash. G10 L2/L20 intentionally does NOT write flash —
+ * only explicit operator commands ($SAVE or $n=value) should persist settings. */
 bool SETTINGS_SetWorkCoordinateSystem(uint8_t wcs_number, float x, float y, float z) {
     if (wcs_number > 5) return false;  // G54-G59 only
     
@@ -631,7 +633,7 @@ bool SETTINGS_SetWorkCoordinateSystem(uint8_t wcs_number, float x, float y, floa
         wcs[0] = x;  // X
         wcs[1] = y;  // Y
         wcs[2] = z;  // Z
-        return SETTINGS_SaveToFlash(&current_settings);  // Save to flash immediately
+        return true;  // RAM updated; caller must send $SAVE to persist to flash
     }
     return false;
 }

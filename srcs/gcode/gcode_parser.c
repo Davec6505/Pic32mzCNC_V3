@@ -24,6 +24,7 @@
 #include "motion_utils.h" // For MOTION_UTILS_EnableAllAxes()
 #include "kinematics.h"
 #include "motion/homing.h"
+#include "motion/interpolator.h"
 #include "utils.h"
 #include "settings.h"
 #include "data_structures.h"
@@ -78,8 +79,9 @@ GCODE_Data gcodeData = {
 };
 
 static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
-static uint32_t s_prev_consumed = 0;   // ← ADD: tracks commands_consumed delta
-static bool     s_program_end_pending = false;  // ← ADD: M2/M30 drain sentinel
+// s_prev_consumed removed: deferred ok release is now ring-buffer-space-based
+static bool     s_homing_pending = false;   // $H ok held until homing cycle completes
+static bool     s_homing_started = false;   // true once HOMING_IsActive() first returns true after $H
 
 // Startup pre-fill gate.
 // On power-on or soft-reset the trajectory queue is empty.  We send "ok"
@@ -94,6 +96,13 @@ static bool     s_program_end_pending = false;  // ← ADD: M2/M30 drain sentine
 
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
+
+/* 1-byte push-back slot used by the GCODE_STATE_GCODE_COMMAND retry drain.    */
+/* When the drain reads a non-real-time byte (first byte of a G-code command)  */
+/* it puts it here rather than losing it.  GCODE_STATE_IDLE injects it back    */
+/* at the front of rxBuffer before reading more bytes from the UART ring.      */
+static uint8_t  s_rxPushback     = 0;
+static bool     s_rxHasPushback  = false;
 // g_feed_hold_active is in stepper.h (defined in stepper.c) — global, gated in app.c APP_IDLE
 static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
 static bool unitsInches  = false;           /* false=mm (G21), true=inches (G20) */
@@ -143,7 +152,15 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     }
 
     DEBUG_PRINT_GCODE("[SOFT RESET] Software reset - clearing buffers and state\r\n");
-    
+
+    /* 0. Detect alarm condition BEFORE stopping (state changes immediately after) */
+    uint8_t soft_reset_alarm = 0;
+    if (HOMING_IsActive()) {
+        soft_reset_alarm = 6;   // ALARM:6 — homing fail, reset during homing
+    } else if (INTERPOLATOR_IsActive()) {
+        soft_reset_alarm = 3;   // ALARM:3 — reset while in motion (abort cycle)
+    }
+
     /* 1. Stop all motion immediately */
     STEPPER_StopMotion();  // Disables steppers, stops TMR4, disables OC1
     HOMING_Abort();        // Abort homing if in progress
@@ -192,8 +209,14 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     appData->alarmCode = 0;
     grblAlarm = false;
     
-    /* 7. Reset application state to IDLE */
-    appData->state = APP_IDLE;
+    /* 7. Reset application state — ALARM if homing/motion was aborted, IDLE otherwise */
+    if (soft_reset_alarm != 0) {
+        UART_Printf("ALARM:%u\r\n", (unsigned)soft_reset_alarm);
+        appData->state = APP_ALARM;
+        appData->alarmCode = soft_reset_alarm;
+    } else {
+        appData->state = APP_IDLE;
+    }
     
     /* 8. Clear G-code command queue */
     cmdQueue->head = 0;
@@ -203,8 +226,9 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     
     /* 9. Reset G-code parser state */
     okPendingCount = 0;         // Clear all deferred ok responses
-    s_prev_consumed = 0;        // Reset consumed counter to sync with empty queue
-    s_program_end_pending = false;  // Clear program end pending flag
+    s_homing_pending = false;       // Clear homing sentinel
+    s_homing_started = false;       // Clear homing-started flag
+    s_rxHasPushback  = false;       // Clear any pending push-back byte
     grblCheckMode = false;
     g_feed_hold_active  = false;  // Clear hold (defined in stepper.c / stepper.h)
     g_feed_hold_pending = false;  // Cancel any in-flight pending hold
@@ -235,6 +259,7 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
     okPendingCount = 0;       // Clear all deferred ok responses
+    s_rxHasPushback = false;  // Clear any pending push-back byte
     gcodeData.state = GCODE_STATE_IDLE;
     unitsInches = false;
     grblCheckMode = false;
@@ -400,30 +425,36 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             return true;
         }
 
-        // G92 - Set work coordinate offset (same as G10 L20 P0)
+        // G92 - Set work coordinate offset (G10 L20 P0 semantics, active WCS).
+        // Emitted as an event so the WCS offset is computed against the actual
+        // machine position at this point in the motion stream — not at parse time.
+        // The motion_bridge GCODE_EVENT_SET_WORK_OFFSET handler waits for motion
+        // to drain before reading MPos, so a preceding G0 completes before G92
+        // latches the offset.  This fixes the timing bug where G92 was executing
+        // against the pre-move position when the sender pipelines G0 + G92.
         if (gnum == 92) {
-            StepperPosition* pos = STEPPER_GetPosition();
-            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
             const float unit_scale = unitsInches ? 25.4f : 1.0f;
-            
-            // Array-based axis parameter parsing with loop
-            float desired[NUM_AXIS];
-            float mpos[NUM_AXIS];
-            
-            // Parse all axis parameters using loop
+            ev->type = GCODE_EVENT_SET_WORK_OFFSET;
+            ev->data.workOffset.l_value    = 92u;   // sentinel: G92 (distinct from G10 L20 which uses 20u)
+            ev->data.workOffset.wcs_number = 255u;  // active WCS at event time
+            ev->data.workOffset.x = NAN;
+            ev->data.workOffset.y = NAN;
+            ev->data.workOffset.z = NAN;
+            ev->data.workOffset.a = NAN;
             for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                 char* pAxis = find_char((char*)cmd, axis_letters[axis]);
-                desired[axis] = pAxis ? (parse_float_after(pAxis) * unit_scale) : NAN;
-                mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
-            }
-            
-            // Set offset = MachinePos - DesiredWorkPos (only X, Y, Z supported in WCS)
-            for (E_AXIS axis = AXIS_X; axis < AXIS_Z + 1; axis++) {
-                if (!isnan(desired[axis])) {
-                    SET_COORDINATE_AXIS(&wcs->offset, axis, mpos[axis] - desired[axis]);
+                float v = pAxis ? (parse_float_after(pAxis) * unit_scale) : NAN;
+                switch (axis) {
+                    case AXIS_X: ev->data.workOffset.x = v; break;
+                    case AXIS_Y: ev->data.workOffset.y = v; break;
+                    case AXIS_Z: ev->data.workOffset.z = v; break;
+                    case AXIS_A: ev->data.workOffset.a = v; break;
+                    default: break;
                 }
             }
-            
+            DEBUG_PRINT_GCODE("[PARSE] G92 -> WORK_OFFSET L20 P0 x=%.3f y=%.3f z=%.3f\r\n",
+                (double)ev->data.workOffset.x, (double)ev->data.workOffset.y,
+                (double)ev->data.workOffset.z);
             return true;
         }
 
@@ -713,7 +744,7 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         if (cmd[1] == 'H' && (cmd[2] == '\0' || cmd[2] == '\n' || cmd[2] == '\r')) {
             // $H - Home all axes command
             ev->type = GCODE_EVENT_HOMING;
-            ev->data.homing.axes_mask = 0x0F; // Home all axes (XYZA = bits 0-3)
+            ev->data.homing.axes_mask = SETTINGS_GetCurrent()->homing_enable; // axes bitmask from $22 (0x07=XYZ, 0x0F=XYZA)
             return true;
         }
     }
@@ -803,100 +834,269 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
         return;
     }
 
-    // Program-end sentinel (M2/M30): hold ALL remaining oks until motion fully
-    // drains — trajectory empty AND arc generation complete.
-    // Only then flush every pending ok in one burst (the M2/M30 ok is the last).
-    if (s_program_end_pending) {
-        if (appData->motionQueueCount != 0 || appData->arcGenState != ARC_GEN_IDLE) {
-            return;  // still moving — wait
+    // Homing sentinel ($H): hold the $H ok until the homing cycle fully completes.
+    // HOMING_IsActive() returns false for IDLE, COMPLETE (transient), and ALARM.
+    // Also hold while state == COMPLETE because the fall-through in HOMING_Tasks()
+    // resolves COMPLETE→IDLE atomically, but CheckDeferredOk can be called from the
+    // motionSegmentCompleted path which runs BEFORE HOMING_Tasks() in app.c.
+    // Also hold while INTERPOLATOR is still running — this guards the case where
+    // CheckDeferredOk is invoked (through the motionSegmentCompleted path) before
+    // HOMING_Tasks() has had a chance to see motionQueueCount == 0 and advance the
+    // homing state machine.
+    if (s_homing_pending) {
+        if (HOMING_IsActive()) { s_homing_started = true; return; }  // mark started, keep holding
+        if (!s_homing_started) return;  // $H queued but HOMING_Start() not yet called — hold
+        if (HOMING_GetState() == HOMING_STATE_COMPLETE) return;  // transitioning — hold
+        if (INTERPOLATOR_IsActive()) return;  // motion still running — hold
+        s_homing_pending = false;
+        s_homing_started = false;
+        if (HOMING_GetState() == HOMING_STATE_ALARM) {
+            // Failure: discard the deferred $H ok slot, send the actual alarm code.
+            if (okPendingCount > 0) okPendingCount--;
+            UART_Printf("ALARM:%u\r\n", (unsigned)HOMING_GetAlarmCode());
+            return;
         }
-        DEBUG_PRINT_GCODE("[DEFERRED] Program end drain — flushing %lu oks\r\n",
-                          (unsigned long)okPendingCount);
-        while (okPendingCount > 0) {
-            if (!UART_SendOK()) break;
+        // Success: fall through to release the one pending ok normally.
+        DEBUG_PRINT_GCODE("[FLOW] Homing complete — releasing $H ok\r\n");
+    }
+
+    if (okPendingCount == 0) return;
+
+    // Drain one deferred ok per call, gated on UART3 RX ring free space.
+    // Sending "ok" invites UGS to transmit the next command — only do so when
+    // the ring can absorb at least one worst-case command line.
+    if (UART3_ReadFreeBufferCountGet() >= UART_RX_CMD_MAX_BYTES) {
+        if (UART_SendOK()) {
             okPendingCount--;
+            DEBUG_PRINT_GCODE("[DEFERRED] ok drained (remaining=%lu)\r\n",
+                              (unsigned long)okPendingCount);
         }
-        s_program_end_pending = false;
-        s_prev_consumed = q->commands_consumed;  // re-sync after reset
-        return;
-    }
-
-    if (okPendingCount == 0) {
-        s_prev_consumed = q->commands_consumed;  // keep in sync on soft-reset
-        return;
-    }
-
-    // Primary: 1-for-1 by consumed delta (works for linear move streaming;
-    // UGS refills each freed slot immediately, keeping queue near HIGH_WATER).
-    uint32_t curr = q->commands_consumed;
-    uint32_t freed = curr - s_prev_consumed;  // wraps safely (uint32 arithmetic)
-    s_prev_consumed = curr;
-
-    // Fallback: free-space release.
-    // During arc generation a single gcode queue slot spawns many trajectory
-    // segments with NO further queue removals (commands_consumed is frozen for
-    // the entire arc duration — can be 100s of ms for a large arc).
-    // Without this path, deferred oks freeze the instant an arc starts:
-    //   freed = 0  →  no oks sent  →  UGS send window hits 0  →  stops sending
-    //   →  gcode queue drains to 0 while arc still running
-    //   →  arc finishes  →  nothing queued  →  machine idles mid-file.
-    // This is most visible on arc→arc transitions (2nd arc always stalls).
-    // Fix: whenever the gcode queue has dropped below HIGH_WATER there IS room
-    // for UGS to send more commands, so release enough oks to let it refill.
-    if (freed == 0 && q->count < (uint32_t)GCODE_QUEUE_HIGH_WATER) {
-        freed = (uint32_t)GCODE_QUEUE_HIGH_WATER - q->count;
-    }
-
-    while (freed > 0 && okPendingCount > 0) {
-        if (!UART_SendOK()) break;
-        okPendingCount--;
-        freed--;
     }
 }
 
 /**
- * @brief Signal that M2/M30 end-of-program was received.
+ * @brief Send "ok" at command-receive time.
  *
- * Prevents the ok for M2/M30 (and any remaining deferred oks) from being
- * released until all trajectory + arc motion has drained to zero.
- * Called from app.c before GCODE_ConsumeEvent() for PROGRAM_END events.
- */
-void GCODE_MarkProgramEnd(void)
-{
-    s_program_end_pending = true;
-    DEBUG_PRINT_GCODE("[FLOW] Program end marked — holding oks until motion drains\r\n");
-}
-
-/**
- * @brief Decide whether to send "ok" immediately or defer it
+ * Ok is issued the moment a command enters the gcode queue (64 slots).
+ * Natural backpressure: if all 64 slots are full, Extract_CommandLineFrom_Buffer
+ * fails → no ok → UGS stops sending.  No HIGH_WATER math needed.
  *
- * Gates purely on gcode command queue depth:
- *   >= HIGH_WATER → defer (stop filling UGS send window)
- *   <  HIGH_WATER → send immediately (keep UGS pushing commands)
- *
- * The trajectory planner queue is managed independently (MOTION_Arc backs
- * off at 62/64) — it does NOT gate UGS flow here.
+ * Special deferred cases (accumulate okPendingCount, drained by
+ * GCODE_CheckDeferredOk when their condition clears):
+ *   - G4 dwell active: must wait for dwell timer to expire
+ *   - Homing ($H): held until HOMING completes (sentinel in CheckDeferredOk)
+ *   - M2/M30: held until motion fully drains (sentinel in CheckDeferredOk)
+ *   - G38.x probe: held until probe triggers or fails (released in app.c)
  */
 static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 {
-    // While a G4 dwell is active, always defer.
+    (void)appData;
+    (void)q;
+
+    // While a G4 dwell is active, defer — drained when dwell timer expires.
     if (MOTION_IsDwellActive()) {
         DEBUG_PRINT_GCODE("[FLOW] Dwell active — deferring ok\r\n");
         okPendingCount++;
         return;
     }
 
-    // Gate purely on gcode queue depth: one ok per one accepted command.
-    if (q->count >= GCODE_QUEUE_HIGH_WATER) {
-        DEBUG_PRINT_GCODE("[FLOW] Deferring ok (gcodeQ=%lu >= HIGH=%d, pending=%lu)\r\n",
-                          (unsigned long)q->count, GCODE_QUEUE_HIGH_WATER,
-                          (unsigned long)(okPendingCount + 1));
-        okPendingCount++;
-    } else {
-        DEBUG_PRINT_GCODE("[FLOW] Sending immediate ok (gcodeQ=%lu < HIGH=%d)\r\n",
-                          (unsigned long)q->count, GCODE_QUEUE_HIGH_WATER);
+    // Ring-buffer backpressure gate.
+    // The UART3 RX ring (1024 bytes) is the real throughput bottleneck:
+    // UGS halts when the ring is full and resumes when it empties enough.
+    // We mirror that gate: send "ok" only when the ring has room for at least
+    // one more worst-case command line (UART_RX_CMD_MAX_BYTES = 64 bytes).
+    // If not, defer — GCODE_CheckDeferredOk drains one ok per call whenever
+    // ring space opens up.
+    if (UART3_ReadFreeBufferCountGet() >= UART_RX_CMD_MAX_BYTES) {
+        DEBUG_PRINT_GCODE("[FLOW] ok sent (ring free=%lu)\r\n",
+                          (unsigned long)UART3_ReadFreeBufferCountGet());
         (void)UART_SendOK();
+    } else {
+        DEBUG_PRINT_GCODE("[FLOW] ok deferred (ring full, free=%lu)\r\n",
+                          (unsigned long)UART3_ReadFreeBufferCountGet());
+        okPendingCount++;
     }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Real-time byte handler (? ! ~ 0x18 0x85)                                  */
+/*                                                                             */
+/* Called from GCODE_STATE_CONTROL_CHAR and from the GCODE_STATE_GCODE_COMMAND */
+/* retry path so that status queries are answered even while the parser is    */
+/* blocked waiting for the trajectory to accept an arc command.               */
+/* -------------------------------------------------------------------------- */
+static void service_realtime_byte(APP_DATA* appData, uint8_t c)
+{
+    switch (c) {
+        case '?': {
+            StepperPosition* pos = STEPPER_GetPosition();
+            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
+            float mpos[NUM_AXIS];
+            float wpos[NUM_AXIS];
+            for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+                mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
+                wpos[axis] = mpos[axis] - GET_COORDINATE_AXIS(&wcs->offset, axis);
+            }
+            const char* state = "Idle";
+            if (grblAlarm)                         { state = "Alarm"; }
+            else if (g_feed_hold_pending)           { state = "Hold:1"; }
+            else if (g_feed_hold_active)            { state = "Hold:0"; }
+            else if (MOTION_IsJogging())            { state = "Jog"; }
+            else if (appData->arcGenState == ARC_GEN_ACTIVE) { state = "Run"; }
+            else if ((T4CON & _T4CON_ON_MASK) != 0) { state = "Run"; }
+            else if (appData->motionQueueCount > 0) { state = "Run"; }
+            float feedrate_mm_min = 0.0f;
+            if (state[0] == 'R' || state[0] == 'J') {
+                feedrate_mm_min = STEPPER_GetCurrentFeedrateMmMin();
+                if (feedrate_mm_min < 1.0f)
+                    feedrate_mm_min = (appData->modalFeedrate > 0.0f) ? appData->modalFeedrate : 0.0f;
+            }
+            uint32_t feed_display    = (uint32_t)(feedrate_mm_min + 0.5f);
+            uint32_t spindle_display = appData->modalSpindleRPM;
+            uint32_t response_len = (uint32_t)snprintf((char*)txBuffer, sizeof(txBuffer),
+                "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%lu,%lu%s%s>\r\n",
+                state,
+                mpos[AXIS_X], mpos[AXIS_Y], mpos[AXIS_Z],
+                wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
+                (unsigned long)feed_display, (unsigned long)spindle_display,
+                grblCheckMode ? "|Cm:1" : "", "");
+            UART3_Write(txBuffer, response_len);
+            break;
+        }
+        case '~':
+            if (g_feed_hold_active || g_feed_hold_pending) {
+                STEPPER_ResumeMotion();
+                DEBUG_PRINT_GCODE("[GCODE] Feed hold released — motion resuming\r\n");
+            }
+            break;
+        case '!':
+            if (!g_feed_hold_active && !g_feed_hold_pending) {
+                STEPPER_PauseMotion();
+                DEBUG_PRINT_GCODE("[GCODE] Feed hold active\r\n");
+            }
+            break;
+        case 0x85:
+            MOTION_JogCancel();
+            break;
+        default:
+            /* Override bytes (0x90-0x99), XON/XOFF — silently ignore */
+            break;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Inline command-dispatch helpers (bypass the 64-slot gcode command queue)  */
+/*                                                                             */
+/* Architecture: parse one line → try MOTION_ProcessGcodeEvent for each      */
+/* event immediately.  If any event is rejected (trajectory full / arc        */
+/* active) return false so GCODE_STATE_GCODE_COMMAND keeps rxBuffer and       */
+/* retries next iteration.  No ok is sent until all events are accepted.      */
+/* This ties backpressure directly to the trajectory queue, not a 64-slot    */
+/* intermediate buffer.  Arc-to-arc stall is eliminated because arc2 waits   */
+/* in rxBuffer (not in the gcode queue), so the queue never fills up and     */
+/* UGS's character-count flow control provides natural backpressure.          */
+/* -------------------------------------------------------------------------- */
+
+/* Dispatch a single already-split token to the motion bridge.
+ * Returns true  = event dispatched (or is a harmless no-op).
+ * Returns false = motion bridge cannot accept right now; caller should retry. */
+static bool dispatch_one_token(APP_DATA* appData, const char* token, bool* io_is_probe)
+{
+    GCODE_Event ev;
+    if (!parse_command_to_event(token, &ev)) return true; /* bad syntax — skip silently */
+    if (ev.type == GCODE_EVENT_NONE)          return true; /* no-op (G20/G21 unit set, etc.) */
+
+    /* Program-end events (M0/M2/M30): motion doesn't handle them; always "accepted". */
+    if (ev.type == GCODE_EVENT_PROGRAM_END)   return true;
+
+    /* Tag probe commands so ok is suppressed until probe completes. */
+    if (ev.type == GCODE_EVENT_PROBE_TOWARD || ev.type == GCODE_EVENT_PROBE_AWAY) {
+        if (io_is_probe) *io_is_probe = true;
+    }
+
+    return MOTION_ProcessGcodeEvent(appData, &ev);
+}
+
+/* Like split_and_queue_multi_modal but dispatches directly instead of queuing.
+ * Returns false if any sub-token is rejected by the motion bridge. */
+static bool split_and_dispatch_multi_modal_inline(APP_DATA* appData, char* token, bool* io_is_probe)
+{
+    size_t len = strlen(token);
+    if (len < 3U) {
+        return dispatch_one_token(appData, token, io_is_probe);
+    }
+
+    /* Collect positions of G/M designators within the token */
+    uint8_t pos[8]; uint8_t posCount = 0;
+    for (size_t i = 0; i < len && posCount < 8U; i++) {
+        if (token[i] == 'G' || token[i] == 'M') pos[posCount++] = (uint8_t)i;
+    }
+    if (posCount <= 1U) {
+        return dispatch_one_token(appData, token, io_is_probe);
+    }
+
+    /* Dispatch each modal prefix as a separate sub-token */
+    char sub[GCODE_BUFFER_SIZE];
+    for (uint8_t i = 0; i < posCount - 1U; i++) {
+        size_t sublen = (size_t)(pos[i + 1U] - pos[i]);
+        if (sublen >= GCODE_BUFFER_SIZE) sublen = GCODE_BUFFER_SIZE - 1U;
+        memcpy(sub, &token[pos[i]], sublen);
+        sub[sublen] = '\0';
+        if (!dispatch_one_token(appData, sub, io_is_probe)) return false;
+    }
+    /* Last piece: from last modal designator to end of token */
+    return dispatch_one_token(appData, &token[pos[posCount - 1U]], io_is_probe);
+}
+
+/* Parse and dispatch an entire G-code command line directly to the motion bridge.
+ * Returns true  = all events accepted → caller sends ok and clears rxBuffer.
+ * Returns false = at least one event blocked → caller retries next iteration. */
+static bool dispatch_command_line(APP_DATA* appData,
+                                   const uint8_t* buf, uint32_t length,
+                                   bool* out_is_probe)
+{
+    *out_is_probe = false;
+    char line_buffer[256];
+    uint32_t safe_length = (length < (uint32_t)(sizeof(line_buffer) - 1U))
+                         ? length : (uint32_t)(sizeof(line_buffer) - 1U);
+    memcpy(line_buffer, buf, safe_length);
+    line_buffer[safe_length] = '\0';
+
+    /* Uppercase */
+    for (uint32_t i = 0; i < safe_length; i++) {
+        char c = line_buffer[i];
+        if (c >= 'a' && c <= 'z') line_buffer[i] = (char)(c - 'a' + 'A');
+    }
+    /* Strip non-printable */
+    uint32_t write_pos = 0;
+    for (uint32_t i = 0; i < safe_length; i++) {
+        char c = line_buffer[i];
+        if ((c >= 32 && c <= 126) || c == '\r' || c == '\n' || c == '\t')
+            line_buffer[write_pos++] = c;
+    }
+    line_buffer[write_pos] = '\0';
+
+    TokenArray tokens;
+    uint32_t token_count = UTILS_TokenizeGcodeLine(line_buffer, &tokens);
+
+    for (uint32_t i = 0; i < token_count; i++) {
+        if (UTILS_IsEmptyString(tokens.tokens[i]) || UTILS_IsComment(tokens.tokens[i])) continue;
+
+        /* Detect combined-modal tokens like "G90G1X10" or "G21G90" */
+        bool combined = false;
+        if (tokens.tokens[i][0] == 'G' || tokens.tokens[i][0] == 'M') {
+            for (char* p = tokens.tokens[i] + 1; *p; ++p) {
+                if (*p == 'G' || *p == 'M') { combined = true; break; }
+            }
+        }
+
+        bool accepted = combined
+            ? split_and_dispatch_multi_modal_inline(appData, tokens.tokens[i], out_is_probe)
+            : dispatch_one_token(appData, tokens.tokens[i], out_is_probe);
+
+        if (!accepted) return false; /* motion blocked — caller retries */
+    }
+    return true; /* all events dispatched (or line was empty) */
 }
 
 /* -------------------------------------------------------------------------- */
@@ -915,13 +1115,23 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
     GCODE_CommandQueue* cmdQueue = commandQueue;
     uint32_t nBytesAvailable = 0;
 
-    // ✅ CRITICAL: Check deferred "ok" ONCE at entry using FRESH count
-    // If buffer drained and okPending, send "ok" immediately then continue processing
-    GCODE_CheckDeferredOk(appData, cmdQueue);
+    // Drain one deferred "ok" per GCODE_Tasks call when ring buffer has room.
+    // Safe to call every main-loop iteration: GCODE_CheckDeferredOk sends at
+    // most ONE ok per call and only when UART3_ReadFreeBufferCountGet() >=
+    // UART_RX_CMD_MAX_BYTES, so it cannot over-release into a full ring.
+    if (okPendingCount > 0) {
+        GCODE_CheckDeferredOk(appData, cmdQueue);
+    }
 
     switch (gcodeData.state)
     {
     case GCODE_STATE_IDLE:
+        // Inject any pushed-back byte first (from the GCODE_COMMAND drain loop).
+        if (s_rxHasPushback && nBytesRead < sizeof(rxBuffer) - 1U) {
+            rxBuffer[nBytesRead++] = s_rxPushback;
+            rxBuffer[nBytesRead]   = '\0';
+            s_rxHasPushback = false;
+        }
         nBytesAvailable = UART3_ReadCountGet();
         if (nBytesAvailable > 0) {
             uint32_t space = (uint32_t)(sizeof(rxBuffer) - 1U - nBytesRead);
@@ -958,6 +1168,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 }
             }
             if (!has_terminator) break;
+            char saved_terminator = rxBuffer[terminator_pos]; // save for queue-full retry
             rxBuffer[terminator_pos] = '\0';
 
             // ✅ Check for control chars AFTER termination (handles '?' with newline)
@@ -993,17 +1204,31 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 }
                 if (has_content) {
                     DEBUG_PRINT_GCODE("[IDLE] Processing line: '%s'\r\n", rxBuffer);
+                    uint32_t count_before_idle = cmdQueue->count;
                     cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
-                    
+                    if (cmdQueue->count == count_before_idle) {
+                        // Queue full — restore the line terminator so IDLE re-finds
+                        // it on the next iteration and retries without losing the line.
+                        rxBuffer[terminator_pos] = saved_terminator;
+                        DEBUG_PRINT_GCODE("[IDLE] Queue full — retrying next iteration\r\n");
+                        break;
+                    }
                     // ✅ Send "ok" for all lines with content
                     DEBUG_PRINT_GCODE("[IDLE] Sending ok for content line\r\n");
                     SendOrDeferOk(appData, cmdQueue);
                 } else {
-                    // ✅ GRBL v1.1 behavior: Blank lines get "ok" response
-                    // UGS counts ALL lines including blanks, so we must respond
-                    // Flow control applies - will defer if motion queue has content
-                    DEBUG_PRINT_GCODE("[IDLE] Blank/comment line - sending ok with flow control\r\n");
-                    SendOrDeferOk(appData, cmdQueue);
+                    // ✅ GRBL v1.1 behavior: Blank/comment lines get "ok" response.
+                    // CRITICAL: blank/comment lines do NOT occupy a gcode queue slot
+                    // (Extract_CommandLineFrom_Buffer is not called, q->count unchanged).
+                    // Therefore we must NEVER defer their ok via SendOrDeferOk — doing
+                    // so inflates okPendingCount independently of q->count.  When those
+                    // phantom oks later burst-release they invite UGS to send commands
+                    // that push q->count past GCODE_MAX_COMMANDS, silently dropping them.
+                    // Pure arc tests hide this because they have almost no blank lines;
+                    // mixed-content files (sections separated by comment blocks) expose it.
+                    // Solution: always send ok immediately for blank/comment lines.
+                    DEBUG_PRINT_GCODE("[IDLE] Blank/comment line - sending ok immediately (no queue slot)\r\n");
+                    (void)UART_SendOK();
                 }
                 uint32_t skip_pos = terminator_pos + 1;
                 while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
@@ -1027,107 +1252,10 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         if (gcodeData.state != GCODE_STATE_CONTROL_CHAR) break;
 
         uint8_t c = rxBuffer[0];
-        switch (c) {
-            case '?': {
-                StepperPosition* pos = STEPPER_GetPosition();
-                WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
-
-                // Array-based position calculation with loop for scalability
-                float mpos[NUM_AXIS];
-                float wpos[NUM_AXIS];
-                
-                for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-                    mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
-                    wpos[axis] = mpos[axis] - GET_COORDINATE_AXIS(&wcs->offset, axis);
-                }
-
-                const char* state = "Idle";
-                if (grblAlarm) {
-                    state = "Alarm";
-                } else if (g_feed_hold_pending) {
-                    state = "Hold:1";  // GRBL v1.1: Hold:1 = draining / decelerating
-                } else if (g_feed_hold_active) {
-                    state = "Hold:0";  // GRBL v1.1: Hold:0 = fully stopped
-                } else if (MOTION_IsJogging()) {
-                    state = "Jog";
-                } else if (appData->arcGenState == ARC_GEN_ACTIVE) {
-                    // Arc generator active → still processing arc segments
-                    state = "Run";
-                } else if ((T4CON & _T4CON_ON_MASK) != 0) {
-                    // Hardware timer running → motion in progress (or about to start)
-                    state = "Run";
-                } else if (appData->motionQueueCount > 0) {
-                    // Motion queue has segments waiting
-                    state = "Run";
-                }
-
-                // FS feedrate: read actual step_interval from the executing ISR segment.
-                // prep_current_speed tracks the look-ahead preparation cursor, NOT
-                // the segment currently clocking through the ISR, so it lags/leads
-                // the real executing speed.  STEPPER_GetCurrentFeedrateMmMin() reads
-                // the hardware timer ticks directly – zero ambiguity.
-                float feedrate_mm_min = 0.0f;
-                if (state[0] == 'R' || state[0] == 'J') {
-                    feedrate_mm_min = STEPPER_GetCurrentFeedrateMmMin();
-                    if (feedrate_mm_min < 1.0f) {
-                        // Fallback: use modal feedrate if step_interval not yet loaded
-                        feedrate_mm_min = (appData->modalFeedrate > 0.0f) ? appData->modalFeedrate : 0.0f;
-                    }
-                }
-                // ✅ FIX: XC32 -msingle-float ABI mismatch — printf lib expects 8-byte double
-                // for %f/%g but caller passes 4-byte float.  Convert both to uint32_t and
-                // use %lu so there is zero float/double argument-size ambiguity.
-                uint32_t feed_display   = (uint32_t)(feedrate_mm_min + 0.5f);
-                uint32_t spindle_display = appData->modalSpindleRPM;
-
-                uint32_t response_len = (uint32_t)snprintf((char*)txBuffer, sizeof(txBuffer),
-                    "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%lu,%lu%s%s>\r\n",
-                    state, 
-                    mpos[AXIS_X], mpos[AXIS_Y], mpos[AXIS_Z], 
-                    wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
-                    (unsigned long)feed_display, (unsigned long)spindle_display,
-                    grblCheckMode ? "|Cm:1" : "",
-                    "");  // Hold state reported via state string (Hold:0), not separate flag
-                UART3_Write(txBuffer, response_len);
-                
-                // ⚠️ Real-time commands NEVER trigger deferred ok checks
-                // The deferred ok will be sent by IDLE loop (line 668) or next command
-                break;
-            }
-            case '~': /* Cycle start / resume */
-                if (g_feed_hold_active || g_feed_hold_pending) {
-                    STEPPER_ResumeMotion();  // Cancels pending OR restarts from full stop
-                    DEBUG_PRINT_GCODE("[GCODE] Feed hold released — motion resuming\r\n");
-                }
-                break;
-            case '!': /* Feed hold */
-                if (!g_feed_hold_active && !g_feed_hold_pending) {
-                    STEPPER_PauseMotion();   // Sets pending (drain) or immediate if queue empty
-                    DEBUG_PRINT_GCODE("[GCODE] Feed hold active\r\n");
-                }
-                break;
-            case 0x18: /* Soft reset (Ctrl+X) */
-            {
-                GCODE_SoftReset(appData, cmdQueue);
-                break;
-            }
-            case 0x85: /* Jog cancel — flush queued jog moves, no alarm */
-                MOTION_JogCancel();
-                // No response per GRBL v1.1 spec
-                break;
-            case 0x95: /* XOFF - flow control, ignore */
-            case 0x90: /* DLE - data link escape, ignore */
-            case 0x99: /* Unknown control char - ignore */
-            case 0x11: /* XON - flow control, ignore */
-            case 0x13: /* DC3/XOFF - flow control, ignore */
-                // Flow control characters - silently consume without "ok" response
-                // These are not G-code commands and don't require acknowledgment
-                DEBUG_PRINT_GCODE("[GCODE] Ignoring flow control byte: 0x%02X\r\n", rxBuffer[0]);
-                break;
-            default:
-                // Unknown control character - ignore
-                DEBUG_PRINT_GCODE("[GCODE] Unknown control char: 0x%02X\r\n", rxBuffer[0]);
-                break;
+        if (c == 0x18) {
+            GCODE_SoftReset(appData, cmdQueue);
+        } else {
+            service_realtime_byte(appData, c);
         }
 
         // ✅ GRBL PROTOCOL: Real-time commands (? ! ~) NEVER generate "ok" responses
@@ -1206,9 +1334,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 }
             }
             
-            // Report G92 coordinate offset
+            // Report G92 coordinate offset (live value from kinematics, not flash)
             float g92_x, g92_y, g92_z;
-            SETTINGS_GetG92Offset(&g92_x, &g92_y, &g92_z);
+            KINEMATICS_GetG92Offset(&g92_x, &g92_y, &g92_z);
             p += snprintf(&buf[p], sizeof(buf)-p, "[G92:%.3f,%.3f,%.3f]\r\n", g92_x, g92_y, g92_z);
             
             // Report live tool length offset (reflects G43, G43.1 and G49)
@@ -1259,6 +1387,11 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 cmdQueue->count++;
             }
             handled = true;
+            // Defer the ok: send ONLY after homing succeeds (IDLE) or
+            // send ALARM:9 on failure.  Do NOT send ok immediately.
+            send_ok = false;
+            s_homing_pending = true;
+            okPendingCount++;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'L') {
             // $L - Debug command: Show limit switch states
@@ -1324,6 +1457,11 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             if (!MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
                 // Limits are clear - allow recovery
                 g_suppress_hard_limits = false;
+                // Clear non-hard-limit alarms (ALARM:3 motion abort, ALARM:6 homing abort, etc.)
+                if (appData->state == APP_ALARM && appData->alarmCode != 1) {
+                    appData->state = APP_IDLE;
+                    appData->alarmCode = 0;
+                }
                 DEBUG_PRINT_GCODE("[GCODE] Alarm cleared via $X - limits clear, recovery allowed\r\n");
             } else {
                 // Still on limit - cannot clear alarm
@@ -1555,19 +1693,52 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             if (rxBuffer[i] == '\0') { cmd_end = i; break; }
         }
         DEBUG_PRINT_GCODE("[GCODE_CMD] Processing command: '%s'\r\n", rxBuffer);
-        cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, cmd_end, cmdQueue);
 
-        // Probe commands (G38.x) own their own ok: it is sent by app.c ONLY after
-        // probe completion ([PRB:...] result line precedes the ok).  Suppress the
-        // normal SendOrDeferOk here so UGS does not receive a premature ok.
+        // Inline dispatch: parse every event in this line and try to send each
+        // directly to the motion bridge (trajectory).  If the bridge rejects any
+        // event (arc active, trajectory full, or motion drain pending) we stay in
+        // this state and retry next iteration — rxBuffer is preserved, no ok sent.
+        // Back-pressure: UGS gets no ok → stops sending → UART ring fills slowly.
+        // This eliminates the arc-to-arc stall: arc2 waits here (1 slot) instead
+        // of piling up behind 64 gcode-queue entries while ok credits are already
+        // exhausted.
         bool is_probe_cmd = false;
-        for (uint32_t pi = 0; pi + 2 < nBytesRead && rxBuffer[pi] != '\0'; pi++) {
-            if ((rxBuffer[pi] == 'G' || rxBuffer[pi] == 'g') &&
-                 rxBuffer[pi+1] == '3' && rxBuffer[pi+2] == '8') {
-                is_probe_cmd = true;
-                break;
+        if (!dispatch_command_line(appData, rxBuffer, cmd_end, &is_probe_cmd)) {
+            DEBUG_PRINT_GCODE("[GCODE_CMD] Motion blocked — holding for retry\r\n");
+            // Drain real-time control bytes (primarily '?') from the ring ONLY on the
+            // first retry iteration (when the pushback slot is empty).  In pipelined
+            // mode UGS has already sent the next G-code commands into the ring; each
+            // retry consumes one more ring byte and overwrites the pushback slot,
+            // destroying the queued G-code data byte-by-byte.  Stopping once the slot
+            // is filled guarantees ring integrity from that point on.
+            //
+            // In single-step mode the ring only contains '?' bytes so this path
+            // services them correctly on every retry iteration (the pushback never
+            // gets set because no G-code bytes arrive until the ok is sent).
+            //
+            // '?' bytes that arrive after the pushback is set stay in the ring behind
+            // the G-code bytes.  They are processed correctly by GCODE_STATE_IDLE
+            // once the arc finishes and arc2 is dispatched.
+            if (!s_rxHasPushback) {
+                uint8_t rt;
+                while (UART3_ReadCountGet() > 0) {
+                    if (UART3_Read(&rt, 1) != 1) break;
+                    if (rt == 0x18) { GCODE_SoftReset(appData, cmdQueue); return; }
+                    if (!is_control_char(rt)) {
+                        // First byte of a G-code command — push it back and stop.
+                        // All subsequent ring bytes (rest of that command + further
+                        // commands) remain intact for GCODE_STATE_IDLE to pick up.
+                        s_rxPushback    = rt;
+                        s_rxHasPushback = true;
+                        break;
+                    }
+                    service_realtime_byte(appData, rt);
+                }
             }
+            break;  // stay in GCODE_STATE_GCODE_COMMAND, retry next iteration
         }
+
+        // All events dispatched — send ok (probe commands own their ok via app.c)
         if (!is_probe_cmd) {
             DEBUG_PRINT_GCODE("[GCODE_CMD] Normal flow control\r\n");
             SendOrDeferOk(appData, cmdQueue);

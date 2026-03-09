@@ -99,6 +99,12 @@ bool HOMING_IsActive(void);
 HomingState HOMING_GetState(void);
 
 /**
+ * @brief Get the alarm code set by the last homing failure.
+ * @return GRBL alarm number (8 = pull-off fail, 9 = seek/locate fail, 0 = no alarm)
+ */
+uint32_t HOMING_GetAlarmCode(void);
+
+/**
  * @brief Clear homing alarm and return to idle
  * Call after user acknowledges homing failure
  */

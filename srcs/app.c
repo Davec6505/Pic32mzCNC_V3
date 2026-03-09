@@ -174,7 +174,7 @@ void APP_Initialize ( void )
     appData.arcClockwise = false;
     appData.arcPlane = 0;  // XY plane
     appData.arcFeedrate = 0.0f;
-    
+
     // ✅ Initialize UART utilities (callback-based non-blocking output)
     UART_Initialize();
     
@@ -323,14 +323,26 @@ void APP_Tasks ( void )
             // Read bytes, tokenize, and queue commands continuously
             GCODE_Tasks(&appData, &appData.gcodeCommandQueue);
 
+            // Release deferred oks based on gcode queue space (once per main-loop
+            // iteration). Space-based: if q->count < HIGH_WATER and okPendingCount > 0,
+            // send ok. This is the primary mechanism that keeps UGS streaming during
+            // arc generation (where commands_consumed is frozen so delta-based
+            // release would not fire).
+            GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
+
+
+            // ===== HOMING STATE MACHINE (NON-BLOCKING) =====
+            // Process homing cycle if active
+            HOMING_Tasks(&appData);
+
+
 
             // ===== INCREMENTAL ARC GENERATION (NON-BLOCKING) =====
             // Generate arc segments one at a time when arc is active
             // needs to run before motion tasks to keep the queue fed and avoid underrun during long arcs
-            if(appData.arcGenState == ARC_GEN_ACTIVE) {
+            if (appData.arcGenState == ARC_GEN_ACTIVE) {
                 MOTION_Arc(&appData);
             }
-            
 
             // ===== MOTION CONTROLLER - RUNS BEFORE EVENT PROCESSING =====
             // ⚠️ CRITICAL: Motion must run EVERY iteration to keep ISR fed with segments
@@ -422,10 +434,6 @@ void APP_Tasks ( void )
                 appData.probeState = PROBE_STATE_IDLE;
             }
             
-            // ===== HOMING STATE MACHINE (NON-BLOCKING) =====
-            // Process homing cycle if active
-            HOMING_Tasks(&appData);
-
 
             // ===== EVENT PROCESSING - CONVERT GCODE TO MOTION =====
             // ⚠️ Only process events if NOT in alarm state
@@ -437,46 +445,22 @@ void APP_Tasks ( void )
                 if (GCODE_GetNextEvent(&appData.gcodeCommandQueue, &event)) {
                     DEBUG_PRINT_GCODE("[APP] Event retrieved: type=%d (1=LINEAR,2=ARC)\r\n", event.type);
                     
-                    // ⚠️ CRITICAL: Don't process ARC events while another arc is generating
-                    // But allow non-arc commands (dwell, linear, etc.) to process
-                    bool should_process = true;
-                    if (event.type == GCODE_EVENT_ARC_MOVE && appData.arcGenState == ARC_GEN_ACTIVE) {
-                        should_process = false;  // Defer arc until current arc completes
-                    }
-                    
-                    if (should_process) {
-                        // Process event - only consume if successful
-                        if (MOTION_ProcessGcodeEvent(&appData, &event)) {
-                            // Event processed successfully - consume it from queue
-                            GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
-
-                            // ✅ Release deferred ok immediately at the point of consumption.
-                            // ok release is tied to command slot consumption — not a periodic poll.
-                            // At this exact moment commands_consumed just incremented so freed=1,
-                            // and q->count just decremented (arc commands included), so the
-                            // free-space fallback also fires if queue is below HIGH_WATER.
-                            // This is the key fix for arc-to-arc stalls: the arc command is
-                            // consumed here, releasing 1 ok so UGS can send the next command,
-                            // even though the arc generator will run for many more iterations.
-                            GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
-
-                            // ✅ CRITICAL FIX: If new arc just started, generate first segment IMMEDIATELY
-                            // This prevents 1-iteration gap between arcs which drains queue
-                            if (event.type == GCODE_EVENT_ARC_MOVE && 
-                                appData.arcGenState == ARC_GEN_ACTIVE) {
-                                MOTION_Arc(&appData);
-                            }
-                        } else if (event.type == GCODE_EVENT_PROGRAM_END) {
-                            // ✅ CRITICAL FIX: M0, M2, M30 (program end) - not handled by motion
-                            // Consume the event and remain in IDLE state
-                            // This prevents machine from getting stuck after file completion
-                            DEBUG_PRINT_APP("[APP] Program end (M0/M2/M30) - file complete\r\n");
-                            GCODE_MarkProgramEnd();                         // ← hold ok until motion drains
-                            GCODE_ConsumeEvent(&appData.gcodeCommandQueue); // ← increments commands_consumed
-                            GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue); // s_program_end_pending guards this
+                    // Process event - only consume if successful
+                    if (MOTION_ProcessGcodeEvent(&appData, &event)) {
+                        // Event processed successfully - consume it from queue
+                        GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
+                        // Kick arc generation immediately so trajectory queue stays fed
+                        if (event.type == GCODE_EVENT_ARC_MOVE &&
+                            appData.arcGenState == ARC_GEN_ACTIVE) {
+                            MOTION_Arc(&appData);
                         }
-                        // If processing failed (queue full), leave event in queue for next iteration
+                    } else if (event.type == GCODE_EVENT_PROGRAM_END) {
+                        // M0, M2, M30 (program end) - not handled by motion
+                        // Consume the event and remain in IDLE state
+                        DEBUG_PRINT_APP("[APP] Program end (M0/M2/M30) - file complete\r\n");
+                        GCODE_ConsumeEvent(&appData.gcodeCommandQueue);
                     }
+                    // If processing failed, leave event in queue for next iteration
                 }
             }
 
@@ -550,34 +534,29 @@ void APP_Tasks ( void )
                         // No limit sampling needed in remaining states.
                         break;
                 }
-            }
-            // Normal motion: Check hard limits (ONLY when NOT homing)
-            else {
-                // Hard limit check disabled during homing - limits used for state transitions
-                // Also suppress hard limits after soft reset until operator physically clears limits
-                if (settings->hard_limits_enable && !g_suppress_hard_limits) {
-                    if (MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
-                        // Hard limit triggered during normal motion - ALARM!
-                        DEBUG_PRINT_APP("[APP] Hard limit triggered during normal motion, entering ALARM\r\n");
-                        TMR4_Stop();
-                        MOTION_UTILS_EnableAllAxes(false, settings->step_enable_invert);
-                        
-                        appData.alarmCode = 1;
-                        appData.state = APP_ALARM;
-                        g_hard_limit_alarm = true;
-                        
-                        UART_Printf("[MSG:ALARM - Hard limit triggered! Send $X to clear]\r\n");
-                        
-                        break;
-                    }
-                }
-                
+
                 // ✅ Clear hard limit suppression when all limits physically released
                 if (g_suppress_hard_limits && !MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
                     g_suppress_hard_limits = false;
                     DEBUG_PRINT_APP("[APP] Hard limit suppression cleared - all limits released\r\n");
                 }
                     
+            } else {
+                // ===== HARD LIMIT CHECK (normal motion, non-homing) =====
+                if (settings->hard_limits_enable && !g_suppress_hard_limits) {
+                    if (MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+                        STEPPER_StopMotion();
+                        g_hard_limit_alarm = true;
+                        UART_Printf("ALARM:1\r\n");  // Hard limit triggered
+                        appData.alarmCode = 1;
+                        appData.state = APP_ALARM;
+                        DEBUG_PRINT_APP("[APP] Hard limit triggered during motion - ALARM:1\r\n");
+                    }
+                }
+                // Clear hard limit suppression when limits physically released
+                if (g_suppress_hard_limits && !MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
+                    g_suppress_hard_limits = false;
+                }
             }
 
             break;
