@@ -6,16 +6,16 @@ GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, tar
 
 ## 🚀 Status
 
-**Branch**: `lookahead` (active development mainline)
+**Branch**: `scurve_motion` (active development mainline)
 **Firmware**: `bins/CNC_V3.hex`
-**Last build**: March 3, 2026
+**Last build**: March 9, 2026
 
 | Feature | Status |
 |---------|--------|
 | GRBL v1.1 protocol | ✅ Complete |
 | 4-axis coordinated motion (XYZA) | ✅ Complete |
-| Trapezoidal velocity profiling | ✅ Complete |
-| GRBL-exact look-ahead planner (reverse+forward pass + junction) | ✅ Complete |
+| S-curve velocity profiling (jerk-limited, 7-phase) | ✅ Complete |
+| GRBL-exact look-ahead planner (reverse+forward+junction) | ✅ Complete |
 | Arc interpolation G2/G3 + radius compensation | ✅ Complete |
 | Homing ($H) — 4-phase cycle | ✅ Complete |
 | Spindle PWM (M3/M5 via OC8/TMR6) | ✅ Complete |
@@ -95,11 +95,13 @@ Mixing is fully supported (e.g. X+Y = TMC5160, Z+A = DRV8825).
 ### Motion Pipeline
 
 ```
-UART RX → Parser → Event Queue → Kinematics → Motion Queue → STEPPER_LoadSegment → TIMER_4_ISR
-                        ↓              ↓              ↓                               ↓
-                   Flow Control   Velocity       Position                      Bresenham
-                   (defer "ok")   Profile        Tracking                   subordinate axes
+UART RX → Parser (inline dispatch) → Trajectory Planner → Interpolator → TIMER_4_ISR
+               ↓                           ↓                   ↓               ↓
+          Flow Control             S-curve velocity       DDS step        Bresenham
+        (backpressure/ok)         (64-slot lookahead)    generator     subordinate axes
 ```
+
+G-code commands are dispatched **inline** — bypassing the gcode queue for normal streaming — so arc backpressure is applied immediately at the trajectory level, not deferred.
 
 ### Call Hierarchy
 
@@ -110,10 +112,11 @@ main.c
         ├── APP_LOAD_SETTINGS → settings.c (read flash after peripherals ready)
         ├── APP_CONFIG      → TMC5160_Initialize() [#ifdef HAS_TMC5160_AXIS]
         ├── APP_IDLE
-        │     ├── motion.c  — segment queue, GRBL-exact three-pass planner
-        │     ├── gcode_parser.c — parse events, flow control
-        │     ├── kinematics.c — generate motion segments
-        │     ├── stepper.c — load segments to TMR4
+        │     ├── gcode_parser.c — parse/dispatch G-code, flow control
+        │     ├── motion_bridge.c — G-code event → trajectory move bridge
+        │     ├── trajectory.c — S-curve planner, 64-slot lookahead queue
+        │     ├── interpolator.c — fixed-rate DDS step generator (TMR4 ISR)
+        │     ├── kinematics.c — coordinate transforms (Work ↔ Machine)
         │     └── TMC5160_Tasks() [rate-limited 10 Hz, #ifdef HAS_TMC5160_AXIS]
         ├── APP_HOMING      → homing.c ($H — 4-phase seek/locate/pulloff/complete)
         └── APP_ALARM       → stepper.c (emergency stop, STEPPER_DisableAll)
@@ -417,14 +420,18 @@ G38.2 Z-10 F100  # Probe toward Z
 
 ### Validated Results
 
-| Test | Result |
-|------|--------|
-| Rectangle — dual iteration | ✅ Pass |
-| Circle — 20 segments, 0.025 mm error | ✅ Pass |
-| Arc radius compensation | ✅ Pass |
-| Back-to-back file execution | ✅ Pass |
-| Soft reset recovery (Ctrl+X) | ✅ Pass |
-| G38.x probe | ⏳ Pending hardware test |
+All tests validated in hardware (`49e1bf6`, `scurve_motion` branch) — both UGS single-step and pipelined streaming modes.
+
+| Test file | Mode | Result | Notes |
+|-----------|------|--------|-------|
+| `08_arc_cw_ccw_stress.gcode` | Single-step | ✅ Pass | 36 arcs, 2:18 min, return to origin |
+| `08_arc_cw_ccw_stress.gcode` | Pipeline | ✅ Pass | Smooth continuous, zero stop-starts |
+| `09_concentric_semicircles.gcode` | Pipeline | ✅ Pass ×2 | 56s/55s, X error <0.031 mm |
+| `05_three_arcs_simple.gcode` | Both | ✅ Pass | CW/CCW arc handoff stable |
+| `02_rectangle_path.gcode` | Both | ✅ Pass | Corners sharp, return to origin |
+| `03_circle_20segments.gcode` | Both | ✅ Pass | 20-segment circle, <0.025 mm error |
+| `07_complex_long_run_fast.gcode` | Both | ✅ Pass | Full pipeline: arcs, linears, G4, return |
+| G38.x probe | — | ⏳ Pending hardware test | |
 
 ---
 
