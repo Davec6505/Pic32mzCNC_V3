@@ -610,11 +610,22 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             float cx = start.coordinate[AXIS_X] + event->data.arcMove.centerX;
             float cy = start.coordinate[AXIS_Y] + event->data.arcMove.centerY;
 
-            // Absolute end point
-            float ex = event->data.arcMove.x;
-            float ey = event->data.arcMove.y;
-            float ez = event->data.arcMove.z;
-            float ea = event->data.arcMove.a;
+            // Absolute end point coordinates are optional (default to current position on that axis).
+            
+           // ✅ Fix: convert to machine space before use
+            CoordinatePoint end_work;
+            CoordinatePoint start_work = KINEMATICS_MachineToWork(start);
+            end_work = start_work;  // default unspecified axes to current work position
+            if (!isnan(event->data.arcMove.x)) end_work.coordinate[AXIS_X] = event->data.arcMove.x;
+            if (!isnan(event->data.arcMove.y)) end_work.coordinate[AXIS_Y] = event->data.arcMove.y;
+            if (!isnan(event->data.arcMove.z)) end_work.coordinate[AXIS_Z] = event->data.arcMove.z;
+            if (!isnan(event->data.arcMove.a)) end_work.coordinate[AXIS_A] = event->data.arcMove.a;
+            CoordinatePoint end_m = KINEMATICS_WorkToMachine(end_work);
+
+            float ex = end_m.coordinate[AXIS_X];
+            float ey = end_m.coordinate[AXIS_Y];
+            float ez = end_m.coordinate[AXIS_Z];
+            float ea = end_m.coordinate[AXIS_A];
 
             float fr = event->data.arcMove.feedrate;
             if (fr < 1.0f && s_modal_feedrate_mm_min >= 1.0f)
@@ -767,10 +778,37 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
         case GCODE_EVENT_SET_WORK_OFFSET: {
             // G10 L2 Pn  — set WCS offset directly from parameter values
             // G10 L20 Pn — set WCS offset such that current machine pos = given work pos
-            // Wait for motion to idle first (ensures MPos is stable for L20).
+            // G92        — volatile session offset (l_value==92u sentinel); never writes flash
+            // Wait for motion to idle first (MPos must be stable for any offset calculation).
             if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) {
                 return false;
             }
+
+            // G92: RAM-only path — no flash write, ever.
+            if (event->data.workOffset.l_value == 92u) {
+                CoordinatePoint mpos = KINEMATICS_GetCurrentPosition();
+                // Default desired = current work position so unspecified axes preserve
+                // any existing g92 component (partial G92 like "G92 X0" only changes X).
+                CoordinatePoint desired_w = KINEMATICS_MachineToWork(mpos);
+                if (!isnan(event->data.workOffset.x)) desired_w.coordinate[AXIS_X] = event->data.workOffset.x;
+                if (!isnan(event->data.workOffset.y)) desired_w.coordinate[AXIS_Y] = event->data.workOffset.y;
+                if (!isnan(event->data.workOffset.z)) desired_w.coordinate[AXIS_Z] = event->data.workOffset.z;
+                if (!isnan(event->data.workOffset.a)) desired_w.coordinate[AXIS_A] = event->data.workOffset.a;
+                float machine_arr[NUM_AXIS], desired_arr[NUM_AXIS];
+                for (int i = 0; i < NUM_AXIS; i++) {
+                    machine_arr[i] = mpos.coordinate[i];
+                    desired_arr[i] = desired_w.coordinate[i];
+                }
+                KINEMATICS_SetG92Offset(machine_arr, desired_arr);
+                s_planned_position_valid = false;
+                DEBUG_PRINT_MOTION("[G92] MPos=(%.3f,%.3f,%.3f) desired_work=(%.3f,%.3f,%.3f)\r\n",
+                    (double)mpos.coordinate[AXIS_X], (double)mpos.coordinate[AXIS_Y],
+                    (double)mpos.coordinate[AXIS_Z],
+                    (double)desired_w.coordinate[AXIS_X], (double)desired_w.coordinate[AXIS_Y],
+                    (double)desired_w.coordinate[AXIS_Z]);
+                return true;
+            }
+
             // Resolve target WCS slot: sentinel 255 → active WCS
             uint8_t slot = event->data.workOffset.wcs_number;
             if (slot == 255u || slot > 5u) slot = appData->activeWCS;

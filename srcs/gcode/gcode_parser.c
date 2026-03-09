@@ -419,30 +419,36 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             return true;
         }
 
-        // G92 - Set work coordinate offset (same as G10 L20 P0)
+        // G92 - Set work coordinate offset (G10 L20 P0 semantics, active WCS).
+        // Emitted as an event so the WCS offset is computed against the actual
+        // machine position at this point in the motion stream — not at parse time.
+        // The motion_bridge GCODE_EVENT_SET_WORK_OFFSET handler waits for motion
+        // to drain before reading MPos, so a preceding G0 completes before G92
+        // latches the offset.  This fixes the timing bug where G92 was executing
+        // against the pre-move position when the sender pipelines G0 + G92.
         if (gnum == 92) {
-            StepperPosition* pos = STEPPER_GetPosition();
-            WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
             const float unit_scale = unitsInches ? 25.4f : 1.0f;
-            
-            // Array-based axis parameter parsing with loop
-            float desired[NUM_AXIS];
-            float mpos[NUM_AXIS];
-            
-            // Parse all axis parameters using loop
+            ev->type = GCODE_EVENT_SET_WORK_OFFSET;
+            ev->data.workOffset.l_value    = 92u;   // sentinel: G92 (distinct from G10 L20 which uses 20u)
+            ev->data.workOffset.wcs_number = 255u;  // active WCS at event time
+            ev->data.workOffset.x = NAN;
+            ev->data.workOffset.y = NAN;
+            ev->data.workOffset.z = NAN;
+            ev->data.workOffset.a = NAN;
             for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                 char* pAxis = find_char((char*)cmd, axis_letters[axis]);
-                desired[axis] = pAxis ? (parse_float_after(pAxis) * unit_scale) : NAN;
-                mpos[axis] = (float)pos->steps[axis] / pos->steps_per_mm[axis];
-            }
-            
-            // Set offset = MachinePos - DesiredWorkPos (only X, Y, Z supported in WCS)
-            for (E_AXIS axis = AXIS_X; axis < AXIS_Z + 1; axis++) {
-                if (!isnan(desired[axis])) {
-                    SET_COORDINATE_AXIS(&wcs->offset, axis, mpos[axis] - desired[axis]);
+                float v = pAxis ? (parse_float_after(pAxis) * unit_scale) : NAN;
+                switch (axis) {
+                    case AXIS_X: ev->data.workOffset.x = v; break;
+                    case AXIS_Y: ev->data.workOffset.y = v; break;
+                    case AXIS_Z: ev->data.workOffset.z = v; break;
+                    case AXIS_A: ev->data.workOffset.a = v; break;
+                    default: break;
                 }
             }
-            
+            DEBUG_PRINT_GCODE("[PARSE] G92 -> WORK_OFFSET L20 P0 x=%.3f y=%.3f z=%.3f\r\n",
+                (double)ev->data.workOffset.x, (double)ev->data.workOffset.y,
+                (double)ev->data.workOffset.z);
             return true;
         }
 
@@ -1264,9 +1270,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 }
             }
             
-            // Report G92 coordinate offset
+            // Report G92 coordinate offset (live value from kinematics, not flash)
             float g92_x, g92_y, g92_z;
-            SETTINGS_GetG92Offset(&g92_x, &g92_y, &g92_z);
+            KINEMATICS_GetG92Offset(&g92_x, &g92_y, &g92_z);
             p += snprintf(&buf[p], sizeof(buf)-p, "[G92:%.3f,%.3f,%.3f]\r\n", g92_x, g92_y, g92_z);
             
             // Report live tool length offset (reflects G43, G43.1 and G49)

@@ -188,14 +188,26 @@ void KINEMATICS_SetWorkCoordinates(float x, float y, float z)
 void KINEMATICS_SetG92Offset(const float machine[NUM_AXIS],
                               const float desired_work[NUM_AXIS])
 {
+    // GRBL formula: g92 is an additive layer on top of the active WCS slot.
+    // g92_offset + g_wcs.offset together map work→machine:
+    //   machine = work + g_wcs.offset + g92_offset
+    // Solving for g92_offset given a desired work position at a known machine pos:
+    //   g92_offset = machine - g_wcs.offset - desired_work
     for (int i = 0; i < NUM_AXIS; i++) {
-        g92_offset[i] = machine[i] - desired_work[i];
+        g92_offset[i] = machine[i] - g_wcs.offset.coordinate[i] - desired_work[i];
     }
 }
 
 void KINEMATICS_ClearG92Offset(void)
 {
     memset(g92_offset, 0, sizeof(g92_offset));
+}
+
+void KINEMATICS_GetG92Offset(float* x, float* y, float* z)
+{
+    if (x) *x = g92_offset[AXIS_X];
+    if (y) *y = g92_offset[AXIS_Y];
+    if (z) *z = g92_offset[AXIS_Z];
 }
 
 // ─── Active WCS management (G54–G59) ──────────────────────────────────────────────

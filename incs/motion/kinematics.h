@@ -32,6 +32,7 @@ void KINEMATICS_GetActiveWCSOffset(uint8_t activeWCS, float* x_offset, float* y_
 // machine[NUM_AXIS] = current machine coords, desired_work[NUM_AXIS] = requested work position.
 void KINEMATICS_SetG92Offset(const float machine[NUM_AXIS], const float desired_work[NUM_AXIS]);
 void KINEMATICS_ClearG92Offset(void);
+void KINEMATICS_GetG92Offset(float* x, float* y, float* z);  // live g92_offset[] — not flash-backed
 
 // Active Work Coordinate System management (G54–G59).
 // KINEMATICS_SetActiveWCS(n) reloads g_wcs.offset from flash slot n (0=G54…5=G59)
