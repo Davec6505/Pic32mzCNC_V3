@@ -79,8 +79,7 @@ GCODE_Data gcodeData = {
 };
 
 static uint32_t okPendingCount = 0;         // Flow control: count of deferred "ok" responses
-// s_prev_consumed removed: deferred ok release is now space-based, not delta-based
-static bool     s_program_end_pending = false;  // M2/M30 drain sentinel
+// s_prev_consumed removed: deferred ok release is now ring-buffer-space-based
 static bool     s_homing_pending = false;   // $H ok held until homing cycle completes
 static bool     s_homing_started = false;   // true once HOMING_IsActive() first returns true after $H
 
@@ -220,8 +219,6 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     
     /* 9. Reset G-code parser state */
     okPendingCount = 0;         // Clear all deferred ok responses
-    // (s_prev_consumed removed — no longer needed)
-    s_program_end_pending = false;  // Clear program end pending flag
     s_homing_pending = false;       // Clear homing sentinel
     s_homing_started = false;       // Clear homing-started flag
     grblCheckMode = false;
@@ -854,46 +851,18 @@ void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* q) {
         DEBUG_PRINT_GCODE("[FLOW] Homing complete — releasing $H ok\r\n");
     }
 
-    // Program-end sentinel (M2/M30): hold ALL remaining oks until motion fully
-    // drains — trajectory empty AND arc generation complete.
-    // Only then flush every pending ok in one burst (the M2/M30 ok is the last).
-    if (s_program_end_pending) {
-        if (appData->motionQueueCount != 0 || appData->arcGenState != ARC_GEN_IDLE) {
-            return;  // still moving or arc generation pending — wait
-        }
-        DEBUG_PRINT_GCODE("[DEFERRED] Program end drain — flushing %lu oks\r\n",
-                          (unsigned long)okPendingCount);
-        while (okPendingCount > 0) {
-            if (!UART_SendOK()) break;
-            okPendingCount--;
-        }
-        s_program_end_pending = false;
-        return;
-    }
-
     if (okPendingCount == 0) return;
 
-    // Drain remaining deferred oks (dwell, homing, G38.x completions).
-    // Normal commands no longer defer — they send ok at receive time in
-    // SendOrDeferOk.  Only special sentinels (dwell, M2/M30, homing, G38.x)
-    // accumulate here, and they drain one-at-a-time as motion completes.
-    while (okPendingCount > 0) {
-        if (!UART_SendOK()) break;
-        okPendingCount--;
+    // Drain one deferred ok per call, gated on UART3 RX ring free space.
+    // Sending "ok" invites UGS to transmit the next command — only do so when
+    // the ring can absorb at least one worst-case command line.
+    if (UART3_ReadFreeBufferCountGet() >= UART_RX_CMD_MAX_BYTES) {
+        if (UART_SendOK()) {
+            okPendingCount--;
+            DEBUG_PRINT_GCODE("[DEFERRED] ok drained (remaining=%lu)\r\n",
+                              (unsigned long)okPendingCount);
+        }
     }
-}
-
-/**
- * @brief Signal that M2/M30 end-of-program was received.
- *
- * Prevents the ok for M2/M30 (and any remaining deferred oks) from being
- * released until all trajectory + arc motion has drained to zero.
- * Called from app.c before GCODE_ConsumeEvent() for PROGRAM_END events.
- */
-void GCODE_MarkProgramEnd(void)
-{
-    s_program_end_pending = true;
-    DEBUG_PRINT_GCODE("[FLOW] Program end marked — holding oks until motion drains\r\n");
 }
 
 /**
@@ -912,7 +881,8 @@ void GCODE_MarkProgramEnd(void)
  */
 static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
 {
-    (void)q;  // no longer used — backpressure is natural (64-slot gcode queue)
+    (void)appData;
+    (void)q;
 
     // While a G4 dwell is active, defer — drained when dwell timer expires.
     if (MOTION_IsDwellActive()) {
@@ -921,9 +891,22 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
         return;
     }
 
-    // Send immediately — UGS flow is controlled purely by gcode queue capacity.
-    DEBUG_PRINT_GCODE("[FLOW] ok sent at receive time\r\n");
-    (void)UART_SendOK();
+    // Ring-buffer backpressure gate.
+    // The UART3 RX ring (1024 bytes) is the real throughput bottleneck:
+    // UGS halts when the ring is full and resumes when it empties enough.
+    // We mirror that gate: send "ok" only when the ring has room for at least
+    // one more worst-case command line (UART_RX_CMD_MAX_BYTES = 64 bytes).
+    // If not, defer — GCODE_CheckDeferredOk drains one ok per call whenever
+    // ring space opens up.
+    if (UART3_ReadFreeBufferCountGet() >= UART_RX_CMD_MAX_BYTES) {
+        DEBUG_PRINT_GCODE("[FLOW] ok sent (ring free=%lu)\r\n",
+                          (unsigned long)UART3_ReadFreeBufferCountGet());
+        (void)UART_SendOK();
+    } else {
+        DEBUG_PRINT_GCODE("[FLOW] ok deferred (ring full, free=%lu)\r\n",
+                          (unsigned long)UART3_ReadFreeBufferCountGet());
+        okPendingCount++;
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -942,11 +925,13 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
     GCODE_CommandQueue* cmdQueue = commandQueue;
     uint32_t nBytesAvailable = 0;
 
-    // NOTE: GCODE_CheckDeferredOk is called causally in app.c immediately after
-    // GCODE_ConsumeEvent(), which is the only safe place to call it.  Calling it
-    // here (every main-loop iteration) caused the free-space fallback to fire
-    // thousands of times per second, draining okPendingCount far ahead of actual
-    // command consumption and causing UGS to consider streaming complete mid-file.
+    // Drain one deferred "ok" per GCODE_Tasks call when ring buffer has room.
+    // Safe to call every main-loop iteration: GCODE_CheckDeferredOk sends at
+    // most ONE ok per call and only when UART3_ReadFreeBufferCountGet() >=
+    // UART_RX_CMD_MAX_BYTES, so it cannot over-release into a full ring.
+    if (okPendingCount > 0) {
+        GCODE_CheckDeferredOk(appData, cmdQueue);
+    }
 
     switch (gcodeData.state)
     {

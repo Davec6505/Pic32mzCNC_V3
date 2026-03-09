@@ -68,6 +68,15 @@ bool UART_Printf(const char* format, ...);
 bool UART_SendOK(void);
 
 /**
+ * @brief Worst-case GRBL command line length (bytes) — used as the UART3 RX
+ * ring-buffer free-space gate before sending "ok".
+ * If the ring has fewer free bytes than this, the "ok" is deferred until
+ * space opens up (i.e., UGS is bursting faster than we can consume).
+ * Worst case: "G2 X-123.456 Y-123.456 I-123.456 J-123.456 F12345\n" ~55 bytes.
+ */
+#define UART_RX_CMD_MAX_BYTES  64u
+
+/**
  * @brief Send GRBL status report (e.g., "<Idle|MPos:0.000,0.000,0.000|...>")
  * @param state State string ("Idle", "Run", "Hold", "Alarm")
  * @param mpos_x Machine X position

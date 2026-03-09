@@ -474,7 +474,6 @@ void APP_Tasks ( void )
                             // Consume the event and remain in IDLE state
                             // This prevents machine from getting stuck after file completion
                             DEBUG_PRINT_APP("[APP] Program end (M0/M2/M30) - file complete\r\n");
-                            GCODE_MarkProgramEnd();                         // ← hold ok until motion drains
                             GCODE_ConsumeEvent(&appData.gcodeCommandQueue); // ← increments commands_consumed
                         }
                         // If processing failed (queue full), leave event in queue for next iteration
