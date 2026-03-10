@@ -27,6 +27,7 @@
 #include "utils/uart_utils.h"  // Non-blocking UART utilities
 #include "utils/utils.h"       // For UTILS_InitAxisConfig
 #include "motion.h"
+#include "gcode/gcode_parser.h"  // For GCODE_LoadStartupLines
 #include "motion/tmc5160.h"    // TMC5160 SPI stepper driver
 
 // *****************************************************************************
@@ -154,6 +155,7 @@ void APP_Initialize ( void )
     
     // ✅ Initialize alarm state
     appData.alarmCode = 0;             // No alarm
+    appData.machine_homed = false;     // Not homed; soft limits inactive until $H completes
     
     appData.dominantAxis = AXIS_X;             // Default dominant axis
     appData.currentSegment = NULL;             // No active segment
@@ -272,6 +274,10 @@ void APP_Tasks ( void )
             // ✅ CRITICAL: Reload stepper invert masks ($0-$5) after settings loaded from flash
             // This ensures direction_invert_mask, step_pulse_invert_mask, enable_invert are current
             STEPPER_ReloadSettings();
+
+            // Load startup lines ($N0/$N1) from flash settings into the parser.
+            // These will be auto-injected the next time GCODE_Tasks() runs.
+            GCODE_LoadStartupLines(settings->startup_line[0], settings->startup_line[1]);
 
 #ifdef HAS_TMC5160_AXIS
             // ✅ Re-apply TMC5160 driver config from flash-loaded settings

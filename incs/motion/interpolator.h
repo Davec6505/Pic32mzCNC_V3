@@ -74,6 +74,13 @@ void INTERPOLATOR_LoadMove(const SCurveMove *move);
 // Clears step pins, stops TMR4.
 void INTERPOLATOR_Stop(void);
 
+// Smoothly decelerate to zero then stop (feed hold with controlled stop).
+// Uses the current move's acceleration to compute decel rate.
+// ISR continues running and ramps velocity to zero before stopping TMR4.
+// MOTION_Tasks must poll g_feed_hold_pending to detect completion via
+// STEPPER_FinalizeHold() (same path as hard stop).
+void INTERPOLATOR_SoftStop(void);
+
 // Resume after feed hold.  Reloads the same move from where it paused.
 // (Simple re-load; full feed-hold position restore is a Phase-2 feature.)
 void INTERPOLATOR_Resume(void);

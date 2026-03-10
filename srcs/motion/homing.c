@@ -188,6 +188,8 @@ HomingState HOMING_Tasks(APP_DATA* appData) {
                 HOMING_StartSeek(appData);
             } else {
                 g_homing.state = HOMING_STATE_IDLE;
+                // All axes homed — mark machine as homed so soft limits are enforced
+                appData->machine_homed = true;
                 // Reset GRBL planner state so the first G-code move after homing
                 // doesn't inherit the homing segment's unit vector as its junction.
                 KINEMATICS_ResetPlannerState();

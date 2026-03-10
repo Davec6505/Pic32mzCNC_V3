@@ -28,6 +28,10 @@ static struct {
     uint16_t current_pwm_duty;   // Current PWM duty cycle (0-PR6)
 } spindle_state = {0};
 
+// Override state — kept separate from spindle_state so commanded RPM is preserved
+static uint32_t s_commanded_rpm       = 0;    // Last RPM set by G-code (M3 Sxxx)
+static uint8_t  s_spindle_override_pct = 100; // 100 = nominal (10-200 valid range)
+
 // =============================================================================
 // PWM FREQUENCY CALCULATION (Based on Your Hardware Setup)
 // =============================================================================
@@ -71,10 +75,14 @@ void SPINDLE_Initialize(void) {
 // =============================================================================
 
 void SPINDLE_SetSpeed(uint32_t rpm) {
-    spindle_state.current_rpm = rpm;
+    s_commanded_rpm = rpm;  // preserve commanded RPM for override re-application
+
+    // Apply current override: effective = commanded * override_pct / 100
+    uint32_t effective_rpm = (uint32_t)((float)rpm * (float)s_spindle_override_pct / 100.0f);
+    spindle_state.current_rpm = effective_rpm;
     
     // Convert RPM to PWM duty cycle
-    uint16_t duty_cycle = SPINDLE_RPMToPWMDuty(rpm);
+    uint16_t duty_cycle = SPINDLE_RPMToPWMDuty(effective_rpm);
     spindle_state.current_pwm_duty = duty_cycle;
     
     // Update hardware PWM duty cycle
@@ -161,6 +169,30 @@ uint32_t SPINDLE_PWMDutyToRPM(uint16_t duty) {
     uint32_t rpm = (uint32_t)settings->spindle_min_rpm + ((uint32_t)duty * rpm_range) / PWM_PERIOD_TICKS;
     
     return rpm;
+}
+
+// =============================================================================
+// SPINDLE OVERRIDE API (GRBL real-time bytes 0x99-0x9D)
+// =============================================================================
+
+void SPINDLE_SetOverridePct(uint8_t pct) {
+    // Clamp to [10, 200] percent
+    if (pct < 10u)  pct = 10u;
+    if (pct > 200u) pct = 200u;
+    s_spindle_override_pct = pct;
+    // Re-apply to hardware immediately if spindle is running
+    if (spindle_state.is_running && s_commanded_rpm > 0u) {
+        uint32_t effective_rpm = (uint32_t)((float)s_commanded_rpm *
+                                             (float)s_spindle_override_pct / 100.0f);
+        spindle_state.current_rpm = effective_rpm;
+        uint16_t duty = SPINDLE_RPMToPWMDuty(effective_rpm);
+        spindle_state.current_pwm_duty = duty;
+        OCMP8_CompareSecondaryValueSet(duty);
+    }
+}
+
+uint8_t SPINDLE_GetOverridePct(void) {
+    return s_spindle_override_pct;
 }
 
 // =============================================================================

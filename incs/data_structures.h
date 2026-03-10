@@ -277,6 +277,10 @@ typedef struct {
     bool probeSuccess;               // true if probe triggered, false if missed
     bool probeAlarmOnFail;           // true for G38.2/G38.4, false for G38.3/G38.5
     CoordinatePoint probePosition;   // Position where probe triggered
+
+    // Homed state — set true when $H completes successfully, false on reset
+    // Used to gate soft limits (soft limits only enforced when machine is homed)
+    bool machine_homed;
 } APP_DATA;
 
 #endif // DATA_STRUCTURES_H

@@ -29,6 +29,11 @@ bool MOTION_HomingMove(APP_DATA* appData, CoordinatePoint start,
 // queue so the next queued move starts from the correct machine position.
 void MOTION_SyncPlannedPosition(void);
 
+// Rapid override (GRBL real-time bytes 0x95-0x97)
+// pct: 100, 50, or 25 (clamped to those three values)
+void MOTION_SetRapidOverridePct(uint8_t pct);
+uint8_t MOTION_GetRapidOverridePct(void);
+
 // Returns true while a G4 dwell is in progress (phase 1 drain OR phase 2 timer).
 // Used by flow control to suppress deferred-ok release during the dwell so UGS
 // does not think the file is complete while commands are still queued.
