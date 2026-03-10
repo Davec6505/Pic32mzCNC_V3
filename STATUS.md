@@ -2,7 +2,35 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 9, 2026
+**Last Updated**: March 2026
+
+---
+
+## ✅ FEATURE IMPLEMENTATION: Real-time overrides, smooth feed hold, soft-limit gate, startup lines (March 2026)
+
+### Feature A — Real-time overrides (GRBL v1.1 bytes 0x90–0x9D)
+- `incs/motion/interpolator.h` — Added `INTERPOLATOR_SoftStop(void)` declaration
+- `incs/motion/spindle.h` — Added `SPINDLE_SetOverridePct(uint8_t pct)` and `SPINDLE_GetOverridePct(void)`
+- `incs/motion/motion.h` — Added `MOTION_SetRapidOverridePct(uint8_t)` and `MOTION_GetRapidOverridePct(void)`
+- `srcs/motion/spindle.c` — Added `s_commanded_rpm`, `s_spindle_override_pct` statics; modified `SPINDLE_SetSpeed()` to apply override; added `SPINDLE_SetOverridePct()` and `SPINDLE_GetOverridePct()`
+- `srcs/motion/motion_bridge.c` — Added `s_rapid_override_pct` static + `MOTION_SetRapidOverridePct()` / `MOTION_GetRapidOverridePct()`; applied rapid override in G0 feedrate calc
+- `srcs/gcode/gcode_parser.c` — `is_control_char()`: expanded to full 0x90–0x9D range; `service_realtime_byte()`: wired all override bytes 0x90–0x9D; `?` status: added `|Ov:feed,rapid,spindle` field; added `#include "motion/spindle.h"`
+
+### Feature B — Smooth deceleration feed hold (`!` command)
+- `srcs/motion/interpolator.c` — Added `hold_decel_active`, `hold_decel_ticks`, `hold_decel_v_start`, `hold_decel_rate` statics; `INTERPOLATOR_Tick()` ISR: inserted decel ramp path before `feed_hold` gate; added `INTERPOLATOR_SoftStop()` implementation; `INTERPOLATOR_Stop()`: clears `hold_decel_active`; `INTERPOLATOR_Resume()`: clears `hold_decel_active`
+- `srcs/motion/motion_bridge.c` — `STEPPER_PauseMotion()`: calls `INTERPOLATOR_SoftStop()` instead of `INTERPOLATOR_Stop()`; `MOTION_Tasks()`: calls `STEPPER_FinalizeHold()` when `g_feed_hold_pending && !INTERPOLATOR_IsActive()`
+
+### Feature C — Soft limits homed gate (only enforce after `$H`)
+- `incs/data_structures.h` — Added `bool machine_homed;` to `APP_DATA`
+- `srcs/motion/homing.c` — `HOMING_STATE_COMPLETE`: sets `appData->machine_homed = true` when all axes done
+- `srcs/app.c` — `APP_Initialize()`: initialises `appData.machine_homed = false`
+- `srcs/motion/motion_bridge.c` — Soft limit check gate changed from `if (s->soft_limits_enable)` to `if (s->soft_limits_enable && appData->machine_homed)`; alarm now uses `UART_SendAlarm(2)` (not direct `UART_Printf`)
+
+### Feature D — Startup line persistence + boot execution ($N0/$N1)
+- `incs/settings/settings.h` — Added `char startup_line[2][80]` field to `CNC_Settings` before `checksum`; bumped `SETTINGS_VERSION` from 5→6 (TMC) and 4→5 (DRV)
+- `incs/gcode/gcode_parser.h` — Added `void GCODE_LoadStartupLines(const char* l0, const char* l1)`
+- `srcs/gcode/gcode_parser.c` — Added `s_boot_inject_idx` static; `$N0/$N1` write handler now persists to `settings->startup_line[]` via `SETTINGS_SaveToFlash()`; added `GCODE_LoadStartupLines()` function; added boot injection at start of `GCODE_STATE_IDLE`
+- `srcs/app.c` — `APP_LOAD_SETTINGS` state: calls `GCODE_LoadStartupLines(settings->startup_line[0], settings->startup_line[1])` after `STEPPER_ReloadSettings()`; added `#include "gcode/gcode_parser.h"`
 
 ---
 

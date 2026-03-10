@@ -16,4 +16,9 @@ bool SPINDLE_IsRunning(void);
 uint16_t SPINDLE_RPMToPWMDuty(uint32_t rpm);
 uint32_t SPINDLE_PWMDutyToRPM(uint16_t duty);
 
+// Spindle speed override (GRBL real-time override bytes 0x99-0x9D)
+// pct: percentage 10-200 (100 = nominal speed)
+void SPINDLE_SetOverridePct(uint8_t pct);
+uint8_t SPINDLE_GetOverridePct(void);
+
 #endif // SPINDLE_H

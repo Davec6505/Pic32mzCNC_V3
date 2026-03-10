@@ -86,6 +86,9 @@ typedef struct {
     uint32_t tmc_tcoolthrs[4];   // $250-$253: CoolStep lower velocity threshold
 #endif
 
+    // Startup lines ($N0 / $N1) — executed at boot after settings load
+    char startup_line[2][80];
+
     // CRC32 checksum (for validation)
     uint32_t checksum;
 } CNC_Settings;
@@ -98,9 +101,9 @@ typedef struct {
 // only when the struct actually changes — otherwise existing flash settings
 // (written as version 2 with DRV8825-only builds) remain valid.
 #ifdef HAS_TMC5160_AXIS
-#define SETTINGS_VERSION   5  // v5: added $6/$10/$13/$20/$32 GRBL params (TMC5160 build)
+#define SETTINGS_VERSION   6  // v6: added startup_line[2][80] field (TMC5160 build)
 #else
-#define SETTINGS_VERSION   4  // v4: added $6/$10/$13/$20/$32 GRBL params (DRV8825-only build)
+#define SETTINGS_VERSION   5  // v5: added startup_line[2][80] field (DRV8825-only build)
 #endif
 
 // ✅ CRITICAL: Safe NVM storage location based on MikroE bootloader

@@ -29,6 +29,10 @@ typedef struct{
     GCODE_State state;
 } GCODE_Data;
 
+/* Load startup lines ($N0/$N1) from settings into the parser.
+   If non-empty, they will be automatically injected at next GCODE_Tasks call. */
+void GCODE_LoadStartupLines(const char* l0, const char* l1);
+
 /* G-code Event System - Clean interface without APP_DATA exposure */
 typedef enum {
     GCODE_EVENT_NONE,

@@ -91,6 +91,12 @@ static volatile bool      interp_active  = false; // ISR is running
 static volatile bool      move_complete  = false; // move finished flag
 static volatile bool      feed_hold      = false; // pause without losing state
 
+// Soft-stop (smooth decel feed hold) state
+static volatile bool      hold_decel_active = false; // decel ramp in progress
+static volatile uint32_t  hold_decel_ticks  = 0;     // ticks since decel armed
+static          float     hold_decel_v_start = 0.0f; // velocity at decel start
+static          float     hold_decel_rate    = 0.0f; // decel rate (mm/s²)
+
 // Step-accuracy tracking: pre-computed expected steps vs steps actually fired.
 // On the final tick any shortfall is force-emitted so position is exact.
 static volatile int32_t   expected_steps[NUM_AXIS]; // total steps this move (signed)
@@ -129,6 +135,49 @@ static void INTERPOLATOR_Tick(uint32_t status, uintptr_t context)
     (void)context;
 
     if (feed_hold) return;           // paused — do nothing
+
+    // ── Soft-stop deceleration ramp ──────────────────────────────────────────────
+    // Runs AFTER the feed_hold gate so a hard-Stop always wins.
+    if (hold_decel_active) {
+        // 1. Clear step pins from previous tick
+        for (int i = 0; i < NUM_AXIS; i++) AXIS_StepClear((E_AXIS)i);
+
+        hold_decel_ticks++;
+        float elapsed_s = (float)hold_decel_ticks / (float)INTERPOLATOR_TICK_RATE_HZ;
+        float v_now = hold_decel_v_start - hold_decel_rate * elapsed_s;
+
+        if (v_now <= 0.0f) {
+            // Deceleration complete — fully stop
+            hold_decel_active = false;
+            feed_hold         = true;
+            interp_active     = false;
+            TMR4_Stop();
+            return;
+        }
+
+        // 2. Compute DDS increments for decelerating velocity
+        for (int i = 0; i < NUM_AXIS; i++) {
+            float inc_f = v_now * fabsf(active_move.unit_vec[i]) * axis_scale[i];
+            dds_inc[i] = (int32_t)(inc_f + 0.5f);
+        }
+
+        // 3. DDS accumulate + step fire
+        for (int i = 0; i < NUM_AXIS; i++) {
+            dds_acc[i] += dds_inc[i];
+            if (dds_acc[i] >= DDS_SCALE) {
+                dds_acc[i] -= DDS_SCALE;
+                AXIS_StepSet((E_AXIS)i);
+                if (dds_dir[i] >= 0) {
+                    AXIS_IncrementSteps((E_AXIS)i);
+                    steps_fired[i]++;
+                } else {
+                    AXIS_DecrementSteps((E_AXIS)i);
+                    steps_fired[i]--;
+                }
+            }
+        }
+        return; // skip normal ISR path
+    }
 
     // 1.  Clear step pins from previous tick (step pulse already ≥ 10 µs wide)
     for (int i = 0; i < NUM_AXIS; i++) {
@@ -283,13 +332,38 @@ void INTERPOLATOR_LoadMove(const SCurveMove *move)
 void INTERPOLATOR_Stop(void)
 {
     feed_hold = true;     // ISR will see this on next tick and do nothing
+    hold_decel_active = false; // cancel any in-progress soft decel
     // Optionally stop the timer to save power; re-enable on Resume
     TMR4_Stop();
     interp_active = false;
 }
 
+void INTERPOLATOR_SoftStop(void)
+{
+    if (!interp_active) {
+        // Already idle — just set hard hold
+        feed_hold = true;
+        return;
+    }
+    float v = INTERPOLATOR_GetInstantVelocity();
+    if (v < 0.5f) {
+        // Already nearly stopped — hard stop
+        INTERPOLATOR_Stop();
+        return;
+    }
+    // Arm deceleration — ISR takes over and ramps velocity to zero
+    hold_decel_v_start = v;
+    hold_decel_rate    = (active_move.acceleration > 0.0f)
+                             ? active_move.acceleration
+                             : 1000.0f;  // fallback: 1000 mm/s²
+    hold_decel_ticks   = 0;
+    hold_decel_active  = true;
+    // TMR4 keeps running — ISR handles step firing and final stop
+}
+
 void INTERPOLATOR_Resume(void)
 {
+    hold_decel_active = false; // cancel any pending soft decel
     if (ticks_remaining > 0u) {
         feed_hold     = false;
         interp_active = true;

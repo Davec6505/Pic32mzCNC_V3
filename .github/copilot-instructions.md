@@ -1,5 +1,24 @@
 # GitHub Copilot Instructions for Pic32mzCNC_V3
 
+## 🔴 CRITICAL: Git — Use Raw Git Commands Only
+
+**ALWAYS use raw `git` commands in the terminal. NEVER use GitKraken, GitHub Desktop, or any other GUI git tool.**
+
+```powershell
+# CORRECT — always run from repo root
+git status
+git add <files>
+git commit -m "message"
+git push origin <branch>
+git checkout <branch>
+git merge <branch> --no-ff -m "message"
+git log --oneline -10
+```
+
+This applies to ALL git operations: commits, merges, pushes, branch creation, rebases, log inspection — everything.
+
+---
+
 ## 🔴 CRITICAL: PCB Hardware Constraints — READ BEFORE EDITING GPIO CODE
 
 ### Stepper Enable Pin
@@ -2333,28 +2352,20 @@ hardware-validated and committed to master.
 
 ---
 
-### Phase 1 — Probing (G38.x) ✅ Stub exists — IMPLEMENT NEXT
+### Phase 1 — Probing (G38.x) ✅ CODE COMPLETE — pending hardware test
 
-**Goal**: Reliable tool/workpiece contact detection via a probe input pin.
+**Status**: Fully implemented in code. Pending validation on real hardware (probe pin/switch).
 
-**Scope**:
-- G38.2 (probe toward, error on no contact)
-- G38.3 (probe toward, no error)
-- G38.4 (probe away, error on contact)
-- G38.5 (probe away, no error)
-- `PRB:` coordinate report in `$#` response
-- `GCODE_EVENT_PROBE_TOWARD` / `GCODE_EVENT_PROBE_AWAY` events already exist in `gcode_parser.h`
+**What is implemented**:
+- G38.2/3/4/5 fully parsed in `gcode_parser.c` (subcode, toward/away, alarm_on_fail flags, all axis params)
+- `GCODE_EVENT_PROBE_TOWARD` / `GCODE_EVENT_PROBE_AWAY` dispatched inline via `motion_bridge.c`
+- `motion_bridge.c` arms `PROBE_STATE_MOVING`, queues trajectory move to probe target at probe feedrate
+- `app.c` APP_IDLE monitors `PROBE_Get()` every iteration; on trigger: stops interpolator, latches `probePosition`
+- Sends `[PRB:x,y,z,a:1]` on success; `[PRB:x,y,z,a:0]` + `ALARM:5` on G38.2/G38.4 failure
+- `$#` handler reports last `[PRB:x,y,z:n]` result
+- Probe pin: Z-Max (RE1) with `$6` inversion support
 
-**Architecture**:
-- Probe pin sampled in main loop (not ISR) — checked every MOTION_Tasks() iteration
-- On contact: call `STEPPER_StopMotion()` (flushes TRAJECTORY + stops INTERPOLATOR), latch MPos
-- Store probe position in `CNC_Settings` probe_position[3] (persist to NVM)
-- `$#` handler prints `[PRB:x,y,z:1]` (contacted) or `[PRB:x,y,z:0]` (not contacted)
-- No encoder feedback at this phase — open-loop position at contact moment
-
-**Key files**: `srcs/gcode/gcode_parser.c`, `srcs/motion/motion_bridge.c`, `srcs/settings/settings.c`
-
-**Do NOT**: Use probe in ISR, block the main loop, or modify the GRBL parser.
+**Key files**: `srcs/gcode/gcode_parser.c:501`, `srcs/motion/motion_bridge.c:883`, `srcs/app.c:360`
 
 ---
 
@@ -2474,7 +2485,7 @@ hardware-validated and committed to master.
 | Phase | Feature                        | Status      | Branch (planned)    |
 |-------|--------------------------------|-------------|---------------------|
 | 0     | S-curve engine + arc + homing  | ✅ Complete  | `scurve_motion`     |
-| 1     | Probing (G38.x)                | 🔲 Next     | `probing`           |
+| 1     | Probing (G38.x)                | ✅ Code done — hw test pending | `scurve_motion` |
 | 2     | Tool length offsets (G43/G49)  | 🔲 Pending  | `tool_offsets`      |
 | 3     | Multi WCS (G54–G59)            | 🔲 Pending  | `multi_wcs`         |
 | 4     | Rigid tapping / canned cycles  | 🔲 Pending  | `canned_cycles`     |

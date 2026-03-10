@@ -54,6 +54,21 @@ volatile bool g_feed_hold_pending   = false;
 
 static StepperPosition s_stepper_pos;
 
+// Rapid override percentage (GRBL real-time bytes 0x95–0x97)
+// Only 100/50/25 values are valid per GRBL spec (clamped in setter).
+static uint8_t s_rapid_override_pct = 100;
+
+void MOTION_SetRapidOverridePct(uint8_t pct) {
+    // GRBL spec supports only 100%, 50%, 25%
+    if      (pct >= 75u) s_rapid_override_pct = 100u;
+    else if (pct >= 37u) s_rapid_override_pct = 50u;
+    else                 s_rapid_override_pct = 25u;
+}
+
+uint8_t MOTION_GetRapidOverridePct(void) {
+    return s_rapid_override_pct;
+}
+
 // ─── Modal state ─────────────────────────────────────────────────────────────
 // Remembers the last programmed feedrate across G-code lines (F-word is modal).
 static float s_modal_feedrate_mm_min = 0.0f;
@@ -192,9 +207,8 @@ void STEPPER_PauseMotion(void)
         g_feed_hold_active  = true;
     } else {
         g_feed_hold_pending = true;
-        INTERPOLATOR_Stop();
-        g_feed_hold_pending = false;
-        g_feed_hold_active  = true;
+        INTERPOLATOR_SoftStop();
+        // g_feed_hold_active is finalized by MOTION_Tasks when decel completes
     }
 }
 
@@ -291,6 +305,13 @@ void MOTION_Tasks(APP_DATA *appData)
 
     // Feed-hold gating
     if (g_feed_hold_active) return;
+
+    // Finalize hold when soft-stop decel has completed.
+    // hold_decel_active cleared by ISR; g_feed_hold_pending still set.
+    if (g_feed_hold_pending && !INTERPOLATOR_IsActive()) {
+        STEPPER_FinalizeHold();
+        return;
+    }
 
     // If interpolator just finished a move, pop the next one and signal
     // app.c so it triggers GCODE_CheckDeferredOk() immediately.
@@ -522,15 +543,15 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             // Convert work-space end to machine space
             CoordinatePoint end = KINEMATICS_WorkToMachine(end_work);
 
-            // Soft limit check: if enabled, verify target machine position is within travel
-            // Machine coordinates: 0 = home, max_travel = far end.
-            if (s->soft_limits_enable) {
+            // Soft limit check: if enabled AND machine is homed, verify target machine
+            // position is within travel. Not enforced before homing to prevent false alarms.
+            if (s->soft_limits_enable && appData->machine_homed) {
                 for (int axis = 0; axis < NUM_AXIS; axis++) {
                     float pos    = end.coordinate[axis];
                     float travel = s->max_travel[axis];
                     if (travel <= 0.0f) continue;  // skip unconfigured / rotary axes
                     if (pos < -0.001f || pos > travel + 0.001f) {
-                        UART_Printf("ALARM:2\r\n");   // Soft limit exceeded
+                        UART_SendAlarm(2);   // Soft limit exceeded
                         STEPPER_StopMotion();
                         appData->state   = APP_ALARM;
                         appData->alarmCode = 2;
@@ -556,6 +577,9 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
                     }
                 }
                 if (fr > 1e29f) fr = s->max_rate[0];  // no axis moved — fallback
+                // Apply rapid override (100/50/25%)
+                fr = fr * (float)s_rapid_override_pct / 100.0f;
+                if (fr < 1.0f) fr = 1.0f;
             }
 
             // Add to trajectory queue; Recalculate blends junction speeds.

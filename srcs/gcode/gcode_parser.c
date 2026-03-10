@@ -29,6 +29,7 @@
 #include "settings.h"
 #include "data_structures.h"
 #include "utils/uart_utils.h"
+#include "motion/spindle.h"   // For spindle override API (SPINDLE_SetOverridePct etc.)
 #ifdef HAS_TMC5160_AXIS
 #include "motion/tmc5160.h"   // For TMC5160_ApplySettings()
 #endif
@@ -105,6 +106,7 @@ static uint8_t  s_rxPushback     = 0;
 static bool     s_rxHasPushback  = false;
 // g_feed_hold_active is in stepper.h (defined in stepper.c) — global, gated in app.c APP_IDLE
 static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
+static int  s_boot_inject_idx = -1; /* -1 = idle; 0/1 = injecting line[0/1] */
 static bool unitsInches  = false;           /* false=mm (G21), true=inches (G20) */
 static bool s_canned_g98 = true;            /* true=G98 (return initial Z), false=G99 (return R) */
 
@@ -121,7 +123,8 @@ static bool s_canned_g98 = true;            /* true=G98 (return initial Z), fals
 // 0x13 = DC3/XOFF (flow control - ignored)
 static inline bool is_control_char(uint8_t c){ 
     return (c == '?' || c == '~' || c == '!' || c == 0x18 || c == 0x85 ||
-            c == 0x95 || c == 0x90 || c == 0x99 || c == 0x11 || c == 0x13); 
+            (c >= 0x90u && c <= 0x9Du) ||
+            c == 0x11 || c == 0x13); 
 }
 GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t length, GCODE_CommandQueue* commandQueue);
 
@@ -246,6 +249,22 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
 /* -------------------------------------------------------------------------- */
 /* USART Initialization                                                       */
 /* -------------------------------------------------------------------------- */
+void GCODE_LoadStartupLines(const char* l0, const char* l1)
+{
+    if (l0 != NULL) {
+        strncpy(startupLines[0], l0, GCODE_BUFFER_SIZE - 1);
+        startupLines[0][GCODE_BUFFER_SIZE - 1] = '\0';
+    }
+    if (l1 != NULL) {
+        strncpy(startupLines[1], l1, GCODE_BUFFER_SIZE - 1);
+        startupLines[1][GCODE_BUFFER_SIZE - 1] = '\0';
+    }
+    // Arm boot injection if any line is non-empty
+    if (startupLines[0][0] != '\0' || startupLines[1][0] != '\0') {
+        s_boot_inject_idx = 0;
+    }
+}
+
 void GCODE_USART_Initialize(uint32_t RD_thresholds)
 {
     (void)RD_thresholds;
@@ -953,13 +972,18 @@ static void service_realtime_byte(APP_DATA* appData, uint8_t c)
             }
             uint32_t feed_display    = (uint32_t)(feedrate_mm_min + 0.5f);
             uint32_t spindle_display = appData->modalSpindleRPM;
+            int ov_feed    = (int)(INTERPOLATOR_GetFeedOverride() * 100.0f + 0.5f);
+            int ov_rapid   = (int)MOTION_GetRapidOverridePct();
+            int ov_spindle = (int)SPINDLE_GetOverridePct();
+            char ov_buf[24];
+            snprintf(ov_buf, sizeof(ov_buf), "|Ov:%d,%d,%d", ov_feed, ov_rapid, ov_spindle);
             uint32_t response_len = (uint32_t)snprintf((char*)txBuffer, sizeof(txBuffer),
                 "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%lu,%lu%s%s>\r\n",
                 state,
                 mpos[AXIS_X], mpos[AXIS_Y], mpos[AXIS_Z],
                 wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
                 (unsigned long)feed_display, (unsigned long)spindle_display,
-                grblCheckMode ? "|Cm:1" : "", "");
+                grblCheckMode ? "|Cm:1" : "", ov_buf);
             UART3_Write(txBuffer, response_len);
             break;
         }
@@ -978,8 +1002,24 @@ static void service_realtime_byte(APP_DATA* appData, uint8_t c)
         case 0x85:
             MOTION_JogCancel();
             break;
+        /* ── Feed rate overrides (GRBL v1.1 real-time bytes 0x90–0x94) ── */
+        case 0x90: INTERPOLATOR_SetFeedOverride(1.0f); break;  /* Feed Reset 100% */
+        case 0x91: INTERPOLATOR_SetFeedOverride(INTERPOLATOR_GetFeedOverride() + 0.10f); break; /* Feed +10% */
+        case 0x92: INTERPOLATOR_SetFeedOverride(INTERPOLATOR_GetFeedOverride() - 0.10f); break; /* Feed -10% */
+        case 0x93: INTERPOLATOR_SetFeedOverride(INTERPOLATOR_GetFeedOverride() + 0.01f); break; /* Feed +1% */
+        case 0x94: INTERPOLATOR_SetFeedOverride(INTERPOLATOR_GetFeedOverride() - 0.01f); break; /* Feed -1% */
+        /* ── Rapid overrides (0x95–0x97) ── */
+        case 0x95: MOTION_SetRapidOverridePct(100u); break;  /* Rapid Reset 100% */
+        case 0x96: MOTION_SetRapidOverridePct(50u);  break;  /* Rapid 50% */
+        case 0x97: MOTION_SetRapidOverridePct(25u);  break;  /* Rapid 25% */
+        /* ── Spindle overrides (0x99–0x9D) ── */
+        case 0x99: SPINDLE_SetOverridePct(100u); break;  /* Spindle Reset 100% */
+        case 0x9A: SPINDLE_SetOverridePct((uint8_t)(SPINDLE_GetOverridePct() + 10u)); break; /* Spindle +10% */
+        case 0x9B: { int _s = (int)SPINDLE_GetOverridePct() - 10; SPINDLE_SetOverridePct((uint8_t)(_s > 0 ? _s : 0)); break; } /* Spindle -10% */
+        case 0x9C: SPINDLE_SetOverridePct((uint8_t)(SPINDLE_GetOverridePct() + 1u)); break;  /* Spindle +1% */
+        case 0x9D: { int _s = (int)SPINDLE_GetOverridePct() - 1;  SPINDLE_SetOverridePct((uint8_t)(_s > 0 ? _s : 0)); break; } /* Spindle -1% */
         default:
-            /* Override bytes (0x90-0x99), XON/XOFF — silently ignore */
+            /* XON/XOFF and any other unrecognised bytes — silently ignore */
             break;
     }
 }
@@ -1126,6 +1166,27 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
     switch (gcodeData.state)
     {
     case GCODE_STATE_IDLE:
+        // Boot startup line injection: auto-execute $N0/$N1 after settings load.
+        // Each call injects one line (if any remain) when the RX buffer is empty.
+        if (s_boot_inject_idx >= 0 && nBytesRead == 0 && !s_rxHasPushback) {
+            const char* sl = NULL;
+            while (s_boot_inject_idx < 2) {
+                if (startupLines[s_boot_inject_idx][0] != '\0') {
+                    sl = startupLines[s_boot_inject_idx++];
+                    break;
+                }
+                s_boot_inject_idx++;
+            }
+            if (sl == NULL) {
+                s_boot_inject_idx = -1;  // All done
+            } else {
+                size_t slen = strnlen(sl, GCODE_BUFFER_SIZE - 1u);
+                memcpy(rxBuffer, sl, slen);
+                rxBuffer[slen]     = '\n';
+                nBytesRead         = (uint32_t)(slen + 1u);
+                rxBuffer[nBytesRead] = '\0';
+            }
+        }
         // Inject any pushed-back byte first (from the GCODE_COMMAND drain loop).
         if (s_rxHasPushback && nBytesRead < sizeof(rxBuffer) - 1U) {
             rxBuffer[nBytesRead++] = s_rxPushback;
@@ -1308,6 +1369,12 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     if (ch >= 32 && ch <= 126) startupLines[idx][w++] = (char)ch;
                 }
                 startupLines[idx][w] = '\0';
+                // Persist to NVM so startup line survives power cycle
+                CNC_Settings* s_nvs = SETTINGS_GetCurrent();
+                strncpy(s_nvs->startup_line[idx], startupLines[idx],
+                        sizeof(s_nvs->startup_line[idx]) - 1u);
+                s_nvs->startup_line[idx][sizeof(s_nvs->startup_line[idx]) - 1u] = '\0';
+                SETTINGS_SaveToFlash(s_nvs);
                 handled = true;
             } else {
                 UART3_Write((uint8_t*)"error:4\r\n", 10);
