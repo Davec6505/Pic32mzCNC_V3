@@ -2,9 +2,52 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 2026
+**Last Updated**: March 12, 2026
 
 ---
+
+## ✅ FIX: UART3 RX ring overflow — silent G-code data loss in UGS pipeline mode (March 12, 2026)
+
+**Root cause**: `UART_RX_CMD_MAX_BYTES` was `64u` — the minimum free-space threshold before sending
+"ok". UGS uses a 128-byte sliding pipeline window: each "ok" grants UGS permission to send up to
+128 bytes immediately. With only 64 bytes free in the ring, a full 128-byte UGS burst overflows
+the ring by 64 bytes. Those bytes are silently dropped by the Harmony UART3 ring-buffer ISR.
+The parser then receives a truncated G-code line (e.g. `G3 X30 Y50 I-2` with no `\n`), cannot
+find a terminator, and stalls — waiting forever for bytes that were already lost.
+
+This was the true cause of the arc streaming stall in `07_complex_long_run_fast.gcode` Section 6:
+the arc commands (~20 bytes each) arrived in batches; overflow corrupted the 4th or 5th arc line;
+the parser hung; UGS hit its window limit and froze.
+
+**Fix**:
+- `incs/utils/uart_utils.h:108` — `UART_RX_CMD_MAX_BYTES` changed from `64u` → `128u`
+- `srcs/gcode/gcode_parser.c` — updated comment in `SendOrDeferOk()` to explain the 8×128 model
+
+**Model**: Ring = 1024 bytes, UGS window = 128 bytes → 8 full bursts fit.
+We send oks freely (up to 7 bursts buffered = 896 bytes), then hold when free < 128.
+UGS stops. Ring drains ≥128 bytes. Ok sent. UGS sends 128. Cycle repeats.
+Ring never overflows. No silent data loss.
+
+---
+
+## ✅ COMPLETE: UART TX instrumentation for missing `ok` diagnosis (March 10, 2026)
+
+- `incs/utils/uart_utils.h` - Added `UART_TxStats`, `UART_ResetTxStats()`, `UART_GetTxStats()`, and `UART_WriteStatusReport()` declarations for TX-side instrumentation
+- `srcs/utils/uart_utils.c` - `UART_Initialize()` now resets TX stats; `UART_SendOK()` now succeeds only when all 4 bytes are enqueued and records ok counters; added `UART_WriteStatusReport()` and wired `UART_SendGrblStatus()` through it
+- `srcs/gcode/gcode_parser.c` - `service_realtime_byte()` status reply now uses tracked TX enqueue path; `SendOrDeferOk()` now re-defers when TX cannot enqueue `ok`; blank/comment and query-command `ok` sends now preserve missing acks instead of dropping them
+- `srcs/gcode/gcode_parser.c` - Added `$U` debug command to print UART TX counters and `$U=0` to reset them
+- `README.md` - Documented `$U` UART TX stats debug command in System Commands table
+- **Outcome**: Hardware `$U` run confirmed `OK_DROP=0`, `OK_ATT==OK_ENQ` — TX is functioning correctly; TX loss ruled out as root cause
+
+## ✅ FIX: `rxBuffer` tail destruction in pipeline mode — confirmed root cause of UGS streaming stall (March 10, 2026)
+
+**Root cause**: `GCODE_STATE_GCODE_COMMAND`, `GCODE_STATE_QUERY_CHARS`, and `GCODE_STATE_ERROR` each called `nBytesRead = 0; memset(rxBuffer, 0)` after processing only the first command. In UGS pipeline mode, `GCODE_STATE_IDLE` bulk-reads all pending UART ring bytes into `rxBuffer` each iteration, so multiple G-code lines can coexist in `rxBuffer`. The wipe silently destroyed lines 2..N with no `ok` ever sent — saturating UGS's 1024-byte character-count window and stalling the stream. Single-step mode was immune (one line per round-trip).
+
+**Fix**: Replicated the `memmove` tail-preservation pattern already present in `GCODE_STATE_IDLE` to all three broken states.
+
+- `srcs/gcode/gcode_parser.c:1779` - `GCODE_STATE_QUERY_CHARS` cleanup: replaced wipe with `memmove` tail-preserve using `skip_base = (uint32_t)len + 1u`
+- `srcs/gcode/gcode_parser.c:1857` - `GCODE_STATE_GCODE_COMMAND` cleanup: replaced wipe with `memmove` tail-preserve using `skip_base = cmd_end + 1u`
+- `srcs/gcode/gcode_parser.c:1879` - `GCODE_STATE_ERROR` cleanup: added `err_cmd_len = strlen(rxBuffer)`; replaced wipe with `memmove` tail-preserve using `skip_base = err_cmd_len + 1u`
 
 ## ✅ FEATURE IMPLEMENTATION: Real-time overrides, smooth feed hold, soft-limit gate, startup lines (March 2026)
 

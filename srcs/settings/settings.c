@@ -576,7 +576,7 @@ void SETTINGS_PrintBuildInfo(void)
 {
     // ✅ GRBL v1.1 format - UGS expects specific format!
     // Format: [VER:version] [OPT:options,blockbuffersize,rxbuffersize]
-    const char build_info[] = "[VER:1.1h.20251102]\r\n[OPT:VHM,35,1024,4]\r\nok\r\n";
+    const char build_info[] = "[VER:1.1h.20251102]\r\n[OPT:VHM,35,127,4]\r\nok\r\n";
     
     // ✅ Write to PLIB TX ring buffer - ISR transmits in background
     UART3_Write((uint8_t*)build_info, sizeof(build_info) - 1);  // -1 excludes null terminator

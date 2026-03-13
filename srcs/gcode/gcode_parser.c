@@ -920,16 +920,20 @@ static void SendOrDeferOk(APP_DATA* appData, GCODE_CommandQueue* q)
     }
 
     // Ring-buffer backpressure gate.
-    // The UART3 RX ring (1024 bytes) is the real throughput bottleneck:
-    // UGS halts when the ring is full and resumes when it empties enough.
-    // We mirror that gate: send "ok" only when the ring has room for at least
-    // one more worst-case command line (UART_RX_CMD_MAX_BYTES = 64 bytes).
-    // If not, defer — GCODE_CheckDeferredOk drains one ok per call whenever
-    // ring space opens up.
+    // UGS pipeline window = 128 bytes: each "ok" grants UGS permission to send
+    // up to 128 bytes.  Gate threshold = UART_RX_CMD_MAX_BYTES (128 bytes) so
+    // the ring can always absorb the full burst without overflow.
+    // Ring = 1024 bytes → 8 × 128-byte bursts.  We send oks freely until the
+    // ring has < 128 bytes free, then defer until space opens up again.
     if (UART3_ReadFreeBufferCountGet() >= UART_RX_CMD_MAX_BYTES) {
-        DEBUG_PRINT_GCODE("[FLOW] ok sent (ring free=%lu)\r\n",
-                          (unsigned long)UART3_ReadFreeBufferCountGet());
-        (void)UART_SendOK();
+        if (UART_SendOK()) {
+            DEBUG_PRINT_GCODE("[FLOW] ok sent (ring free=%lu)\r\n",
+                              (unsigned long)UART3_ReadFreeBufferCountGet());
+        } else {
+            DEBUG_PRINT_GCODE("[FLOW] ok deferred (tx full, rx free=%lu)\r\n",
+                              (unsigned long)UART3_ReadFreeBufferCountGet());
+            okPendingCount++;
+        }
     } else {
         DEBUG_PRINT_GCODE("[FLOW] ok deferred (ring full, free=%lu)\r\n",
                           (unsigned long)UART3_ReadFreeBufferCountGet());
@@ -984,7 +988,7 @@ static void service_realtime_byte(APP_DATA* appData, uint8_t c)
                 wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
                 (unsigned long)feed_display, (unsigned long)spindle_display,
                 grblCheckMode ? "|Cm:1" : "", ov_buf);
-            UART3_Write(txBuffer, response_len);
+            (void)UART_WriteStatusReport(txBuffer, response_len);
             break;
         }
         case '~':
@@ -1279,17 +1283,13 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     SendOrDeferOk(appData, cmdQueue);
                 } else {
                     // ✅ GRBL v1.1 behavior: Blank/comment lines get "ok" response.
-                    // CRITICAL: blank/comment lines do NOT occupy a gcode queue slot
-                    // (Extract_CommandLineFrom_Buffer is not called, q->count unchanged).
-                    // Therefore we must NEVER defer their ok via SendOrDeferOk — doing
-                    // so inflates okPendingCount independently of q->count.  When those
-                    // phantom oks later burst-release they invite UGS to send commands
-                    // that push q->count past GCODE_MAX_COMMANDS, silently dropping them.
-                    // Pure arc tests hide this because they have almost no blank lines;
-                    // mixed-content files (sections separated by comment blocks) expose it.
-                    // Solution: always send ok immediately for blank/comment lines.
+                    // These lines still consume sender credits, so if TX cannot accept
+                    // the immediate ack we must retry it later rather than silently lose it.
                     DEBUG_PRINT_GCODE("[IDLE] Blank/comment line - sending ok immediately (no queue slot)\r\n");
-                    (void)UART_SendOK();
+                    if (!UART_SendOK()) {
+                        okPendingCount++;
+                        DEBUG_PRINT_GCODE("[IDLE] Blank/comment ok deferred (tx full)\r\n");
+                    }
                 }
                 uint32_t skip_pos = terminator_pos + 1;
                 while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
@@ -1497,6 +1497,32 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             SETTINGS_PrintBuildInfo();
             handled = true;
             send_ok = false;
+        }
+        else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'U') {
+            if (len == 2) {
+                UART_TxStats stats;
+                UART_GetTxStats(&stats);
+                UART_Printf("[TX:OK_ATT=%lu,OK_ENQ=%lu,OK_DROP=%lu,LAST_OK_FREE=%lu]\r\n",
+                            (unsigned long)stats.ok_attempted,
+                            (unsigned long)stats.ok_enqueued,
+                            (unsigned long)stats.ok_dropped,
+                            (unsigned long)stats.last_ok_tx_free);
+                UART_Printf("[TX:ST_ATT=%lu,ST_ENQ=%lu,ST_DROP=%lu,LAST_ST_FREE=%lu,LAST_ST_LEN=%lu]\r\n",
+                            (unsigned long)stats.status_attempted,
+                            (unsigned long)stats.status_enqueued,
+                            (unsigned long)stats.status_dropped,
+                            (unsigned long)stats.last_status_tx_free,
+                            (unsigned long)stats.last_status_len);
+                handled = true;
+            } else if (len == 4 && cmd[2] == '=' && cmd[3] == '0') {
+                UART_ResetTxStats();
+                UART_Printf("[MSG:UART TX stats reset]\r\n");
+                handled = true;
+            } else {
+                UART3_Write((uint8_t*)"error:4\r\n", 10);
+                send_ok = false;
+                handled = true;
+            }
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'N') {
             char buf[160];
@@ -1742,13 +1768,28 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         }
 
         if (handled && send_ok) {
-            UART_SendOK();
+            if (!UART_SendOK()) {
+                okPendingCount++;
+                DEBUG_PRINT_GCODE("[QUERY] ok deferred (tx full)\r\n");
+            }
         } else if (!handled) {
             UART3_Write((uint8_t*)"error:4\r\n", 10);
         }
 
-        nBytesRead = 0;
-        memset(rxBuffer, 0, sizeof(rxBuffer));
+        {
+            uint32_t skip_pos = (uint32_t)len + 1u;
+            while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
+                skip_pos++;
+            uint32_t remaining_bytes = nBytesRead - skip_pos;
+            if (remaining_bytes > 0) {
+                memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
+                nBytesRead = remaining_bytes;
+                rxBuffer[nBytesRead] = '\0';
+            } else {
+                nBytesRead = 0;
+                memset(rxBuffer, 0, sizeof(rxBuffer));
+            }
+        }
         gcodeData.state = GCODE_STATE_IDLE;
         break;
     }
@@ -1759,8 +1800,6 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         for (uint32_t i = 0; i < nBytesRead; i++) {
             if (rxBuffer[i] == '\0') { cmd_end = i; break; }
         }
-        DEBUG_PRINT_GCODE("[GCODE_CMD] Processing command: '%s'\r\n", rxBuffer);
-
         // Inline dispatch: parse every event in this line and try to send each
         // directly to the motion bridge (trajectory).  If the bridge rejects any
         // event (arc active, trajectory full, or motion drain pending) we stay in
@@ -1771,7 +1810,6 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         // exhausted.
         bool is_probe_cmd = false;
         if (!dispatch_command_line(appData, rxBuffer, cmd_end, &is_probe_cmd)) {
-            DEBUG_PRINT_GCODE("[GCODE_CMD] Motion blocked — holding for retry\r\n");
             // Drain real-time control bytes (primarily '?') from the ring ONLY on the
             // first retry iteration (when the pushback slot is empty).  In pipelined
             // mode UGS has already sent the next G-code commands into the ring; each
@@ -1807,14 +1845,29 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 
         // All events dispatched — send ok (probe commands own their ok via app.c)
         if (!is_probe_cmd) {
-            DEBUG_PRINT_GCODE("[GCODE_CMD] Normal flow control\r\n");
+            DEBUG_PRINT_GCODE("[CMD_OK] dispatched '%s' arcState=%d ringFree=%lu okPend=%lu\r\n",
+                rxBuffer, (int)appData->arcGenState,
+                (unsigned long)UART3_ReadFreeBufferCountGet(),
+                (unsigned long)okPendingCount);
             SendOrDeferOk(appData, cmdQueue);
         } else {
             DEBUG_PRINT_GCODE("[GCODE_CMD] Probe command — ok withheld until completion\r\n");
         }
 
-        nBytesRead = 0;
-        memset(rxBuffer, 0, sizeof(rxBuffer));
+        {
+            uint32_t skip_pos = cmd_end + 1u;
+            while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
+                skip_pos++;
+            uint32_t remaining_bytes = nBytesRead - skip_pos;
+            if (remaining_bytes > 0) {
+                memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
+                nBytesRead = remaining_bytes;
+                rxBuffer[nBytesRead] = '\0';
+            } else {
+                nBytesRead = 0;
+                memset(rxBuffer, 0, sizeof(rxBuffer));
+            }
+        }
         gcodeData.state = GCODE_STATE_IDLE;
         break;
     }
@@ -1823,8 +1876,21 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
     {
         uint32_t error_len = (uint32_t)sprintf((char*)txBuffer, "error:1\r\n");
         UART3_Write(txBuffer, error_len);
-        nBytesRead = 0;
-        memset(rxBuffer, 0, sizeof(rxBuffer));
+        {
+            uint32_t err_cmd_len = (uint32_t)strlen((char*)rxBuffer);
+            uint32_t skip_pos = err_cmd_len + 1u;
+            while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
+                skip_pos++;
+            uint32_t remaining_bytes = nBytesRead - skip_pos;
+            if (remaining_bytes > 0) {
+                memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
+                nBytesRead = remaining_bytes;
+                rxBuffer[nBytesRead] = '\0';
+            } else {
+                nBytesRead = 0;
+                memset(rxBuffer, 0, sizeof(rxBuffer));
+            }
+        }
         gcodeData.state = GCODE_STATE_IDLE;
         break;
     }

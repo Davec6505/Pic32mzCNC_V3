@@ -98,7 +98,7 @@
 // 3. G-code senders expect specific format: "Firmware_Name version ['$' for help]"
 //
 // Examples:
-// #define GRBL_FIRMWARE_VERSION "Grbl 1.1h ['$' for help]\r\n"           // Standard GRBL
+// #define GRBL_FIRMWARE_VERSION "Pic32mzCNC v1.1h ['$' for help]\r\n"           // Standard GRBL
 // #define GRBL_FIRMWARE_VERSION "Pic32mzCNC v1.2 ['$' for help]\r\n"     // Custom version
 // #define GRBL_FIRMWARE_VERSION "MyCompany CNC v2.0 ['$' for help]\r\n"  // OEM version
 

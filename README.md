@@ -244,6 +244,7 @@ Queue drained to zero
 | `$$` | Print all settings |
 | `$n=v` | Set parameter n to value v |
 | `$I` | Build info |
+| `$U` | Debug UART TX stats (`$U=0` resets counters) |
 | `$G` | Modal state |
 | `$#` | Work offsets |
 | `$H` | Home all axes |

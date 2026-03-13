@@ -21,11 +21,24 @@
 /* ========== INITIALIZATION ========== */
 
 static char buffer[512];  // Static to avoid stack overflow
+static UART_TxStats s_uart_tx_stats;
+
+void UART_ResetTxStats(void) {
+    memset(&s_uart_tx_stats, 0, sizeof(s_uart_tx_stats));
+}
+
+void UART_GetTxStats(UART_TxStats* out) {
+    if (out == NULL) {
+        return;
+    }
+    *out = s_uart_tx_stats;
+}
 
 void UART_Initialize(void) {
     // ✅ PLIB ring buffer handles TX/RX automatically via ISR
     // No callbacks needed for normal operation (1024-byte buffer is large enough)
     // For streaming large data, register callback via UART3_WriteCallbackRegister()
+    UART_ResetTxStats();
 }
 
 /* ========== FIRE-AND-FORGET OUTPUT FUNCTIONS ========== */
@@ -55,9 +68,40 @@ bool UART_Printf(const char* format, ...) {
 /* ========== GRBL PROTOCOL MESSAGE HELPERS ========== */
 
 bool UART_SendOK(void) {
-    DEBUG_PRINT_GCODE("[UART] Sending 'ok'\r\n");
-    UART3_Write((uint8_t*)"ok\r\n", 4);
-    return true;
+    size_t written;
+
+    s_uart_tx_stats.ok_attempted++;
+    s_uart_tx_stats.last_ok_tx_free = (uint32_t)UART3_WriteFreeBufferCountGet();
+
+    written = UART3_Write((uint8_t*)"ok\r\n", 4);
+    if (written == 4u) {
+        s_uart_tx_stats.ok_enqueued++;
+        return true;
+    }
+
+    s_uart_tx_stats.ok_dropped++;
+    return false;
+}
+
+bool UART_WriteStatusReport(const uint8_t* msg, size_t len) {
+    size_t written;
+
+    if (msg == NULL || len == 0u) {
+        return false;
+    }
+
+    s_uart_tx_stats.status_attempted++;
+    s_uart_tx_stats.last_status_tx_free = (uint32_t)UART3_WriteFreeBufferCountGet();
+    s_uart_tx_stats.last_status_len = (uint32_t)len;
+
+    written = UART3_Write((uint8_t*)msg, len);
+    if (written == len) {
+        s_uart_tx_stats.status_enqueued++;
+        return true;
+    }
+
+    s_uart_tx_stats.status_dropped++;
+    return false;
 }
 
 bool UART_SendGrblStatus(const char* state, 
@@ -74,7 +118,7 @@ bool UART_SendGrblStatus(const char* state,
     if (len <= 0 || len >= (int)sizeof(buffer)) {
         return false;
     }
-    return UART_Write((uint8_t*)buffer, (size_t)len);
+    return UART_WriteStatusReport((uint8_t*)buffer, (size_t)len);
 }
 
 bool UART_SendError(uint8_t error_code) {
