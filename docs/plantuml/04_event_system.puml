@@ -1,8 +1,144 @@
 @startuml event_system
-title G-Code Event System Architecture - Clean Abstraction Layer Respect
+title Motion Bridge — Event Dispatch and Trajectory Loading (scurve_motion, March 2026)
+' motion_bridge.c receives inline events from gcode_parser.c.
+' It translates every G-code event type into trajectory ring operations.
+' kinematics.c provides Work<->Machine coordinate transforms only.
+' trajectory.c owns the 64-slot S-curve planner ring + 3-pass lookahead.
+' interpolator.c is the DDS step generator; it loads ISR statics from the ring.
 !theme blueprint
 
-participant "UART2\n(G-code Input)" as UART
+participant "gcode_parser.c" as PARSER
+participant "motion_bridge.c\n(Event Handler\nArc / Canned Cycles\nProbe / Homing)" as BRIDGE
+participant "kinematics.c\n(Work↔Machine\nCoord Transforms)" as KIN
+participant "trajectory.c\n(S-curve Planner\n3-pass Lookahead\n64-slot Ring)" as TRAJ
+participant "interpolator.c\n(DDS Generator)" as INTERP
+participant "homing.c\n($H 4-phase)" as HOMING
+participant "TIMER_4_ISR\n(IPL6 Shadow Regs\nBresenham + Velocity)" as ISR
+
+== Linear / Rapid Move (G0, G1) ==
+PARSER -> BRIDGE : LINEAR_MOVE / RAPID_MOVE event
+BRIDGE -> KIN : KINEMATICS_WorkToMachine(workPos, &modal_state)
+note right of KIN
+  Applies in order:
+  1. Active WCS offset (G54–G59, index 0–5)
+  2. G92 offset
+  3. Tool Length Offset (G43 stored or G43.1 dynamic)
+  Z-axis only for TLO.
+end note
+KIN -> BRIDGE : machine-space CoordinatePoint
+BRIDGE -> TRAJ : TRAJECTORY_AddMove(start_mach, end_mach, feedrate)
+TRAJ -> TRAJ : normalise unit_vec[], limit_acceleration_by_axis(),\n  limit_rate_by_axis() (GRBL exact ports)
+TRAJ -> TRAJ : junction speed:\n  cos_theta = -dot(prev_unit_vec, curr_unit_vec)\n  sin_half  = sqrt(0.5 * (1 - cos_theta))\n  v²_junc   = accel × jdev × sin_half / (1 - sin_half)
+TRAJ -> TRAJ : Enqueue MotionSegment
+TRAJ -> TRAJ : MOTION_PlannerRecalculate() on every enqueue:\n  reverse pass + forward pass + trapezoid pass\n  (all buffered segments re-optimised as a lookahead window)
+
+== Arc Move (G2 / G3) — State Machine in motion_bridge.c ==
+PARSER -> BRIDGE : ARC_MOVE event {end, I/J/K, feedrate, is_CW, plane}
+BRIDGE -> BRIDGE : Validate radius tolerance ($13) → ALARM:5 on fail
+BRIDGE -> BRIDGE : armArcState = ARC_ACTIVE\n  centre (cx, cy) = start + (I, J)\n  start_angle, end_angle, total_angle, segments
+loop One chord per APP_Tasks() call — non-blocking
+  alt Queue not full
+    BRIDGE -> BRIDGE : theta += thetaIncrement\n  next = (cx+r·cos θ, cy+r·sin θ, linear z/a interp)\n  last segment → use exact arcEnd target
+    BRIDGE -> KIN : Work → machine transform for arc point
+    KIN -> BRIDGE : machine-space point
+    BRIDGE -> TRAJ : TRAJECTORY_AddMove(arcCurrent_mach, next_mach, feedrate)
+    TRAJ -> TRAJ : Enqueue + MOTION_PlannerRecalculate()
+  else Queue at capacity (backpressure)
+    BRIDGE -> BRIDGE : service_realtime_byte() — answer '?' queries\n  retry next APP_Tasks()
+    note right of BRIDGE
+      UGS receives live status updates during arc backpressure.
+      G-code bytes preserved via push-back slot in parser.
+    end note
+  end
+end
+
+== Dwell (G4) ==
+PARSER -> BRIDGE : DWELL event {seconds}
+BRIDGE -> TRAJ : TRAJECTORY_AddDwell(core_timer_ticks)\n  (CoreTimer = 100 MHz = CPU/2)
+TRAJ -> TRAJ : Enqueue SEGMENT_TYPE_DWELL
+note right of TRAJ
+  Dwell bypasses TMR4 step ISR entirely.
+  interpolator.c polls CoreTimer until duration elapses.
+  No step pulses generated; queue does not advance early.
+end note
+
+== Homing ($H) ==
+PARSER -> BRIDGE : HOME event {axes_mask from $22}
+BRIDGE -> INTERP : INTERPOLATOR_Stop() — flush current motion
+BRIDGE -> TRAJ : TRAJECTORY_Reset() — clear ring
+BRIDGE -> HOMING : HOMING_Start(axes_mask)
+HOMING -> HOMING : For each enabled axis:\n  Phase 1 SEEK    — move at $25 until limit triggers\n  Phase 2 BACK-OFF — brief retract so switch releases\n  Phase 3 LOCATE  — move at $24 for precise trigger\n  Phase 4 PULL-OFF — retract $27 mm; machine pos = 0
+HOMING -> BRIDGE : HOMING_COMPLETE → resume IDLE\n  ALARM:8 on homing failure\n  ALARM:9 on switch not found within max_travel
+
+== Probing (G38.x) ==
+PARSER -> BRIDGE : PROBE_TOWARD / PROBE_AWAY event\n  {direction, alarmOnFail, axes, feedrate}
+BRIDGE -> BRIDGE : armProbeState = PROBE_MOVING
+BRIDGE -> TRAJ : TRAJECTORY_AddMove(current, probe_target, probe_feedrate)
+note right of BRIDGE
+  APP_IDLE monitors PROBE_Get() (RE1 Z-Max pin, $6 inversion).
+  On trigger: INTERPOLATOR_Stop(); latch probePosition.
+  Send [PRB:x,y,z,a:1] then "ok".
+  On miss + alarmOnFail: send ALARM:5.
+end note
+
+== Canned Drilling (G81 / G83 / G80) ==
+PARSER -> BRIDGE : CANNED_DRILL or PECK_DRILL event
+BRIDGE -> BRIDGE : Canned cycle state machine:
+note right of BRIDGE
+  G81 simple drill:
+    1. Rapid to XY position
+    2. Rapid to R plane
+    3. Feed to Z depth
+    4. Retract to G98 (initial Z) or G99 (R plane)
+
+  G83 peck drill (Q increment):
+    1. Rapid to XY
+    2. Rapid to R plane
+    loop Peck
+      3. Feed Q depth
+      4. Retract to R (clear chips)
+    end
+    5. Final retract per G98/G99
+
+  G80 cancels active cycle \u2014 next X/Y/Z moves are normal.
+end note
+BRIDGE -> TRAJ : TRAJECTORY_AddMove() for each sub-move
+
+== Tool Length Offset (G43 / G43.1 / G49) ==
+PARSER -> BRIDGE : TLO_ACTIVATE or TLO_CANCEL event
+BRIDGE -> KIN : Update modal_state.tlo_active, tlo_mm
+note right of KIN
+  G43  — activates stored TLO from NVM settings.
+  G43.1 Zn — activates inline dynamic TLO = n mm (not persisted).
+  G49  — cancels TLO (Z reverts to raw WCS).
+  Applied at coord transform time; $# shows [TLO:x.xxx].
+  $G shows G43 or G49 in modal state report.
+end note
+
+== Work Coordinate Systems (G54–G59 / G10) ==
+PARSER -> BRIDGE : WCS_SELECT event {wcs_index 0–5}\n  or SET_WCS_OFFSET (G10 L2/L20, P0–P6)
+BRIDGE -> KIN : Update active WCS index or store offset
+note right of KIN
+  G54–G59 select active WCS (0–5).
+  G10 L2 Pn X Y Z — directly set WCS n offset.
+  G10 L20 Pn X Y Z — set offset so current machine pos = work pos.
+  P0 = currently active WCS.
+  All 6 offsets persist in NVM (SETTINGS_VERSION = 3).
+  $# reports [G54:..] to [G59:..] and [G92:..].
+end note
+
+== Interpolator (background, every APP_Tasks) ==
+INTERP -> INTERP : Trajectory ring non-empty + currentSegment == NULL?\n  → Load next segment into ISR statics
+INTERP -> INTERP : currentSegment steps_completed >= steps_remaining?\n  → Release; motionSegmentCompleted = true\n  → Load next or TMR4_Stop() if ring empty
+INTERP -> ISR : ISR statics set — TIMER_4_InterruptHandler drives step pulses
+note over INTERP, ISR
+  ISR statics: delta[], abs_delta[], error[], direction_bits,
+               dominant_axis, dominant_delta,
+               initial_rate, accelerate_until, decelerate_after, step_interval.
+  ISR reads only integers — no float, no division inside the ISR.
+end note
+
+@enduml
 participant "GCODE_Tasks\n(Parser)" as GCODE
 participant "APP_Tasks\n(Your Control)" as APP
 participant "Motion Queue\n(appData)" as MOTION

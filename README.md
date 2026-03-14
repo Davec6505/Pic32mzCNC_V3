@@ -8,7 +8,7 @@ GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, tar
 
 **Branch**: `scurve_motion` (active development mainline)
 **Firmware**: `bins/CNC_V3.hex`
-**Last build**: March 9, 2026
+**Last build**: March 14, 2026
 
 | Feature | Status |
 |---------|--------|
@@ -211,15 +211,21 @@ Queue drained to zero
 | Code | Description |
 |------|-------------|
 | G0, G1 | Rapid / linear move |
-| G2, G3 | Arc (CW / CCW), helical |
+| G2, G3 | Arc (CW / CCW), helical, all planes |
 | G4 | Dwell (P seconds) |
 | G17, G18, G19 | Plane selection |
 | G20, G21 | Inches / mm |
 | G28, G30 | Go to predefined position |
-| G38.2–G38.5 | Probe toward/away |
+| G38.2–G38.5 | Probe toward / away (Z-Max pin RE1) |
+| G43, G43.1, G49 | Tool Length Offset activate / dynamic / cancel |
+| G54–G59 | Work Coordinate System select |
+| G80 | Cancel canned cycle |
+| G81 | Drill canned cycle |
+| G83 | Peck drill canned cycle |
 | G90, G91 | Absolute / incremental |
 | G92 | Set current position |
-| G10 L20 | Set work coordinate offset |
+| G98, G99 | Retract to initial Z / R-plane |
+| G10 L2, L20 | Set work coordinate offset (all P0–P6) |
 
 ### Supported M-Codes
 
@@ -255,6 +261,8 @@ Queue drained to zero
 ---
 
 ## ⚙️ Settings Reference
+
+> Full settings documentation — including calculation examples, TMC5160 parameters, and a troubleshooting guide — is in the [CNC Firmware Book](docs/readme/CNC_FIRMWARE_BOOK.md) Appendix A.
 
 ### Standard GRBL Parameters ($0–$132)
 
@@ -331,11 +339,13 @@ Pic32mzCNC_V3/
 │   ├── gcode/
 │   │   └── gcode_parser.c     # GRBL protocol, flow control, G38.x
 │   ├── motion/
-        ├── stepper.c          # TMR4 step ISR, Bresenham
-│   │   ├── motion.c           # Segment queue, phase system
-│   │   ├── kinematics.c       # Velocity profiling, arc math
-│   │   ├── homing.c           # $H 4-phase cycle
-│   │   ├── spindle.c          # M3/M5 OC8 PWM
+│   │   ├── stepper.c          # TMR4/TMR5 step ISR, Bresenham + velocity
+│   │   ├── trajectory.c       # S-curve planner, 3-pass lookahead, 64-slot ring
+│   │   ├── interpolator.c     # Fixed-rate DDS step generator
+│   │   ├── motion_bridge.c    # G-code event → trajectory bridge, arc state machine
+│   │   ├── kinematics.c       # Coordinate transforms (Work ↔ Machine)
+│   │   ├── homing.c           # $H 4-phase seek/locate/pulloff/complete
+│   │   ├── spindle.c          # M3/M5 OC8/TMR6 PWM
 │   │   ├── motion_utils.c     # Enable/limit helpers
 │   │   └── tmc5160.c          # TMC5160 SPI driver [HAS_TMC5160_AXIS]
 │   ├── settings/
@@ -439,24 +449,21 @@ All tests validated in hardware (`49e1bf6`, `scurve_motion` branch) — both UGS
 ## 💾 Memory Map
 
 ```
-0x9D000000 – 0x9D17FFFF   Application code (~1.5 MB)
-0x9D180000 – 0x9D183FFF   GRBL settings NVM (16 KB, KSEG0 0x9D...)
-0x9D1F4000 – 0x9D1FFFFF   MikroE USB HID bootloader (48 KB)
+0x9D000000 – 0x9D1EFFFF   Application code (1.87 MB, KSEG0 cached)
+0xBD1F0000 – 0xBD1F3FFF   GRBL settings NVM (16 KB, KSEG1 uncached)
+0x9D1F4000 – 0x9D1FFFFF   MikroE USB HID bootloader (48 KB — never overwrite)
 0xBFC00000 – 0xBFC02FFF   Boot flash / config words (12 KB)
 ```
 
-> NVM writes use KSEG0 (0x9D…) addresses — **not** KSEG1 (0xBD…).
+> NVM operations use **KSEG1** (`0xBD1F0000`) for both reads and writes — uncached access is required by the NVM controller. The KSEG0 mirror (`0x9D1F0000`) must not be used for NVM. Never write to the bootloader region (`0x9D1F4000`) or boot flash (`0xBFC00000`).
 
 ---
 
 ## 📚 Reference Documents
 
-- [Settings Reference](docs/readme/SETTINGS_REFERENCE.md)
-- [Debug System Tutorial](docs/readme/DEBUG_SYSTEM_TUTORIAL.md)
-- [Memory Map](docs/readme/MEMORY_MAP.md)
-- [Architecture](docs/readme/ARCHITECTURE.md)
-- [LitePlacer GRBL Implementation](docs/readme/LITEPLACER_GRBL_IMPLEMENTATION.md)
-- [Development Log](STATUS.md)
+- [CNC Firmware Book](docs/readme/CNC_FIRMWARE_BOOK.md) — comprehensive technical reference: architecture, memory map, junction deviation derivation, complete settings (Appendix A)
+- [LitePlacer GRBL Implementation](docs/readme/LITEPLACER_GRBL_IMPLEMENTATION.md) — LitePlacer-specific integration notes
+- [Development Status](docs/readme/STATUS.md) — change log and session notes
 
 ---
 
