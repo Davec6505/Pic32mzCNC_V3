@@ -74,6 +74,11 @@ typedef struct {
     float wcs_g59[3];              // G59 work coordinate system [X, Y, Z]
     float g92_offset[3];           // G92 coordinate offset [X, Y, Z]
     float tool_length_offset;      // Tool length offset (TLO)
+
+    // G28 / G30 stored machine positions (GRBL v1.1 — persist to NVM)
+    // G28.1 / G30.1 saves current machine position; G28 / G30 rapids to it.
+    float g28_position[4];         // G28 stored machine position [X, Y, Z, A]
+    float g30_position[4];         // G30 stored machine position [X, Y, Z, A]
     
 #ifdef HAS_TMC5160_AXIS
     // TMC5160 runtime tuning ($200-$253) — one slot per axis (0=X,1=Y,2=Z,3=A)
@@ -101,9 +106,9 @@ typedef struct {
 // only when the struct actually changes — otherwise existing flash settings
 // (written as version 2 with DRV8825-only builds) remain valid.
 #ifdef HAS_TMC5160_AXIS
-#define SETTINGS_VERSION   6  // v6: added startup_line[2][80] field (TMC5160 build)
+#define SETTINGS_VERSION   7  // v7: added g28_position + g30_position fields (TMC5160 build)
 #else
-#define SETTINGS_VERSION   5  // v5: added startup_line[2][80] field (DRV8825-only build)
+#define SETTINGS_VERSION   6  // v6: added g28_position + g30_position fields (DRV8825-only build)
 #endif
 
 // ✅ CRITICAL: Safe NVM storage location based on MikroE bootloader
@@ -148,5 +153,11 @@ void SETTINGS_GetG92Offset(float* x, float* y, float* z);                       
 void SETTINGS_SetG92Offset(float x, float y, float z);                                   // Set G92 offset
 float SETTINGS_GetToolLengthOffset(void);                                                // Get TLO
 void SETTINGS_SetToolLengthOffset(float offset);                                         // Set TLO
+
+// G28 / G30 stored machine positions
+void SETTINGS_GetG28Position(float out[4]);               // Get stored G28 machine position
+void SETTINGS_SetG28Position(const float pos[4]);         // Save current pos as G28 (persists to NVM)
+void SETTINGS_GetG30Position(float out[4]);               // Get stored G30 machine position
+void SETTINGS_SetG30Position(const float pos[4]);         // Save current pos as G30 (persists to NVM)
 
 #endif // SETTINGS_H

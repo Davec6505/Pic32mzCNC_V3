@@ -651,6 +651,19 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
             return true;
         }
 
+        // G28 / G28.1 - Move to / Store G28 machine position
+        // G30 / G30.1 - Move to / Store G30 machine position
+        if (gnum == 28 || gnum == 30) {
+            const char *dot = strchr(cmd, '.');
+            int subcode = dot ? (int)strtol(dot + 1, NULL, 10) : 0;
+            if (gnum == 28)
+                ev->type = (subcode == 1) ? GCODE_EVENT_SET_G28 : GCODE_EVENT_GOTO_G28;
+            else
+                ev->type = (subcode == 1) ? GCODE_EVENT_SET_G30 : GCODE_EVENT_GOTO_G30;
+            DEBUG_PRINT_GCODE("[PARSE] G%d.%d\r\n", gnum, subcode);
+            return true;
+        }
+
         // G33 - Spindle-synchronised motion (rigid tapping precursor)
         // Blocked until spindle encoder feedback is available (Phase 5).
         if (gnum == 33) {
@@ -982,13 +995,25 @@ static void service_realtime_byte(APP_DATA* appData, uint8_t c)
             int ov_spindle = (int)SPINDLE_GetOverridePct();
             char ov_buf[24];
             snprintf(ov_buf, sizeof(ov_buf), "|Ov:%d,%d,%d", ov_feed, ov_rapid, ov_spindle);
+            char bf_buf[24] = "";
+            {
+                const CNC_Settings *sr_s = SETTINGS_GetCurrent();
+                if (sr_s->status_report_mask & 0x02u) {
+                    /* GRBL v1.1 spec: Bf:plannerFree,rxBytesFree
+                     * Second field = bytes UGS can still send before the
+                     * RX ring buffer fills, NOT bytes already received. */
+                    snprintf(bf_buf, sizeof(bf_buf), "|Bf:%lu,%lu",
+                        (unsigned long)MOTION_GetTrajectoryFree(),
+                        (unsigned long)UART3_ReadFreeBufferCountGet());
+                }
+            }
             uint32_t response_len = (uint32_t)snprintf((char*)txBuffer, sizeof(txBuffer),
-                "<%s|MPos:%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f|FS:%lu,%lu%s%s>\r\n",
+                "<%s|MPos:%.3f,%.3f,%.3f,%.3f|WPos:%.3f,%.3f,%.3f,%.3f|FS:%lu,%lu%s%s%s>\r\n",
                 state,
-                mpos[AXIS_X], mpos[AXIS_Y], mpos[AXIS_Z],
-                wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z],
+                mpos[AXIS_X], mpos[AXIS_Y], mpos[AXIS_Z], mpos[AXIS_A],
+                wpos[AXIS_X], wpos[AXIS_Y], wpos[AXIS_Z], wpos[AXIS_A],
                 (unsigned long)feed_display, (unsigned long)spindle_display,
-                grblCheckMode ? "|Cm:1" : "", ov_buf);
+                grblCheckMode ? "|Cm:1" : "", ov_buf, bf_buf);
             (void)UART_WriteStatusReport(txBuffer, response_len);
             break;
         }
@@ -1394,9 +1419,20 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == '#') {
             // GRBL $# command: Report work coordinate systems and offsets
-            char buf[400];  // Increased buffer for all WCS data
+            char buf[512];  // Buffer for all WCS data including G28/G30
             int p = 0;
-            
+
+            // Report G28 / G30 stored machine positions (GRBL v1.1 $# format)
+            {
+                float g28[4], g30[4];
+                SETTINGS_GetG28Position(g28);
+                SETTINGS_GetG30Position(g30);
+                p += snprintf(&buf[p], sizeof(buf) - (size_t)p,
+                    "[G28:%.3f,%.3f,%.3f,%.3f]\r\n[G30:%.3f,%.3f,%.3f,%.3f]\r\n",
+                    (double)g28[0], (double)g28[1], (double)g28[2], (double)g28[3],
+                    (double)g30[0], (double)g30[1], (double)g30[2], (double)g30[3]);
+            }
+
             // Report all work coordinate systems (G54-G59)
             for (uint8_t wcs = 0; wcs < 6; wcs++) {
                 float x, y, z;

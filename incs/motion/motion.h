@@ -60,4 +60,8 @@ void MOTION_JogCancel(void);
 // Used by the '?' status handler to report "Jog" state instead of "Run".
 bool MOTION_IsJogging(void);
 
+// Returns free slots in the trajectory queue (TRAJ_QUEUE_SIZE - current count).
+// Used by the '?' status handler for the Bf: buffer-state field.
+uint32_t MOTION_GetTrajectoryFree(void);
+
 #endif /* MOTION_H */
