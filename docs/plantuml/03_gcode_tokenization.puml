@@ -1,8 +1,80 @@
 @startuml tokenization
-title G-Code Event System - Professional Event-Driven Processing
+title G-Code Parsing and Inline Dispatch (scurve_motion, March 2026)
+' No 16-command gcode queue for normal streaming.
+' gcode_parser.c dispatches events inline to motion_bridge.c.
+' Real-time bytes (?, !, ~, Ctrl+X, overrides) handled via service_realtime_byte()
+' without disrupting the G-code byte stream.
 !theme blueprint
 
-participant "UART2\n(GRBL Input)" as UART
+participant "UART3\nRing Buffer\n(1024 B RX)" as UART
+participant "gcode_parser.c\n(GCODE_Tasks)" as PARSER
+participant "motion_bridge.c\n(MOTION_BRIDGE_Dispatch)" as BRIDGE
+participant "trajectory.c\n(64-slot Ring)" as TRAJ
+
+== Real-time byte scan (every GCODE_Tasks call) ==
+UART -> PARSER : UART3_Read() drains ring into rxBuffer[]
+PARSER -> PARSER : service_realtime_byte() scans front of buffer:\n  0x3F '?'      → build + send <State|MPos|WPos|FS|Ov> immediately\n  0x21 '!'      → g_feed_hold_active = true; feeds decelerate\n  0x7E '~'      → clear feed hold, resume motion\n  0x18 Ctrl+X   → PARSER_SoftReset() — clears queues, sends Grbl banner\n  0x85          → jog cancel — flush jog-tagged segments only\n  0x90–0x9D     → feed / rapid / spindle overrides  (no "ok")\n  G-code byte   → save to push-back slot; stop scanning
+note right of PARSER
+  Push-back slot ensures the first G-code byte is
+  not consumed during a mid-stream '?' scan.
+  G-code bytes are never silently dropped.
+end note
+PARSER -> PARSER : Accumulate rxBuffer[] until \\n or \\r terminator
+
+== Line classification ==
+alt Blank line or comment only (; or ( ... ))
+  PARSER -> PARSER : Strip, discard
+  PARSER -> UART : "ok\\r\\n"  (with flow control — may be deferred)
+end
+
+alt '$' system command
+  PARSER -> PARSER : Parse system command:
+  note right of PARSER
+    '$$'     → print all settings
+    '$#'     → print WCS offsets (G54–G59, G92, TLO, PRB)
+    '$G'     → print modal state
+    '$I'     → print build info [VER: / OPT:]
+    '$N'     → print startup lines N0/N1
+    '$Nn=G..'→ write + persist startup line
+    '$H'     → home (dispatch HOME event inline)
+    '$X'     → clear alarm
+    '$C'     → toggle check mode
+    '$J=...' → jog command (dispatched inline, no "ok" until accept)
+    '$RST=*/$/#' → factory reset / settings / WCS
+    '$n=v'  → write setting, apply immediately
+  end note
+  PARSER -> UART : "ok\\r\\n" or "error:N\\r\\n"
+end
+
+alt G-code / M-code line
+  PARSER -> PARSER : Combined modal splitting:\n  "G90G1X10Y10F500" → tokens ["G90", "G1X10Y10F500"]\n  "G21G90 G0Z5"     → tokens ["G21", "G90", "G0Z5"]\n  Parameters belong to the final modal in each combined token.\n  Standalone F, S, T are valid GRBL v1.1 commands.
+
+  loop Each token in order
+    PARSER -> BRIDGE : Dispatch inline event:\n  LINEAR_MOVE    {x,y,z,a, feedrate, is_rapid}\n  ARC_MOVE       {end, I/J/K, feedrate, is_CW, plane}\n  DWELL          {seconds}\n  SET_ABS / SET_INC / SET_UNITS_MM / SET_UNITS_IN\n  SET_FEEDRATE / SET_SPINDLE_SPEED\n  SPINDLE_ON {rpm CW or CCW} / SPINDLE_OFF\n  COOLANT_ON {mist|flood} / COOLANT_OFF\n  PROBE_TOWARD / PROBE_AWAY\n  HOME {axes_mask}\n  CANNED_DRILL / PECK_DRILL / CANCEL_CANNED\n  WCS_SELECT {wcs_index 0=G54…5=G59}\n  SET_WCS_OFFSET (G10 L2 / L20, P0–P6)\n  TLO_ACTIVATE (G43 stored / G43.1 dynamic)\n  TLO_CANCEL (G49)
+  end
+
+  PARSER -> PARSER : Flow control:\n  trajectory queue depth ≥ HIGH_WATER (48)?\n    → defer "ok" (backpressure — sender slows)\n  trajectory queue drains to ≤ LOW_WATER (16)?\n    → burst deferred "ok" responses
+  PARSER -> UART : "ok\\r\\n" when flow control permits
+end
+
+== Error responses ==
+PARSER -> UART : "error:1"  — G-code letter without numeric value
+PARSER -> UART : "error:2"  — unsupported command (e.g. G33 rigid tapping)
+PARSER -> UART : "error:4"  — jog modal invalid ($J= parsing failure)
+PARSER -> UART : "error:8"  — $H issued while homing already active
+PARSER -> UART : "error:20" — soft limit exceeded (requires homing first)
+PARSER -> UART : "ALARM:5"  — G38.2 / G38.4 probe miss with alarmOnFail
+
+== Trajectory flow control detail ==
+note over PARSER, TRAJ
+  Flow control operates on trajectory ring depth — not a separate gcode queue.
+  HIGH_WATER = 48 segments → sender slows (ok deferred).
+  LOW_WATER  = 16 segments → burst deferred oks; sender can refill.
+  Final "ok" only sent when trajectory ring drains to zero + arc generator idle.
+  This ensures UGS/Candle never show "Finished" while motion is still executing.
+end note
+
+@enduml
 participant "GCODE_Tasks\n(Main Parser)" as GCODE
 participant "UTILS_Module\n(Tokenizer)" as UTILS
 participant "Command Queue\n(16 Entries)" as QUEUE

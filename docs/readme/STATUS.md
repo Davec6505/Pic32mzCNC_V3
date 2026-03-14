@@ -6,6 +6,137 @@
 
 ---
 
+## ✅ DOCS: Comprehensive book overhaul (March 2026)
+
+- `docs/CNC_FIRMWARE_BOOK.md` — Major expansion across all chapters; now the single authoritative technical reference
+  - Section 2.2 rewritten: full PIC32MZ memory map with KSEG0/KSEG1 explanation, NVM write pattern, address boundary table
+  - Section 4.5 rewritten: junction deviation with complete mathematical derivation, geometry diagram, worked 90° corner example, look-ahead interaction, tuning guidelines
+  - Chapter 12 added: System Architecture — layer hierarchy diagram, ISR vs main-loop division, three-queue pipeline, inline dispatch rationale, GPIO LED pattern, settings pointer web, build system reference
+  - Appendix A rewritten: complete GRBL settings reference — all $0–$253 parameters with calculation examples, TMC5160 table, troubleshooting guide
+- `docs/readme/` — Deleted 18 obsolete session/debug/planning documents; only `LITEPLACER_GRBL_IMPLEMENTATION.md` retained
+
+---
+
+## ✅ FIX: Pipeline mode blank-line ok starvation + UGS status starvation (March 14, 2026)
+
+**Problem 1 — blank-line ok starvation (pipeline mode goes idle)**:
+In pipeline mode UGS sends multiple lines at once (`G1X60Y0\n\n\n\nG1F6000\n`).
+After dispatching each G-code command the old post-dispatch cleanup used:
+```c
+while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
+    skip_pos++;
+```
+This greedy loop silently consumed all trailing blank lines — no `ok` was ever sent for them.
+UGS waited for those credits, hit its window limit, and the machine went idle mid-file.
+Single-step mode was immune (lines arrive one at a time after each `ok`).
+
+**Fix**:
+- `srcs/gcode/gcode_parser.c:111` — Added `static char s_last_cmd_terminator` to carry the NUL'd terminator character from `GCODE_STATE_IDLE` into `GCODE_STATE_GCODE_COMMAND`
+- `srcs/gcode/gcode_parser.c` (`GCODE_STATE_IDLE` G-code routing) — Save `s_last_cmd_terminator = saved_terminator` before switching to `GCODE_STATE_GCODE_COMMAND`
+- `srcs/gcode/gcode_parser.c` (IDLE blank-line skip) — Replaced greedy `while` skip with single `\n` skip only when terminator was `\r` (CRLF pair), leaving any further `\n` (blank lines) in `rxBuffer` for the next IDLE iteration to handle with an `ok`
+- `srcs/gcode/gcode_parser.c` (`GCODE_STATE_GCODE_COMMAND` post-dispatch skip) — Same single-byte CRLF skip, using `s_last_cmd_terminator`
+
+**Problem 2 — UGS status starvation during arc retry**:
+When `dispatch_command_line()` returns false (trajectory full / arc active), the retry loop
+sets `s_rxHasPushback` on the first iteration and stops draining the UART ring on subsequent
+iterations. `?` bytes sent by UGS's 200ms poller stay stuck behind buffered G-code data in
+the ring — UGS visualisation stops updating.
+
+**Fix**:
+- `srcs/gcode/gcode_parser.c` (`GCODE_STATE_GCODE_COMMAND` retry path) — Added rate-limited unsolicited status send using CP0 counter (`_CP0_GET_COUNT()`). Every 200ms (20 000 000 ticks at 100MHz CP0 rate) calls `service_realtime_byte(appData, '?')` to push a live status report to UGS regardless of whether a `?` byte has arrived.
+
+**Result**: Pipeline mode streams full files completely + UGS visualisation updates continuously throughout.
+
+---
+
+## ✅ REWRITE: String-ring flow-control architecture (March 14, 2026)
+
+Replaced the `rxBuffer[1024]` + 64-slot `GCODE_CommandQueue` dual-pipeline with a clean
+`s_str_ring[8][128]` string ring.  One ring controls all UGS flow — no stale-count copies,
+no broken UART-free-space gate, correct `ok` deficit resolution.
+
+**Root cause fixed**: `UART3_ReadFreeBufferCountGet()` always returned ~1024 (UART ring drained
+into rxBuffer before the check), so the backpressure gate was permanently open.  UGS received
+all `ok` credits before motion executed → premature "*** Finished" state.
+
+**Changes** (all files compile clean, `bins/CNC_V3.hex` produced):
+
+- `incs/data_structures.h` — Removed `GCODE_MAX_COMMANDS`, `GCODE_Command`, `GCODE_CommandQueue`
+  structs; removed `gcodeCommandQueue` from `APP_DATA`.  Kept `GCODE_BUFFER_SIZE 80`.
+- `incs/gcode/gcode_parser.h` — Removed `GCODE_State` enum, `GCODE_Data` struct,
+  `GCODE_GetNextEvent`/`GCODE_ConsumeEvent` declarations.  Updated signatures:
+  `GCODE_Tasks(APP_DATA*)`, `GCODE_SoftReset(APP_DATA*)`, `GCODE_CheckDeferredOk(APP_DATA*)`.
+- `srcs/settings/settings.c` — `[OPT:VHM,35,127,4]` → `[OPT:VHM,35,1023,4]` (advertise
+  correct ring depth to UGS).
+- `srcs/app.c` — Removed `gcodeCommandQueue` init block and the `GCODE_GetNextEvent`/
+  `GCODE_ConsumeEvent` event-processing loop.  Updated all call sites to new signatures.
+- `srcs/gcode/gcode_parser.c` — Complete rewrite:
+  - **Statics**: added `s_str_ring[8][128]`, `s_sr_head/tail/count`, `s_line_accum[128]`,
+    `s_line_accum_len`, `s_stall_armed/start/ticks`.  Removed `rxBuffer`, `nBytesRead`,
+    `gcodeData`, `s_rxPushback`, `s_rxHasPushback`, `s_boot_inject_idx`,
+    `GCODE_QUEUE_HIGH_WATER/LOW_WATER`.
+  - **Deleted**: `queue_command()`, `split_and_queue_multi_modal()`,
+    `Extract_CommandLineFrom_Buffer()`, `GCODE_GetNextEvent()`, `GCODE_ConsumeEvent()`.
+  - **Simplified**: `GCODE_CheckDeferredOk(APP_DATA*)` — no G4-dwell gate, no
+    UART3_ReadFreeBufferCountGet gate; homing sentinel kept verbatim.
+  - **Simplified**: `SendOrDeferOk(void)` — `if (!UART_SendOK()) okPendingCount++`.
+  - **New**: `line_is_g4()`, `parse_g4_p_value()` stall-guard helpers.
+  - **New**: `handle_dollar_command(APP_DATA*, const char*)` — extracted from old
+    `GCODE_STATE_QUERY_CHARS`; `$H` now calls `MOTION_ProcessGcodeEvent` directly
+    (no command queue).
+  - **New**: three-phase `GCODE_Tasks(APP_DATA*)`:
+    - Phase C: `GCODE_CheckDeferredOk` (homing/probe deferred oks)
+    - Phase A: UART ring → `s_line_accum` → `s_str_ring` (ring slot = backpressure)
+    - Phase B: dispatch one ring slot; G4 dwell holds slot (ring slot IS the deferral);
+      stall guard fires `error:9` after 5 s (+ G4 P-value, max 65 s) to prevent wedge.
+  - **Updated**: `GCODE_SoftReset` — clears ring + accumulator + stall guard, re-injects
+    startup lines into freshly-cleared ring.
+  - **Updated**: `GCODE_LoadStartupLines` — injects into ring directly at boot
+    (removed `s_boot_inject_idx` arming).
+
+
+
+**Root cause**: `UART_RX_CMD_MAX_BYTES` was `64u` — the minimum free-space threshold before sending
+"ok". UGS uses a 128-byte sliding pipeline window: each "ok" grants UGS permission to send up to
+128 bytes immediately. With only 64 bytes free in the ring, a full 128-byte UGS burst overflows
+the ring by 64 bytes. Those bytes are silently dropped by the Harmony UART3 ring-buffer ISR.
+The parser then receives a truncated G-code line (e.g. `G3 X30 Y50 I-2` with no `\n`), cannot
+find a terminator, and stalls — waiting forever for bytes that were already lost.
+
+This was the true cause of the arc streaming stall in `07_complex_long_run_fast.gcode` Section 6:
+the arc commands (~20 bytes each) arrived in batches; overflow corrupted the 4th or 5th arc line;
+the parser hung; UGS hit its window limit and froze.
+
+**Fix**:
+- `incs/utils/uart_utils.h:108` — `UART_RX_CMD_MAX_BYTES` changed from `64u` → `128u`
+- `srcs/gcode/gcode_parser.c` — updated comment in `SendOrDeferOk()` to explain the 8×128 model
+
+**Model**: Ring = 1024 bytes, UGS window = 128 bytes → 8 full bursts fit.
+We send oks freely (up to 7 bursts buffered = 896 bytes), then hold when free < 128.
+UGS stops. Ring drains ≥128 bytes. Ok sent. UGS sends 128. Cycle repeats.
+Ring never overflows. No silent data loss.
+
+---
+
+## ✅ COMPLETE: UART TX instrumentation for missing `ok` diagnosis (March 10, 2026)
+
+- `incs/utils/uart_utils.h` - Added `UART_TxStats`, `UART_ResetTxStats()`, `UART_GetTxStats()`, and `UART_WriteStatusReport()` declarations for TX-side instrumentation
+- `srcs/utils/uart_utils.c` - `UART_Initialize()` now resets TX stats; `UART_SendOK()` now succeeds only when all 4 bytes are enqueued and records ok counters; added `UART_WriteStatusReport()` and wired `UART_SendGrblStatus()` through it
+- `srcs/gcode/gcode_parser.c` - `service_realtime_byte()` status reply now uses tracked TX enqueue path; `SendOrDeferOk()` now re-defers when TX cannot enqueue `ok`; blank/comment and query-command `ok` sends now preserve missing acks instead of dropping them
+- `srcs/gcode/gcode_parser.c` - Added `$U` debug command to print UART TX counters and `$U=0` to reset them
+- `README.md` - Documented `$U` UART TX stats debug command in System Commands table
+- **Outcome**: Hardware `$U` run confirmed `OK_DROP=0`, `OK_ATT==OK_ENQ` — TX is functioning correctly; TX loss ruled out as root cause
+
+## ✅ FIX: `rxBuffer` tail destruction in pipeline mode — confirmed root cause of UGS streaming stall (March 10, 2026)
+
+**Root cause**: `GCODE_STATE_GCODE_COMMAND`, `GCODE_STATE_QUERY_CHARS`, and `GCODE_STATE_ERROR` each called `nBytesRead = 0; memset(rxBuffer, 0)` after processing only the first command. In UGS pipeline mode, `GCODE_STATE_IDLE` bulk-reads all pending UART ring bytes into `rxBuffer` each iteration, so multiple G-code lines can coexist in `rxBuffer`. The wipe silently destroyed lines 2..N with no `ok` ever sent — saturating UGS's 1024-byte character-count window and stalling the stream. Single-step mode was immune (one line per round-trip).
+
+**Fix**: Replicated the `memmove` tail-preservation pattern already present in `GCODE_STATE_IDLE` to all three broken states.
+
+- `srcs/gcode/gcode_parser.c:1779` - `GCODE_STATE_QUERY_CHARS` cleanup: replaced wipe with `memmove` tail-preserve using `skip_base = (uint32_t)len + 1u`
+- `srcs/gcode/gcode_parser.c:1857` - `GCODE_STATE_GCODE_COMMAND` cleanup: replaced wipe with `memmove` tail-preserve using `skip_base = cmd_end + 1u`
+- `srcs/gcode/gcode_parser.c:1879` - `GCODE_STATE_ERROR` cleanup: added `err_cmd_len = strlen(rxBuffer)`; replaced wipe with `memmove` tail-preserve using `skip_base = err_cmd_len + 1u`
+
 ## ✅ FEATURE IMPLEMENTATION: Real-time overrides, smooth feed hold, soft-limit gate, startup lines (March 2026)
 
 ### Feature A — Real-time overrides (GRBL v1.1 bytes 0x90–0x9D)

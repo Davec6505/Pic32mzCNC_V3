@@ -1,10 +1,101 @@
-@startuml Arc and Linear Interpolation System
-!theme plain
-skinparam backgroundColor #FFFFFF
-skinparam componentStyle rectangle
-skinparam defaultTextAlignment center
+@startuml Arc and Linear Interpolation — Current Architecture
+title Arc and Linear Interpolation Flow (scurve_motion, March 2026)
+' gcode_parser.c dispatches G-code events inline to motion_bridge.c.
+' motion_bridge.c owns the arc state machine (incremental chord generator).
+' trajectory.c holds the 64-slot S-curve planner with 3-pass lookahead.
+' interpolator.c is the DDS step generator fed by the trajectory ring.
+' TIMER_4_ISR executes Bresenham + velocity profile at IPL6.
+!theme blueprint
 
-title Arc and Linear Interpolation Flow\nPic32mzCNC_V3 - November 2025
+participant "gcode_parser.c\n(Inline Dispatch)" as PARSER
+participant "motion_bridge.c\n(Arc State Machine)" as BRIDGE
+participant "kinematics.c\n(Coord Transform)" as KIN
+participant "trajectory.c\n(S-curve Planner\n64-slot Ring)" as TRAJ
+participant "interpolator.c\n(DDS Generator)" as INTERP
+participant "TIMER_4_ISR\n(Bresenham + Velocity\nIPL6 Shadow Regs)" as ISR
+participant "Step GPIO\n(Harmony Macros)" as GPIO
+
+== Linear Move (G0 / G1) ==
+PARSER -> BRIDGE : LINEAR_MOVE event {x,y,z,a, feedrate, is_rapid}
+BRIDGE -> KIN : Work-space pos → machine-space pos\n  (WCS offset G54–G59 + G92 + TLO G43/G43.1/G49)
+KIN -> BRIDGE : Machine CoordinatePoint
+BRIDGE -> TRAJ : TRAJECTORY_AddMove(start_mach, end_mach, feedrate)
+TRAJ -> TRAJ : compute unit_vec[], normalise\n  limit_acceleration_by_axis()  — slowest limiting axis\n  limit_rate_by_axis()          — slowest limiting axis
+TRAJ -> TRAJ : junction speed (centripetal approximation, no trig):\n  cos_theta = -dot(prev_unit_vec, curr_unit_vec)\n  sin_half  = sqrt(0.5 * (1 - cos_theta))\n  v²_junc   = accel × junction_dev × sin_half / (1 - sin_half)
+TRAJ -> TRAJ : Enqueue MotionSegment
+TRAJ -> TRAJ : MOTION_PlannerRecalculate() (GRBL-exact 3-pass):\n  1. Reverse pass — cap entry_speed_sqr by decel constraints\n  2. Forward pass — cap entry_speed_sqr by accel constraints\n  3. Trapezoid pass — write to every buffered segment:\n       initial_rate, nominal_rate, final_rate,\n       accelerate_until, decelerate_after
+note right of TRAJ
+  PlannerRecalculate runs after EVERY enqueue.
+  All buffered segments are re-optimised as a unit
+  (look-ahead window = full 64-slot ring).
+end note
+PARSER -> PARSER : Send "ok" — or defer if traj queue ≥ HIGH_WATER (48)
+
+== Arc Move (G2 / G3) — Incremental Chord Generator in motion_bridge.c ==
+PARSER -> BRIDGE : ARC_MOVE event {G2/G3, end, I/J/K, feedrate, plane}
+BRIDGE -> BRIDGE : Validate arc: |r_start − r_end| < $13\n  ALARM:5 if radius mismatch
+BRIDGE -> BRIDGE : Compute:\n  centre (cx, cy) from I, J (always incremental)\n  start_angle = atan2(start.y−cy, start.x−cx)\n  end_angle   = atan2(end.y−cy,   end.x−cx)\n  total_angle (wrap-around for CW/CCW direction)\n  arc_length  = radius × |total_angle|\n  segments    = ceil(arc_length / $12 chord_deviation)
+BRIDGE -> BRIDGE : armArcState = ARC_ACTIVE\n  store: centre, radius, theta=start_angle, thetaEnd,\n         thetaIncrement=total_angle/segments, arcEnd, plane
+PARSER -> PARSER : "ok" deferred until arc command accepted (flow controlled)
+
+loop One chord per APP_Tasks() iteration — non-blocking
+  alt Trajectory queue not full
+    BRIDGE -> BRIDGE : theta += thetaIncrement
+    alt Not last segment
+      BRIDGE -> BRIDGE : next.x = cx + r·cos(theta)\n  next.y = cy + r·sin(theta)\n  next.z = linear interp to arcEnd.z\n  next.a = linear interp to arcEnd.a
+    else Last segment
+      BRIDGE -> BRIDGE : next = arcEnd  (exact target — no accumulated error)
+      BRIDGE -> BRIDGE : armArcState = ARC_IDLE
+    end
+    BRIDGE -> KIN : Work → machine coord transform for arc point
+    KIN -> BRIDGE : machine-space point
+    BRIDGE -> TRAJ : TRAJECTORY_AddMove(arcCurrent_mach, next_mach, feedrate)
+    TRAJ -> TRAJ : Enqueue + MOTION_PlannerRecalculate()
+    note right of TRAJ
+      Junction speed between consecutive arc chords
+      computed automatically by the planner.
+      Smooth speed maintained throughout arc.
+    end note
+    BRIDGE -> BRIDGE : arcCurrent = next
+  else Queue full (backpressure)
+    BRIDGE -> BRIDGE : service_realtime_byte() — service pending '?' status
+    note right of BRIDGE
+      '?' status replies answered during backpressure.
+      G-code bytes safe in push-back slot.
+      Retry next APP_Tasks() iteration.
+    end note
+  end
+end
+
+== DDS Segment Load (interpolator.c, main loop) ==
+INTERP -> INTERP : trajectory ring non-empty + currentSegment == NULL?\n  → pull next MotionSegment, load ISR statics:\n    delta[], abs_delta[], error[], direction_bits,\n    initial_rate, accelerate_until, decelerate_after
+INTERP -> GPIO : DirX/Y/Z/A_Set/Clear (direction stable BEFORE first STEP)
+INTERP -> ISR : TMR4_Start() — step pulses begin
+
+== Per-Step Cycle (TIMER_4_InterruptHandler, IPL6) ==
+activate ISR
+ISR -> GPIO : OC1 dual-compare hardware auto-toggles dominant-axis STEP HIGH\n  (silicon — zero CPU involvement for rising edge)
+ISR -> ISR : Guard: seg = currentSegment; return if NULL
+ISR -> GPIO : switch(dominant_axis) → Harmony #define → single LATxSET
+ISR -> ISR : AXIS_IncrementSteps / AXIS_DecrementSteps (always_inline)
+loop Bresenham subordinate axes (0–3, bounded)
+  ISR -> ISR : error[axis] += abs_delta[axis]
+  alt error >= dominant_delta
+    ISR -> GPIO : step subordinate axis → single LATxSET
+    ISR -> ISR : error[axis] -= dominant_delta; update position counter
+  end
+end
+ISR -> ISR : Velocity profile (integer only, no float, no division):\n  ACCEL  (sc < accelerate_until)  → step_interval -= rate_delta\n  DECEL  (sc >= decelerate_after) → step_interval += decel_rate_delta\n  CRUISE → unchanged
+ISR -> ISR : PR4 = step_interval  (direct SFR, min clamp 7 ticks @ 781.25 kHz)
+ISR -> ISR : steps_completed++\n  if complete: T4CONCLR inside ISR (stop timer mid-ISR)\n               motionSegmentCompleted = true; return
+deactivate ISR
+
+note over PARSER, GPIO
+  Pulse width: ~2.56 µs (TMR5 one-shot). All four step pins cleared
+  unconditionally by TMR5 callback. DRV8825 min: 1 µs; TMC5160 min: 100 ns.
+end note
+
+@enduml
 
 package "G-code Parser" {
     [GCODE Event\nGenerator] as GCODE

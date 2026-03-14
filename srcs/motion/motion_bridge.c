@@ -330,6 +330,8 @@ void MOTION_Tasks(APP_DATA *appData)
             s_jog_executing = next_move.is_jog;  // track whether this move is a jog
         } else {
             s_jog_executing = false;  // queue drained — no jog executing
+            DEBUG_PRINT_MOTION("[TASKS] queue drained: move_done=%d ks=%d arcState=%d okPend?\r\n",
+                (int)move_done, (int)needs_kickstart, (int)appData->arcGenState);
         }
         // Fire even if queue is now empty — the count sync above already
         // reflects the new (lower) occupancy, so CheckDeferredOk will
@@ -395,8 +397,11 @@ void MOTION_Arc(APP_DATA *appData)
 
         if (is_last) {
             appData->arcGenState = ARC_GEN_IDLE;
-            DEBUG_PRINT_MOTION("DONE:(%.2f,%.2f,%.2f)\r\n",
-                next.coordinate[AXIS_X], next.coordinate[AXIS_Y], next.coordinate[AXIS_Z]);
+            DEBUG_PRINT_MOTION("[ARC_DONE] n=%lu traj=%lu interpActive=%d DONE:(%.2f,%.2f)\r\n",
+                (unsigned long)appData->arcSegmentTotal,
+                (unsigned long)TRAJECTORY_QueueCount(),
+                (int)INTERPOLATOR_IsActive(),
+                next.coordinate[AXIS_X], next.coordinate[AXIS_Y]);
         }
 
         // Pre-fill gate: only release the interpolator once the queue is deep enough
@@ -421,6 +426,10 @@ void MOTION_Arc(APP_DATA *appData)
                 if (TRAJECTORY_GetNextMove(&mv)) {
                     STEPPERS_Enable();
                     INTERPOLATOR_LoadMove(&mv);
+                    DEBUG_PRINT_MOTION("[ARC_KICK] n=%lu traj=%lu arcState=%d\r\n",
+                        (unsigned long)appData->arcSegmentTotal,
+                        (unsigned long)TRAJECTORY_QueueCount(),
+                        (int)appData->arcGenState);
                 }
             }
         }
@@ -742,6 +751,8 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             appData->arcSegmentCurrent               = 0;
             appData->arcSegmentTotal                 = n_seg;
             appData->arcGenState                     = ARC_GEN_ACTIVE;
+            DEBUG_PRINT_MOTION("[ARC_DISPATCH] n=%lu arcState->ACTIVE\r\n",
+                (unsigned long)appData->arcSegmentTotal);
 
             // Advance planned position to arc end so the next queued command
             // chains from the correct position even before MOTION_Arc() runs.

@@ -77,17 +77,11 @@ CNC motion control system for PIC32MZ microcontrollers with GRBL v1.1 protocol c
 
 This is a CNC motion control system for PIC32MZ microcontrollers using hardware timers and Bresenham interpolation for precise multi-axis stepper motor control.
 
-**Status**: Under Active Development (November 21, 2025)  
+**Status**: Production Ready — `scurve_motion` branch (March 2026)
 
-**Firmware**: `bins/Release/CS23.hex` (264KB)
+**Firmware**: `bins/CNC_V3.hex`
 
-### 🔧 ARC Z-AXIS FIX (November 21, 2025) ✅ DEPLOYED
-
-**Critical Bug Fixed**: Z-axis motion after arc moves (G2/G3)
-- Arc moves now preserve unspecified axis positions (GRBL v1.1 compliant)
-- Parser returns NAN for missing values (distinguishes "not specified" from "zero")
-- Added isnan() checks in arc coordinate building
-- **See**: `docs/readme/ARC_Z_AXIS_FIX_2025-11-21.md` for complete documentation##    Always run make from root directory VI
+## Always run make from root directory
 
 To ensure proper build configuration and output paths, always execute `make` commands from the root directory of the Pic32mzCNC_V3 project. This guarantees that all relative paths and build settings are correctly applied. makefile incs target is dynamic, it knows the paths no need to add absolute file references, all paths are relative to the root directory.
 
@@ -609,61 +603,47 @@ G21          ÔåÆ OK (setup, no deferral)
 
 G17          ÔåÆ OK (setup, no deferral)
 
-### Supported G-CodesG92X0Y0Z0    ÔåÆ OK (setup, G92 not motion)
+### Supported G-Codes
 
-- **Motion**: G0, G1, G2, G3G1F500       ÔåÆ OK (feedrate only, no X/Y/Z/A parameters!)
+- **Motion**: G0, G1, G2, G3
+- **Plane**: G17, G18, G19
+- **Units**: G20 (inches), G21 (mm)
+- **Distance**: G90 (absolute), G91 (incremental)
+- **Offsets**: G92 (set position), G10 L2 Pn (set WCS from machine pos), G10 L20 Pn (set WCS from work pos)
+- **WCS select**: G54, G55, G56, G57, G58, G59
+- **TLO**: G43 (activate stored offset), G43.1 Zn (activate dynamic offset), G49 (cancel TLO)
+- **Probing**: G38.2, G38.3, G38.4, G38.5 (code complete — hardware test pending)
+- **Canned cycles**: G80 (cancel), G81 (drill), G83 (peck drill), G98/G99 (retract mode)
+- **Dwell**: G4 P(seconds)
+- **G33**: stub → `error:2` (rigid tapping deferred — no spindle encoder)
 
-- **Plane**: G17, G18, G19             ÔåÆ OK (blank line)
-
-- **Units**: G20 (inches), G21 (mm)G1X20Y0      ÔåÆ Deferral armed, OK withheld (1st motion, remaining=1)
-
-- **Distance**: G90 (absolute), G91 (incremental)G1X20Y10     ÔåÆ OK, OK flushed together (2nd motion, remaining=0)
-
-- **Offsets**: G92 (set position), G10 L20 (WCS)             ÔåÆ UGS sees Run state, continues automatic polling
-
-- **Dwell**: G4 P(seconds)G1X0Y10      ÔåÆ OK (normal flow control)
-
-G1X0Y0       ÔåÆ OK (normal flow control)
-
-### Supported M-Codes```
+### Supported M-Codes
 
 - **Spindle**: M3 (CW), M4 (CCW), M5 (off)
+- **Coolant**: M7 (mist), M8 (flood), M9 (off)
 
-- **Coolant**: M7 (mist), M8 (flood), M9 (off)**Benefits**:
+### System Commands
 
-- Ô£à UGS automatically polls during motion (no manual `?` needed)
+- `$` - Help
+- `$$` - View all settings
+- `$I` - Build info
+- `$G` - Modal state (includes G43/G49 TLO state)
+- `$#` - Work offsets (shows G54–G59, TLO, probe, G28, G30, G92)
+- `$H` - Home all axes (ok deferred until homing completes)
+- `$X` - Clear alarm
+- `$C` - Toggle check mode
+- `$<n>=<val>` - Set parameter
+- `$J=G91 X# F#` - Jog command (G90/G91/G20/G21 + axes + F; `ok` on accept, `error:4` on invalid modal)
+- `$Nn` - Read startup line; `$Nn=<gcode>` - Write and persist startup line (N0, N1)
 
-### System Commands- Ô£à Real-time visualization without protocol hacks
+### Real-Time Commands
 
-- `$` - Help- Ô£à GRBL-compatible behavior pattern
-
-- `$$` - View settings- Ô£à Robust motion detection (no false positives)
-
-- `$I` - Build info- Ô£à Works with any G-code sender expecting GRBL protocol
-
-- `$G` - Modal state
-
-- `$#` - Work offsets**Testing**:
-
-- `$H` - Home all axesRectangle test shows complete success:
-
-- `$X` - Clear alarm- Setup commands receive immediate OKs
-
-- `$C` - Toggle check mode- First 2 motion commands withheld
-
-- `$<n>=<val>` - Set parameter- Motion starts, UGS sees `<Run|MPos:...>` updates
-
-- Complete path execution with continuous visualization
-
-### Real-Time Commands- Clean `<Idle|...>` return when finished
-
-- `?` - Status report
-
-- `!` - Feed hold### ­ƒöº AGGRESSIVE FLOW CONTROL (November 13, 2025) Ô¡É NEW
-
-- `~` - ResumeModule: `srcs/gcode/gcode_parser.c` ÔåÆ Flow control system redesign
-
-- Ctrl+X - Soft reset
+- `?` - Status report (includes `|Ov:feed,rapid,spindle` override field; `<Jog|>` state during jog)
+- `!` - Feed hold: calls `INTERPOLATOR_SoftStop()` for smooth deceleration ramp; `MOTION_Tasks()` calls `STEPPER_FinalizeHold()` when velocity reaches zero — steppers are NOT disabled immediately
+- `~` - Resume
+- `Ctrl+X` - Soft reset
+- **Override bytes (no `ok`)**: `0x90` Feed 100%, `0x91` Feed+10%, `0x92` Feed-10%, `0x93` Feed+1%, `0x94` Feed-1%, `0x95` Rapid 100%, `0x96` Rapid 50%, `0x97` Rapid 25%, `0x99` Spindle 100%, `0x9A` Spindle+10%, `0x9B` Spindle-10%, `0x9C` Spindle+1%, `0x9D` Spindle-1%
+- `0x85` - Jog cancel: flushes jog-tagged trajectory segments only; does NOT raise ALARM
 
 **Problem Solved**: UGS marked files as "Finished" before motion completed because it received all "ok" responses while the motion queue still had segments executing. This caused UGS to stop automatic status polling, leaving motion running without visualization updates.
 
@@ -803,49 +783,40 @@ if (timer_elapsed()) {appData->motionQueueCount--;
 
 ## Production Validation Status
 
-**Deferred OK Check in Main Loop** (`srcs/app.c` line 247):
+**Validated (March 9, 2026 — hardware, both UGS single-step and pipelined modes)**:
 
-**Validated (November 13-15, 2025)**:```c
-
-- Ô£à Rectangle path (dual iteration, 4 corners)case APP_IDLE:
-
-- Ô£à Circle (20 segments, 0.025mm final error)    MOTION_Tasks(&appData);
-
-- Ô£à Arc compensation (0.001mm radius tolerance)    
-
-- Ô£à Back-to-back file execution    // Ô£à Check deferred OKs immediately when segment completes
-
-- Ô£à UGS automatic completion    if (appData.motionSegmentCompleted) {
-
-- Ô£à Soft reset recovery        appData.motionSegmentCompleted = false;
-
-- Ô£à LED pattern GPIO refactoring (264KB firmware)        GCODE_CheckDeferredOk(&appData, &appData.gcodeCommandQueue);
-
-- Ô£à Array-based architecture refactoring    }
-
-```
+| Test file | Mode | Result |
+|-----------|------|--------|
+| `08_arc_cw_ccw_stress.gcode` | Both | ✅ PASS — 36 arcs, 2:18 min, return to origin |
+| `09_concentric_semicircles.gcode` | Pipeline | ✅ PASS ×2 — X error <0.031mm |
+| `05_three_arcs_simple.gcode` | Both | ✅ PASS — CW/CCW arc handoff stable |
+| `02_rectangle_path.gcode` | Both | ✅ PASS — corners sharp, return to origin |
+| `03_circle_20segments.gcode` | Both | ✅ PASS — <0.025mm error |
+| `07_complex_long_run_fast.gcode` | Both | ✅ PASS — full pipeline: arcs, linears, G4, return |
 
 **Known Limitations**:
 
-- No S-curve acceleration (trapezoidal only)
-
-- Homing not CNC-tested
-
-- Spindle PWM not CNC-validated
-
-- StallGuard2 / sensorless homing deferred (Phase 2)
-
-- G38.x probe implemented but pending hardware test
+- Spindle PWM not CNC-validated under load
+- G38.x probe implemented but pending hardware test (probe pin: Z-Max RE1)
+- TMC5160 SPI driver — infrastructure done (SPI2 MCC, $200–$253 settings), `tmc5160.c` driver not yet written
+- StallGuard2 / sensorless homing deferred until TMC5160 SPI driver is validated
 
 **Implemented (March 2026)**:
 
-- ✅ GRBL-exact three-pass look-ahead planner (reverse + forward + trapezoid pass)
-
-- ✅ Trapezoidal velocity profiling (KINEMATICS_RecalculateTrapezoid)
-
-- ✅ Axis-limited acceleration and rate (limit_acceleration_by_axis / limit_rate_by_axis)
-
-- ✅ Junction speed via GRBL centripetal approximation (no trig — dot product only)
+- ✅ S-curve 7-phase jerk-limited velocity profiling (`trajectory.c` + `interpolator.c`)
+- ✅ Fixed-rate 100kHz DDS interpolator; direct GPIO step pulses (no OC modules)
+- ✅ Inline G-code dispatch — arc-to-arc stall eliminated
+- ✅ `service_realtime_byte()` — `?` answered during arc retry; push-back slot preserves G-code bytes
+- ✅ Real-time overrides 0x90–0x9D (feed/rapid/spindle), `|Ov:|` in `?` status
+- ✅ Smooth feed-hold deceleration (`INTERPOLATOR_SoftStop`)
+- ✅ Soft-limit homed gate (`machine_homed` flag — only enforced after `$H`)
+- ✅ G43/G43.1/G49 Tool Length Offset (Z-axis; stored + dynamic)
+- ✅ G54–G59 Multiple Work Coordinate Systems; G10 L2/L20 all P0–P6
+- ✅ G81/G83/G80 canned drilling cycles + G98/G99 retract modes
+- ✅ Software Jog (`$J=` + `0x85` cancel; `<Jog|>` state)
+- ✅ Startup lines `$N0`/`$N1` (persist to NVM; boot execution)
+- ✅ Homing hardware-validated (March 2026): event-driven 4-phase, ALARM:8/9, `$22` axes mask from settings
+- ✅ `is_control_char()` range fix: `(c >= 0x90u && c <= 0x9Du)` — all 14 override bytes correctly handled
 
 ### Build Commands```
 
@@ -2369,62 +2340,47 @@ hardware-validated and committed to master.
 
 ---
 
-### Phase 2 — Tool Length Offsets (G43 / G49)
+### Phase 2 — Tool Length Offsets (G43 / G49) ✅ IMPLEMENTED (March 2026)
 
-**Goal**: Apply tool length compensation so Z=0 is always the workpiece surface regardless of tool.
+**Implemented scope**:
+- `G43` — activates stored TLO from NVM settings, persisted via `SETTINGS_SetToolLengthOffset()`
+- `G43.1 Zn` — activates inline dynamic TLO = n mm (not persisted; lost at power-cycle)
+- `G49` — cancels active TLO (Z reverts to raw WCS)
+- TLO applied to Z axis only (GRBL v1.1 standard); all four coordinate transforms apply/remove TLO
+- `$#` → `[TLO:x.xxx]` shows live active value; `$G` shows `G43` or `G49` in modal state
+- TLO persists across soft reset; cancelled only by explicit `G49`
+- Single stored value — no 16-tool table (GRBL v1.1 behaviour)
 
-**Scope**:
-- G43 Hn — activate tool length offset for tool n
-- G49 — cancel tool length offset
-- Tool table: up to 16 tools, length stored in NVM (`settings.tool_length_offset[16]`)
-- G43.1 Zn — set dynamic offset (current tool, inline value)
-- `TLO:` field in `$#` report
-
-**Architecture**:
-- Offset applied in `KINEMATICS_GetCurrentPosition()` / coordinate transforms — not in motion planner
-- Tool number tracked in modal state (existing `T` word handling)
-- `$T` command to view current tool offset table
-
-**Key files**: `srcs/motion/kinematics.c`, `srcs/settings/settings.c`, `srcs/gcode/gcode_parser.c`
+**Key files**: `srcs/motion/kinematics.c`, `srcs/gcode/gcode_parser.c`, `srcs/motion/motion_bridge.c`
 
 ---
 
-### Phase 3 — Multiple Work Offsets (G54–G59)
+### Phase 3 — Multiple Work Offsets (G54–G59) ✅ IMPLEMENTED (March 2026)
 
-**Goal**: Six independent work coordinate systems, switchable mid-program.
+**Implemented scope**:
+- `G54`–`G59` modal WCS select — switches active WCS; all subsequent moves use the new origin
+- `G10 L2 Pn X Y Z` — directly sets the offset of WCS n (P1=G54 … P6=G59); persisted to NVM flash
+- `G10 L20 Pn X Y Z` — sets offset so current machine position = specified work position; persisted
+- `P0` in G10 applies to the currently active WCS (sentinel 255 resolved at event-process time)
+- `$#` → `[G54:x,y,z]` … `[G59:x,y,z]` reports correct stored offsets
+- `SETTINGS_VERSION` bumped; NVM layout updated
 
-**Scope**:
-- G54–G59 modal WCS select (currently only G54/G92 implemented)
-- `G10 L2 Pn` — set WCS offset from machine position
-- `G10 L20 Pn` — set WCS offset from current work position
-- `$#` response prints all six WCS offsets
-
-**Architecture**:
-- `wcs_offset[6][NUM_AXIS]` in `CNC_Settings` (replace current single `wcs_offset[NUM_AXIS]`)
-- Active WCS index in modal state
-- All coordinate transforms route through `KINEMATICS_WorkToMachine()` using active index
-- NVM layout change → bump `SETTINGS_VERSION`
-
-**Key files**: `srcs/motion/kinematics.c`, `incs/data_structures.h`, `srcs/settings/settings.c`
+**Key files**: `srcs/motion/kinematics.c`, `srcs/gcode/gcode_parser.c`, `srcs/motion/motion_bridge.c`, `srcs/settings/settings.c`
 
 ---
 
-### Phase 4 — Rigid Tapping & Fixed Cycle Probing (G33, G81–G89)
+### Phase 4 — Canned Drilling Cycles (G81/G83/G80) ✅ IMPLEMENTED (March 2026)
 
-**Goal**: Canned drilling/tapping cycles and spindle-synchronised tapping.
+**Implemented scope**:
+- `G80` — cancel canned cycle
+- `G81` — simple drill cycle (rapid to position, drill to Z-depth, retract)
+- `G83` — peck drilling (incremental Q-depth pecks with retract between)
+- `G98`/`G99` — retract to initial Z plane / R-plane
+- State machine in `motion_bridge.c` — not parser expansion
+- Soft reset cancels in-progress canned cycle
+- `G33` — stub → `error:2` (rigid tapping deferred — requires spindle encoder)
 
-**Scope**:
-- G81 — simple drill cycle
-- G83 — peck drilling
-- G33 — spindle-synchronised motion (rigid tapping precursor; requires spindle encoder)
-- G98/G99 — canned cycle return plane
-
-**Architecture**:
-- Canned cycles expand to sequences of G0/G1 moves inside `gcode_parser.c` event handler — no new motion primitives needed
-- G33 blocked until spindle encoder feedback is available (Phase 5)
-- Implemented as a state machine inside `GCODE_Tasks` to avoid blocking
-
-**Key files**: `srcs/gcode/gcode_parser.c`, `srcs/motion/motion_bridge.c`
+**Key files**: `srcs/motion/motion_bridge.c`, `srcs/gcode/gcode_parser.c`
 
 ---
 
@@ -2482,12 +2438,19 @@ hardware-validated and committed to master.
 
 ### Roadmap Summary Table
 
-| Phase | Feature                        | Status      | Branch (planned)    |
-|-------|--------------------------------|-------------|---------------------|
-| 0     | S-curve engine + arc + homing  | ✅ Complete  | `scurve_motion`     |
-| 1     | Probing (G38.x)                | ✅ Code done — hw test pending | `scurve_motion` |
-| 2     | Tool length offsets (G43/G49)  | 🔲 Pending  | `tool_offsets`      |
-| 3     | Multi WCS (G54–G59)            | 🔲 Pending  | `multi_wcs`         |
-| 4     | Rigid tapping / canned cycles  | 🔲 Pending  | `canned_cycles`     |
-| 5     | CAN + EtherCAT drives          | 🔲 Pending  | `fieldbus`          |
-| 6     | Closed-loop encoder feedback   | 🔲 Pending  | `closed_loop`       |
+| Phase | Feature                                          | Status                          | Branch            |
+|-------|--------------------------------------------------|---------------------------------|-------------------|
+| 0     | S-curve engine + arc + homing                    | ✅ Complete                      | `scurve_motion`   |
+| 1     | Probing (G38.x)                                  | ✅ Code done — hw test pending   | `scurve_motion`   |
+| 2     | G43/G43.1/G49 Tool Length Offset                  | ✅ Complete                      | `scurve_motion`   |
+| 3     | G54–G59 Multiple Work Coordinate Systems          | ✅ Complete                      | `scurve_motion`   |
+| 4     | G81/G83/G80 canned drilling cycles; G33 stub      | ✅ Complete                      | `scurve_motion`   |
+| —     | Real-time overrides 0x90–0x9D (feed/rapid/spdl)  | ✅ Complete                      | `scurve_motion`   |
+| —     | Smooth feed-hold decel (`INTERPOLATOR_SoftStop`)  | ✅ Complete                      | `scurve_motion`   |
+| —     | Soft-limit homed gate (`machine_homed` flag)      | ✅ Complete                      | `scurve_motion`   |
+| 5a    | Software Jog (`$J=` + `0x85` cancel)             | ✅ Complete                      | `scurve_motion`   |
+| —     | Startup lines (`$N0`/`$N1` persist + boot exec)  | ✅ Complete                      | `scurve_motion`   |
+| —     | `is_control_char` 0x90–0x9D range fix             | ✅ Complete                      | `scurve_motion`   |
+| 5b    | TMC5160 SPI driver (`tmc5160.c`)                  | 🔲 Pending (infra done)         | TBD               |
+| 6     | CAN + EtherCAT drives                             | 🔲 Pending                      | `fieldbus`        |
+| 7     | Closed-loop encoder feedback                      | 🔲 Pending                      | `closed_loop`     |

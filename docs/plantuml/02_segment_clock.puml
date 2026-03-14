@@ -29,7 +29,7 @@ TMR4 -> GPIO : OC1 hardware auto-toggles step pin HIGH at compare match\n(silico
 TMR4 -> ISR : TMR4 overflows at PR4 → TIMER_4_InterruptHandler fires (IPL6)
 activate ISR
 note over ISR
-  M14K Shadow Register Set (IPL5):
+  M14K Shadow Register Set (IPL6):
   Entire CPU register file swapped in hardware in 1 cycle.
   Zero push/pop stack cost on ISR entry/exit.
 end note

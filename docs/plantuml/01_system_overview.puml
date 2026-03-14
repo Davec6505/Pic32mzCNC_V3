@@ -1,122 +1,106 @@
 @startuml
-title CNC Motion Control - System Overview (scurve_motion branch, March 2026)
-' Architecture: Single TIMER_4_ISR, Bresenham + velocity profiling inside ISR,
-' GRBL-exact three-pass look-ahead planner, period-based TMR4/TMR5
-' OC1 dual-compare generates step pulse GPIO in hardware (no OC1 interrupt)
+title CNC Motion Control — System Overview (scurve_motion, March 2026)
+' Architecture: inline G-code dispatch, S-curve trajectory planner (64-slot),
+' DDS interpolator, single TIMER_4_ISR (Bresenham + velocity, IPL6 shadow regs).
+' No gcode command queue for normal streaming — motion_bridge.c receives events
+' directly from gcode_parser.c. Arc segments generated in motion_bridge.c.
 !theme blueprint
 
-participant "GCODE_Tasks\n(✅ Complete)" as GCODE
-participant "UTILS_Module\n(✅ Complete)" as UTILS
-participant "APP_Tasks\n(✅ Complete)" as APP
-participant "KINEMATICS\n(\u2705 GRBL Planner)" as KINEMATICS
-participant "STEPPER\n(✅ Complete)" as STEPPER
-participant "MOTION_Tasks\n(✅ Complete)" as MOTION
-participant "LIMIT_CHECK\n(✅ Complete)" as LIMITS
-participant "TMR4\n(Period-Based\n781.25 kHz)" as TMR4
-participant "TIMER_4_ISR\n(IPL6 Shadow Regs\nBresenham + Velocity)" as OC1ISR
-participant "TMR5\n(One-Shot\nPulse Width)" as TMR5
+participant "UART3\nRing Buffer\n(1024 B RX/TX)" as UART
+participant "gcode_parser.c\n(GCODE_Tasks\nInline Dispatch)" as PARSER
+participant "motion_bridge.c\n(Event Handler\nArc State Machine)" as BRIDGE
+participant "trajectory.c\n(S-curve Planner\n64-slot Ring)" as TRAJ
+participant "kinematics.c\n(Work↔Machine\nCoord Transform)" as KIN
+participant "interpolator.c\n(DDS Generator\n100 kHz tick)" as INTERP
+participant "TIMER_4_ISR\n(IPL6 Shadow Regs\nBresenham + Velocity)" as ISR
+participant "TMR5\n(One-Shot\n~2.56 µs pulse)" as TMR5
+participant "Step GPIO\n(Harmony Macros)" as GPIO
 
-== G-code Reception & Parsing ==
-GCODE -> GCODE : Receive "G90G1X100Y25F1000S200M3"
-GCODE -> UTILS : Call UTILS_TokenizeGcodeLine()
-UTILS -> UTILS : Split: ["G90", "G1X100Y25F1000", "S200", "M3"]
-UTILS -> GCODE : Return tokenized commands
-GCODE -> GCODE : Store in gcodeCommandQueue (circular buffer, flow-controlled)
+== G-code Reception ==
+UART -> PARSER : UART3 ring buffer → rxBuffer[] (UART3_ISR fills ring)
+PARSER -> PARSER : service_realtime_byte() scanned first on every byte:\n  '?'  → build + send status string, no "ok"\n  '!'  → set g_feed_hold_active, no "ok"\n  '~'  → clear feed hold, no "ok"\n  Ctrl+X → PARSER_SoftReset(), send Grbl banner\n  0x90–0x9D → feed/rapid/spindle overrides, no "ok"\n  0x85 → jog cancel\n  G-code bytes preserved in push-back slot during realtime scan
+PARSER -> PARSER : Accumulate until \\n or \\r terminator
+PARSER -> PARSER : Strip comments, strip whitespace, uppercase
 
-== Event-Driven Processing in APP_Tasks ==
-APP -> GCODE : GCODE_GetNextEvent(&cmdQueue, &event)
-GCODE -> APP : event (G1, G90, M3, etc.)
+== System Commands ($H, $$, $n=v …) ==
+PARSER -> PARSER : Route $-prefix lines to system command handler
+PARSER -> BRIDGE : HOME event {axes_mask from $22}\n  (via inline dispatch — same path as G-code)
+PARSER -> UART : "ok\\r\\n" or "error:N\\r\\n"
 
-alt event.type == GCODE_EVENT_LINEAR_MOVE
-    APP -> APP : Check soft limits
-    APP -> KINEMATICS : KINEMATICS_LinearMove(start, end, feedrate, segment, 0, 0)
-    KINEMATICS -> KINEMATICS : Bresenham deltas, dominant axis, abs_delta[]
-    KINEMATICS -> KINEMATICS : GRBL-exact unit_vec + axis-limited accel/rate\n  (limit_acceleration_by_axis / limit_rate_by_axis)\n  Junction speed: centripetal approx (dot-product, no trig)\n  Writes: unit_vec, max_junction_speed_sqr,\n           max_entry_speed_sqr, entry_speed_sqr, millimeters
-    KINEMATICS -> APP : MotionSegment (planner fields populated)
-    APP -> APP : Enqueue in motionQueue[16]
-    APP -> MOTION : MOTION_PlannerRecalculate()\n  1. Reverse pass: cap entry_speed_sqr by decel constraints\n  2. Forward pass: cap entry_speed_sqr by accel constraints\n  3. Trapezoid pass: KINEMATICS_RecalculateTrapezoid()\n     writes initial_rate, nominal_rate, final_rate,\n     accelerate_until, decelerate_after
+== Linear / Rapid Move (G0 / G1) ==
+PARSER -> BRIDGE : LINEAR_MOVE event inline\n  {x,y,z,a, feedrate, is_rapid}
+BRIDGE -> KIN : KINEMATICS_WorkToMachine(pos, modal_state)\n  Applies: active WCS (G54–G59) + G92 + TLO (G43/G43.1)
+KIN -> BRIDGE : Machine-space CoordinatePoint
+BRIDGE -> TRAJ : TRAJECTORY_AddMove(start_mach, end_mach, feedrate)
+TRAJ -> TRAJ : normalise unit_vec[]\n  limit_acceleration_by_axis()\n  limit_rate_by_axis()\n  Junction: cos_theta = -dot(prev_unit, curr_unit)\n            sin_half  = sqrt(0.5*(1-cos_theta))\n            v²_junc   = accel × jdev × sin_half / (1-sin_half)
+TRAJ -> TRAJ : Enqueue MotionSegment → MOTION_PlannerRecalculate():\n  1. Reverse pass  — cap entry by next-segment decel constraint\n  2. Forward pass  — cap entry by preceding-segment accel constraint\n  3. Trapezoid pass — write initial/nominal/final_rate,\n                      accelerate_until, decelerate_after
+PARSER -> PARSER : Flow control — defer "ok" if traj queue ≥ HIGH_WATER (48)
+
+== Arc Move (G2 / G3) ==
+PARSER -> BRIDGE : ARC_MOVE event inline\n  {end, I/J/K, feedrate, is_CW, plane}
+BRIDGE -> BRIDGE : Validate: |r_start−r_end| < $13 → ALARM:5 on fail
+BRIDGE -> BRIDGE : armArcState = ARC_ACTIVE\n  Store: centre, radius, theta, thetaEnd, increment, arcEnd
+loop One chord per APP_Tasks() iteration — non-blocking
+  BRIDGE -> KIN : arc point (cx+r·cos θ, cy+r·sin θ) → machine coords
+  KIN -> BRIDGE : machine-space point
+  BRIDGE -> TRAJ : TRAJECTORY_AddMove(arcCurrent, next, feedrate)
+  TRAJ -> TRAJ : Enqueue + MOTION_PlannerRecalculate()
+  BRIDGE -> BRIDGE : theta += increment; arcCurrent = next
+  alt Trajectory queue full (backpressure)
+    BRIDGE -> BRIDGE : service_realtime_byte() — answer '?' queries
+    note right of BRIDGE
+      UGS status queries answered during backpressure.
+      G-code bytes protected by push-back slot.
+      No UGS timeout during long arcs.
+    end note
+  end
 end
-
-alt event.type == GCODE_EVENT_ARC_MOVE
-    APP -> APP : Compute center, radius, angle, segment count
-    APP -> APP : arcGenState = ARC_GEN_ACTIVE
-    loop One segment per APP_Tasks() iteration
-        APP -> KINEMATICS : KINEMATICS_LinearMove() for arc chord
-        KINEMATICS -> APP : MotionSegment (junction via unit_vec dot-product)
-        APP -> APP : Enqueue in motionQueue[16]
-        APP -> MOTION : MOTION_PlannerRecalculate()
-    end
-end
-
-== Hard Limit Monitoring (Every APP_Tasks Iteration) ==
-APP -> LIMITS : MOTION_UTILS_CheckHardLimits(invert_mask)
-alt Hard limit triggered
-    LIMITS -> APP : return true
-    APP -> STEPPER : STEPPER_DisableAll()
-    APP -> APP : APP_ALARM state, clear queues, send "ALARM:1"
-end
-
-== Segment Load (STEPPER_LoadSegment — main loop) ==
-MOTION -> STEPPER : STEPPER_LoadSegment(segment)
-STEPPER -> STEPPER : Populate ISR statics:\n  delta[], abs_delta[], dominant_axis,\n  dominant_delta, error[], direction_bits
-STEPPER -> STEPPER : Set direction GPIO pins (Harmony macros)\n  DirX_Set/Clear, DirY_Set/Clear, etc.\n  DIR must be stable BEFORE first STEP rising edge
-STEPPER -> TMR4 : PR4 = initial_rate (sets TMR4 rollover = step interval)
-STEPPER -> TMR4 : TMR4_Start() if not running
-note right of STEPPER
-  OC1 dual-compare auto-generates step pulse GPIO in hardware.
-  No OC1 interrupt — step ISR is TIMER_4_InterruptHandler (TMR4 overflow).
-end note
-note right of STEPPER
-  Segment transition race window:
-  currentSegment assigned before ISR statics populated.
-  One ISR fire may use prior-segment statics.
-  Practically harmless — same pattern as GRBL.
+note right of BRIDGE
+  Last segment uses exact arcEnd target — no accumulated
+  floating-point error at arc termination.
 end note
 
-== Per-Step Cycle (TIMER_4_ISR — all axes, full Bresenham) ==
-TMR4 -> GPIO : OC1 hardware auto-toggles step pin HIGH at compare match
-TMR4 -> OC1ISR : TMR4 overflows at PR4 → TIMER_4_InterruptHandler fires (IPL6)
-activate OC1ISR
-note over OC1ISR
+== Interpolator — Segment Load (main loop, every APP_Tasks) ==
+INTERP -> INTERP : trajectory ring non-empty + no currentSegment?\n  → Load next MotionSegment into ISR statics:\n    delta[], abs_delta[], direction_bits, error[],\n    initial_rate, accelerate_until, decelerate_after
+INTERP -> GPIO : DirX/Y/Z/A_Set/Clear — direction stable BEFORE first STEP
+INTERP -> ISR : TMR4_Start() if not running — motion begins
+
+== Per-Step Cycle (TIMER_4_InterruptHandler — IPL6) ==
+ISR -> GPIO : OC1 dual-compare hardware auto-toggles dominant-axis STEP HIGH\n  (silicon — zero CPU cost for rising edge)
+activate ISR
+note over ISR
   M14K Shadow Register Set (IPL6):
-  Hardware register swap in 1 cycle.
-  Zero push/pop stack cost on entry/exit.
+  Entire CPU register file swapped in hardware in 1 cycle.
+  Zero push/pop stack cost on ISR entry/exit.
 end note
-OC1ISR -> OC1ISR : Cache seg = currentSegment (NULL guard)
-OC1ISR -> OC1ISR : Dominant axis STEP HIGH\n  switch(dominant_axis) → Harmony macro → LATxSET\n  Compiler: jump table → 1 branch + 1 register write
-OC1ISR -> OC1ISR : AXIS_IncrementSteps / AXIS_DecrementSteps\n  (always_inline — address never taken → genuine inline)
-OC1ISR -> OC1ISR : Bresenham loop (max 3 subordinate axes)\n  error[axis] += abs_delta[axis]\n  if error >= dominant_delta:\n    switch(axis) → StepY_Set()/StepZ_Set()/StepA_Set()\n    AXIS_IncrementSteps / DecrementSteps\n    error[axis] -= dominant_delta
-OC1ISR -> TMR5 : T5CONSET = _T5CON_ON_MASK (direct SFR — start one-shot)
-OC1ISR -> OC1ISR : Velocity profiling (integer only, no float, no division)\n  ACCEL: step_interval -= rate_delta  (precomputed look-ahead)\n  DECEL: step_interval += decel_rate_delta\n  CRUISE: unchanged
-OC1ISR -> OC1ISR : Direct SFR: PR4 = period  (clamp min 7 ticks)
-OC1ISR -> OC1ISR : seg->steps_completed++
-deactivate OC1ISR
-TMR4 -> TMR4 : Rolls over at PR4 → next cycle
+ISR -> ISR : Guard: seg = currentSegment; return if NULL
+ISR -> GPIO : switch(dominant_axis) → Harmony macro → single LATxSET write\n  (compiler emits jump table — no function call, no pointer indirection)
+ISR -> ISR : AXIS_IncrementSteps / AXIS_DecrementSteps (always_inline)
+loop Bresenham subordinate axes (0–3, bounded worst-case)
+  ISR -> ISR : error[axis] += abs_delta[axis]
+  alt error[axis] >= dominant_delta
+    ISR -> GPIO : switch(axis) → StepY/Z/A_Set() → single LATxSET
+    ISR -> ISR : position counter; error[axis] -= dominant_delta
+  end
+end
+ISR -> TMR5 : T5CONSET direct SFR — start one-shot pulse-width timer
+ISR -> ISR : Velocity profile (integer only — no float, no division):\n  sc < accelerate_until  → step_interval -= rate_delta\n  sc >= decelerate_after → step_interval += decel_rate_delta\n  cruise                 → unchanged
+ISR -> ISR : PR4 = step_interval (direct SFR, min clamp 7 ticks)
+ISR -> ISR : seg->steps_completed++\n  if complete: T4CONCLR inside ISR; motionSegmentCompleted = true
+deactivate ISR
+TMR5 -> GPIO : ~2.56 µs: StepX/Y/Z/A_Clear() — 4 unrolled Harmony macros\n  All axes cleared unconditionally. DRV8825 min: 1 µs; TMC5160 min: 100 ns.
 
-== Pulse Width Expiry (~2.56 µs) ==
-TMR5 -> OC1ISR : TMR5_PulseWidthCallback()
-OC1ISR -> OC1ISR : T5CONCLR = _T5CON_ON_MASK (stop one-shot)
-OC1ISR -> GPIO : StepX_Clear(); StepY_Clear(); StepZ_Clear(); StepA_Clear()\n  4 unrolled Harmony macros → 4 LATxCLR writes
+== Segment Completion (main loop — interpolator.c) ==
+INTERP -> INTERP : steps_completed >= steps_remaining?\n  → currentSegment = NULL\n  → motionSegmentCompleted = true (triggers deferred "ok" check)\n  → Load next segment if queue non-empty\n  → TMR4_Stop() if queue empty; motionActive = false
 
-== Segment Completion ==
-MOTION -> MOTION : Poll steps_completed >= steps_remaining
-MOTION -> MOTION : currentSegment = NULL, motionQueueCount--
-MOTION -> MOTION : motionSegmentCompleted = true → deferred "ok" check
-MOTION -> STEPPER : Load next segment from queue (seamless)
-
-== Compile-Time Debug System ==
-note over APP, MOTION
-  Build: make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_STEPPER"
-  Release: DEBUG_PRINT_XXX() macros compile to ((void)0) — zero bytes.
-  Debug:   macros expand to UART_Printf() calls.
-  No runtime checks, no if() overhead — pure preprocessor.
-end note
-
-== Build Commands ==
-note over GCODE, LIMITS
-  make                                         # Release build (default)
-  make BUILD_CONFIG=Debug DEBUG_FLAGS="..."    # Debug build
-  Always run from repository root directory.
+== Safety ==
+note over PARSER, GPIO
+  g_feed_hold_active       — set by '!';  cleared by '~' or soft reset
+  g_feed_hold_pending      — set by '!';  cleared when queue drains to 0
+  g_suppress_hard_limits   — set by Ctrl+X; cleared when limits physically release
+  g_estop_pending          — INT3 (RF4) IPL7 → STEPPER_DisableAll() + APP_ALARM
+  INT1 (RF3) IPL6          — probe contact; latch probePosition, stop interpolator
+  Hard limit check         — MOTION_UTILS_CheckHardLimits() every APP_Tasks
 end note
 
 @enduml

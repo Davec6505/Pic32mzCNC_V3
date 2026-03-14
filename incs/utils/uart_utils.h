@@ -61,6 +61,18 @@ bool UART_Printf(const char* format, ...);
 
 /* ========== GRBL PROTOCOL MESSAGE HELPERS ========== */
 
+typedef struct {
+    uint32_t ok_attempted;
+    uint32_t ok_enqueued;
+    uint32_t ok_dropped;
+    uint32_t status_attempted;
+    uint32_t status_enqueued;
+    uint32_t status_dropped;
+    uint32_t last_ok_tx_free;
+    uint32_t last_status_tx_free;
+    uint32_t last_status_len;
+} UART_TxStats;
+
 /**
  * @brief Send GRBL "ok\r\n" response
  * @return true if sent, false if TX buffer full
@@ -68,13 +80,40 @@ bool UART_Printf(const char* format, ...);
 bool UART_SendOK(void);
 
 /**
- * @brief Worst-case GRBL command line length (bytes) — used as the UART3 RX
- * ring-buffer free-space gate before sending "ok".
- * If the ring has fewer free bytes than this, the "ok" is deferred until
- * space opens up (i.e., UGS is bursting faster than we can consume).
- * Worst case: "G2 X-123.456 Y-123.456 I-123.456 J-123.456 F12345\n" ~55 bytes.
+ * @brief Reset accumulated UART TX instrumentation counters.
  */
-#define UART_RX_CMD_MAX_BYTES  64u
+void UART_ResetTxStats(void);
+
+/**
+ * @brief Read a snapshot of UART TX instrumentation counters.
+ * @param out Destination for the current counters.
+ */
+void UART_GetTxStats(UART_TxStats* out);
+
+/**
+ * @brief Enqueue a preformatted GRBL status report and track TX success.
+ * @param msg Status message buffer.
+ * @param len Length in bytes.
+ * @return true if the full report was enqueued, false on short write.
+ */
+bool UART_WriteStatusReport(const uint8_t* msg, size_t len);
+
+/**
+ * @brief UGS pipeline window size (bytes) — used as the UART3 RX ring-buffer
+ * free-space gate before sending "ok".
+ *
+ * UGS hardcodes a 128-byte sliding window: it sends commands until
+ * (bytes-in-flight + next-cmd-length) > 128, then waits for "ok" before
+ * sending more.  This means each "ok" we send grants UGS permission to
+ * transmit up to 128 bytes.  We must therefore ensure the ring has AT LEAST
+ * 128 bytes free before sending "ok" — otherwise UGS's burst overflows the
+ * ring and silently drops bytes (truncated G-code → parser stall).
+ *
+ * Ring = 1024 bytes, window = 128 bytes → 8 full bursts fit in the ring.
+ * We stream oks freely (allowing up to 7 bursts to accumulate), then hold
+ * on the 8th until the ring drains ≥ 128 bytes of free space, then resume.
+ */
+#define UART_RX_CMD_MAX_BYTES  128u
 
 /**
  * @brief Send GRBL status report (e.g., "<Idle|MPos:0.000,0.000,0.000|...>")
