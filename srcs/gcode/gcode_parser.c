@@ -109,6 +109,7 @@ static char startupLines[2][GCODE_BUFFER_SIZE] = {{0},{0}}; /* $N0 / $N1 */
 static int  s_boot_inject_idx = -1; /* -1 = idle; 0/1 = injecting line[0/1] */
 static bool unitsInches  = false;           /* false=mm (G21), true=inches (G20) */
 static bool s_canned_g98 = true;            /* true=G98 (return initial Z), false=G99 (return R) */
+static char s_last_cmd_terminator = '\n';  /* terminator char NUL'd in IDLE — '\r' means CRLF, so GCODE_COMMAND skips the LF */
 
 /* ✅ REMOVED: Startup deferral variables (caused UGS stalling) */
 
@@ -1246,6 +1247,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                        rxBuffer[0] == 'F' || rxBuffer[0] == 'f' ||
                        rxBuffer[0] == 'T' || rxBuffer[0] == 't' ||
                        rxBuffer[0] == 'S' || rxBuffer[0] == 's') {
+                s_last_cmd_terminator = saved_terminator;  /* needed by GCODE_COMMAND skip */
                 gcodeData.state = GCODE_STATE_GCODE_COMMAND;
             } else {
                 // Determine if line contains G-code content (ignore pure comments / whitespace)
@@ -1292,8 +1294,11 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     }
                 }
                 uint32_t skip_pos = terminator_pos + 1;
-                while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
+                /* Only consume the LF of a \r\n pair — any further \n are blank lines
+                 * that IDLE must process on the next iteration so they each get an ok. */
+                if (saved_terminator == '\r' && skip_pos < nBytesRead && rxBuffer[skip_pos] == '\n') {
                     skip_pos++;
+                }
                 uint32_t remaining_bytes = nBytesRead - skip_pos;
                 if (remaining_bytes > 0) {
                     memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
@@ -1840,6 +1845,18 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                     service_realtime_byte(appData, rt);
                 }
             }
+            /* Rate-limited unsolicited status: keep UGS visualisation alive when
+             * '?' bytes cannot be reached through buffered G-code in the ring.
+             * CP0 Count increments at CPU_FREQ/2 = 100 MHz; 20 000 000 ticks ≈ 200 ms.
+             * Uses unsigned subtraction so wrap-around (every ~42.9 s) is handled. */
+            {
+                static uint32_t s_last_retry_status = 0;
+                uint32_t now = (uint32_t)_CP0_GET_COUNT();
+                if ((now - s_last_retry_status) >= 20000000UL) {
+                    service_realtime_byte(appData, '?');
+                    s_last_retry_status = now;
+                }
+            }
             break;  // stay in GCODE_STATE_GCODE_COMMAND, retry next iteration
         }
 
@@ -1856,8 +1873,11 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 
         {
             uint32_t skip_pos = cmd_end + 1u;
-            while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
+            /* Only consume the LF of a \r\n pair — any further \n are blank lines
+             * that must stay in rxBuffer for IDLE to process and send ok for. */
+            if (s_last_cmd_terminator == '\r' && skip_pos < nBytesRead && rxBuffer[skip_pos] == '\n') {
                 skip_pos++;
+            }
             uint32_t remaining_bytes = nBytesRead - skip_pos;
             if (remaining_bytes > 0) {
                 memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
