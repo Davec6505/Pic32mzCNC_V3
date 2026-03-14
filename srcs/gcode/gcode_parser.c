@@ -98,6 +98,8 @@ static bool     s_homing_started = false;   // true once HOMING_IsActive() first
 static bool grblCheckMode = false;          /* $C toggle */
 static bool grblAlarm = false;              /* $X clears alarm */
 
+bool GCODE_IsCheckMode(void) { return grblCheckMode; }
+
 /* 1-byte push-back slot used by the GCODE_STATE_GCODE_COMMAND retry drain.    */
 /* When the drain reads a non-real-time byte (first byte of a G-code command)  */
 /* it puts it here rather than losing it.  GCODE_STATE_IDLE injects it back    */
@@ -1619,10 +1621,18 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             } else if (target == '$') {
                 SETTINGS_RestoreDefaults(SETTINGS_GetCurrent());
             } else if (target == '#') {
+                // Clear active WCS in RAM
                 WorkCoordinateSystem* wcs = KINEMATICS_GetWorkCoordinates();
                 for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
                     SET_COORDINATE_AXIS(&wcs->offset, axis, 0.0f);
                 }
+                // Clear all WCS slots (G54-G59) in flash
+                for (uint8_t i = 0; i < 6u; i++) {
+                    SETTINGS_SetWorkCoordinateSystem(i, 0.0f, 0.0f, 0.0f);
+                }
+                // Clear G92 temporary offset and persist everything
+                KINEMATICS_ClearG92Offset();
+                SETTINGS_SaveToFlash(SETTINGS_GetCurrent());
             } else {
                 UART3_Write((uint8_t*)"error:4\r\n", 10);
                 send_ok = false;

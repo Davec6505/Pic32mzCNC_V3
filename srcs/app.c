@@ -374,21 +374,12 @@ void APP_Tasks ( void )
                     // ✅ PROBE TRIGGERED - Stop motion immediately
                     DEBUG_PRINT_MOTION("[PROBE] Triggered! Stopping motion\r\n");
                     
-                    // Stop all motion
-                    TMR4_Stop();
-                    STEPPER_DisableAll();
+                    // Stop all motion — flush trajectory queue + interpolator correctly
+                    STEPPER_StopMotion();
+                    appData.arcGenState = ARC_GEN_IDLE;
                     
-                    // Clear motion queue
-                    appData.motionQueueHead = 0;
-                    appData.motionQueueTail = 0;
-                    appData.motionQueueCount = 0;
-                    appData.currentSegment = NULL;
-                    
-                    // Save trigger position (current position is exact trigger point)
-                    appData.probePosition.coordinate[AXIS_X] = appData.current[AXIS_X];
-                    appData.probePosition.coordinate[AXIS_Y] = appData.current[AXIS_Y];
-                    appData.probePosition.coordinate[AXIS_Z] = appData.current[AXIS_Z];
-                    appData.probePosition.coordinate[AXIS_A] = appData.current[AXIS_A];
+                    // Save trigger position from live step counters (accurate — not stale)
+                    appData.probePosition = KINEMATICS_GetCurrentPosition();
                     
                     // Mark success and transition to triggered state
                     appData.probeSuccess = true;

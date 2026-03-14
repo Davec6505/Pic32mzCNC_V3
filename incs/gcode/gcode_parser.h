@@ -152,6 +152,7 @@ void GCODE_ConsumeEvent(GCODE_CommandQueue* cmdQueue);  // Consume event after s
 
 // Check and send deferred "ok" responses (for flow control and startup deferral)
 void GCODE_CheckDeferredOk(APP_DATA* appData, GCODE_CommandQueue* cmdQueue);
+bool GCODE_IsCheckMode(void);  /* true when $C check mode is active */
 
 
 #endif // GCODE_PARSER_H
