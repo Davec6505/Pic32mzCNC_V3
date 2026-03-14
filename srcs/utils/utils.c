@@ -2,7 +2,7 @@
 #include "common.h"
 #include "utils/uart_utils.h"
 #include "settings/settings.h"
-#include "motion/stepper.h"
+#include "motion/motion_bridge.h"
 #include "../config/default/peripheral/gpio/plib_gpio.h"  // GPIO macros
 #include "../config/default/peripheral/coretimer/plib_coretimer.h"  // CoreTimer for sampling
 #include <sys/kmem.h>  // For register address macros

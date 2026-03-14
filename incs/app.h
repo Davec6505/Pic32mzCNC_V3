@@ -16,7 +16,7 @@
 #include "motion.h"
 #include "kinematics.h"
 #include "common.h"
-#include "stepper.h"
+#include "motion_bridge.h"
 
 /* E-Stop atomic flag — see stepper.h (defined in stepper.c) */
 

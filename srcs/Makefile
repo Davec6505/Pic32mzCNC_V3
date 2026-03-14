@@ -131,7 +131,7 @@ $(wildcard $(1)/*.c) $(wildcard $(1)/*/*.c) $(wildcard $(1)/*/*/*.c) $(wildcard 
 endef
 # Get all source files and filter out test files for production CNC build
 ALL_SRCS := $(call get_c_files,$(SRC_DIR))
-EXCLUDED_FILES := $(SRC_DIR)/gcode_test_app.c $(SRC_DIR)/gcode_test_framework.c $(SRC_DIR)/gcode_parser_dma.c $(SRC_DIR)/motion/stepper.c
+EXCLUDED_FILES := $(SRC_DIR)/gcode_test_app.c $(SRC_DIR)/gcode_test_framework.c $(SRC_DIR)/gcode_parser_dma.c
 
 # Library source files (placed in BASE_LIB_DIR folder - these can be built as separate library)
 LIB_SRCS := $(wildcard $(BASE_LIB_DIR)/*.c)

@@ -2,7 +2,32 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 2026
+**Last Updated**: March 14, 2026
+
+---
+
+## ✅ FIX: CNC completeness — probe, check mode, ALARM:4, soft limits, $RST=# (March 14, 2026)
+
+Commit `0f7d72d` — 6 bugs found in completeness audit, all fixed, clean build.
+
+### Bug #2/#3 — Probe trigger position + stop sequence
+- `srcs/app.c:378–391` — `PROBE_STATE_MOVING` handler: replaced `TMR4_Stop()` + dead legacy motionQueue clear with `STEPPER_StopMotion()` (flushes trajectory queue + interpolator) + `appData.arcGenState = ARC_GEN_IDLE`
+- `srcs/app.c:388` — Probe position now reads `KINEMATICS_GetCurrentPosition()` (live step counters) instead of stale `appData.current[]` which was never updated during motion
+
+### Bug #1 — `$C` check mode doesn't suppress motion
+- `srcs/gcode/gcode_parser.c:99` — Added `bool GCODE_IsCheckMode(void)` getter returning `grblCheckMode`
+- `incs/gcode/gcode_parser.h:154` — Added `GCODE_IsCheckMode()` declaration
+- `srcs/motion/motion_bridge.c:454` — `MOTION_ProcessGcodeEvent()` returns `true` immediately when check mode active — events consumed (ok sent) but no motion/spindle executed
+
+### Bug #5 — Arc end-point ALARM:4 missing
+- `srcs/motion/motion_bridge.c` — After computing `theta_end`, compute `r_end = sqrtf(dx_e²+dy_e²)`; if `|r_end - radius| > 0.002mm` fire `UART_SendAlarm(4)` + `APP_ALARM`
+
+### Bug #4 — Soft limits not checked for arc moves or jog
+- `srcs/motion/motion_bridge.c` — `GCODE_EVENT_JOG`: soft limit check on machine end point after `WorkToMachine()`
+- `srcs/motion/motion_bridge.c` — `GCODE_EVENT_ARC_MOVE`: soft limit check on machine end point after coordinate transform; both raise `ALARM:2`
+
+### Bug #7 — `$RST=#` not persistent, G92 not cleared
+- `srcs/gcode/gcode_parser.c:1626` — `$RST=#` now: clears active WCS in RAM, calls `SETTINGS_SetWorkCoordinateSystem(i, 0,0,0)` for all 6 slots, calls `KINEMATICS_ClearG92Offset()`, calls `SETTINGS_SaveToFlash()` — fully persistent
 
 ---
 

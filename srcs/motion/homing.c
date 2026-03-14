@@ -6,7 +6,7 @@
 #include "motion/homing.h"
 #include "motion/kinematics.h"
 #include "motion/motion.h"
-#include "motion/stepper.h"
+#include "motion/motion_bridge.h"
 #include "motion/motion_utils.h"
 #include "motion/interpolator.h"
 #include "motion/trajectory.h"

@@ -52,31 +52,6 @@ typedef struct {
 
 
 // ============================================================================
-// ============================================================================
-// GRBL-Style Segment Buffer Architecture (March 2, 2026)
-// ============================================================================
-// GRBL breaks each planner block into many small constant-velocity segments.
-// The ISR executes pure Bresenham with a fixed step rate per segment.
-// No acceleration profiling in ISR - all velocity changes are pre-computed.
-
-#define SEGMENT_BUFFER_SIZE 16  // Ring buffer for small segments
-
-// Stepper Block - Bresenham data for one planner block
-// One st_block per planner block, contains step counts for Bresenham
-typedef struct {
-    uint32_t steps[NUM_AXIS];        // Total steps per axis for this planner block
-    uint32_t step_event_count;       // Total dominant axis steps
-    uint8_t direction_bits;          // Direction bits (1 bit per axis)
-} StepperBlock;
-
-// Step Segment - Small constant-velocity chunk
-// Many segments per planner block, each with fixed PR4 value
-typedef struct {
-    uint16_t n_step;                 // Number of dominant-axis steps in this segment
-    uint32_t step_interval;          // PR4 value (constant for this segment)
-    uint8_t st_block_index;          // Index into stepper block buffer
-} StepSegment;
-
 // Motion Segment Structure (Planner Block)
 // ============================================================================
 // This is what the planner works with - full move with trapezoid profile
@@ -190,39 +165,8 @@ typedef struct {
     // G-code command queue (with nested motion info for flow control)
     GCODE_CommandQueue gcodeCommandQueue;
     
-    // Motion queue (Planner blocks)
-    MotionSegment motionQueue[MAX_MOTION_SEGMENTS];
-    uint32_t motionQueueHead;
-    uint32_t motionQueueTail;
+    // Motion queue count (authoritative — set by motion_bridge from TRAJECTORY_QueueCount)
     uint32_t motionQueueCount;
-    
-    // =========================================================================
-    // GRBL Segment Buffer - Small constant-velocity segments
-    // =========================================================================
-    StepperBlock stepperBlocks[MAX_MOTION_SEGMENTS];  // One per planner block
-    StepSegment segmentBuffer[SEGMENT_BUFFER_SIZE];   // Ring buffer of small segments
-    volatile uint8_t segmentBufferTail;               // ISR reads from tail
-    uint8_t segmentBufferHead;                        // Main loop writes to head
-    uint8_t segmentNextHead;                          // Next head position
-    
-    // Segment preparation state (exact port of GRBL's st_prep_t)
-    uint8_t prep_st_block_index;      // Current stepper block being prepped
-    float prep_mm_remaining;          // mm remaining in current block (counts DOWN from millimeters to 0); MUST be initialised to millimeters at block load
-    float prep_current_speed;         // Current speed at end of last segment (mm/s)
-    uint8_t prep_ramp_type;           // 0=accel, 1=cruise, 2=decel
-    MotionSegment* prep_pl_block;     // Planner block being segmented
-    // GRBL st_prep_t fields (added to match GRBL's st_prep_buffer exactly)
-    float prep_steps_remaining;       // Float step count remaining (high precision, decrements)
-    float prep_step_per_mm;           // steps/mm for current block
-    float prep_req_mm_increment;      // Min mm to guarantee >= 1 step (1.25/step_per_mm)
-    float prep_dt_remainder;          // Fractional step time carried from previous segment
-    float prep_accelerate_until;      // mm_remaining at end of accel ramp (GRBL notation: counts down)
-    float prep_decelerate_after;      // mm_remaining at start of decel ramp (GRBL notation: counts down)
-    float prep_maximum_speed;         // Peak speed in block (nominal or triangle peak) (mm/s)
-    float prep_mm_complete;           // Target mm_remaining (0.0 = run to end of block)
-    float prep_exit_speed;            // Block exit speed (mm/s)
-    
-    // =========================================================================
     
     // ✅ ARRAY-BASED: Current position tracking (work coordinates) [X, Y, Z, A]
     float current[4];
@@ -238,13 +182,6 @@ typedef struct {
     // Alarm state (GRBL safety)
     uint8_t alarmCode;        // 0=no alarm, 1=hard limit, 2=soft limit, 3=abort, 10=E-Stop
     volatile bool eStopTriggered;  // Set by E-Stop ISR (RF4/CN-F IPL7)
-    
-    E_AXIS dominantAxis;               // Which axis drives the step clock for current segment
-    MotionSegment* currentSegment;     // Pointer to active segment being executed
-    
-    // ✅ ARRAY-BASED: Bresenham state (for phase processing) [X, Y, Z, A]
-    // Note: All axes can have errors since ANY axis can be dominant based on plane selection
-    int32_t bresenham_error[NUM_AXIS];
     
     // Rate limiting counters
     uint32_t uartPollCounter;          // Counter for UART polling (every ~10ms)

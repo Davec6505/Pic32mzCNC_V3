@@ -1,6 +1,6 @@
 
-#ifndef STEPPER_H
-#define STEPPER_H
+#ifndef MOTION_BRIDGE_H
+#define MOTION_BRIDGE_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -43,7 +43,7 @@ void STEPPER_SetDirection(E_AXIS axis, bool forward);     // Set direction for a
 void STEPPER_DisableAll(void);                            // Emergency stop
 StepperPosition* STEPPER_GetPosition(void);               // Get current position (snapshot)
 StepperPosition* STEPPER_GetPositionPointer(void);        // Get pointer to live position counters
-float STEPPER_GetCurrentFeedrateMmMin(void);              // Real-time feedrate from step_interval (mm/min)
+float STEPPER_GetCurrentFeedrateMmMin(void);              // Real-time feedrate (mm/min)
 
 /* Returns true if steppers currently enabled. */
 bool STEPPER_IsEnabled(void);
@@ -70,4 +70,4 @@ void STEPPER_FinalizeHold(void);
    Call on '~' real-time command after STEPPER_PauseMotion(). */
 void STEPPER_ResumeMotion(void);
 
-#endif /* STEPPER_H */
+#endif /* MOTION_BRIDGE_H */

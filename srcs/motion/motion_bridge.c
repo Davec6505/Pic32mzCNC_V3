@@ -21,7 +21,7 @@
  * app.c, gcode_parser.c, and homing.c via `extern` declarations in stepper.h.
  */
 
-#include "motion/stepper.h"
+#include "motion/motion_bridge.h"
 #include "motion/motion.h"
 #include "motion/trajectory.h"
 #include "motion/interpolator.h"
@@ -448,6 +448,10 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
 {
     if (appData == NULL || event == NULL) return false;
 
+    // Check mode ($C): G-code is parsed and validated but not executed.
+    // Consume the event silently so flow control sends ok normally.
+    if (GCODE_IsCheckMode()) return true;
+
     const CNC_Settings *s = SETTINGS_GetCurrent();
 
     switch (event->type) {
@@ -478,6 +482,22 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             end_w.coordinate[AXIS_Z] = event->data.linearMove.z;
             end_w.coordinate[AXIS_A] = event->data.linearMove.a;
             CoordinatePoint end = KINEMATICS_WorkToMachine(end_w);
+
+            // Soft limit check for jog moves
+            if (s->soft_limits_enable && appData->machine_homed) {
+                for (int axis = 0; axis < NUM_AXIS; axis++) {
+                    float pos    = end.coordinate[axis];
+                    float travel = s->max_travel[axis];
+                    if (travel <= 0.0f) continue;  // skip unconfigured / rotary axes
+                    if (pos < -0.001f || pos > travel + 0.001f) {
+                        UART_SendAlarm(2);   // Soft limit exceeded
+                        STEPPER_StopMotion();
+                        appData->state    = APP_ALARM;
+                        appData->alarmCode = 2;
+                        return false;
+                    }
+                }
+            }
 
             float fr = event->data.linearMove.feedrate;
             if (fr < 1.0f) fr = 1.0f;
@@ -660,6 +680,22 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             float ez = end_m.coordinate[AXIS_Z];
             float ea = end_m.coordinate[AXIS_A];
 
+            // Soft limit check on arc endpoint
+            if (s->soft_limits_enable && appData->machine_homed) {
+                for (int axis = 0; axis < NUM_AXIS; axis++) {
+                    float pos    = end_m.coordinate[axis];
+                    float travel = s->max_travel[axis];
+                    if (travel <= 0.0f) continue;  // skip unconfigured / rotary axes
+                    if (pos < -0.001f || pos > travel + 0.001f) {
+                        UART_SendAlarm(2);   // Soft limit exceeded
+                        STEPPER_StopMotion();
+                        appData->state    = APP_ALARM;
+                        appData->alarmCode = 2;
+                        return false;
+                    }
+                }
+            }
+
             float fr = event->data.arcMove.feedrate;
             if (fr < 1.0f && s_modal_feedrate_mm_min >= 1.0f)
                 fr = s_modal_feedrate_mm_min;   // use modal feedrate (e.g. from prior G1 F1200)
@@ -676,6 +712,16 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             float dx_e = ex - cx;
             float dy_e = ey - cy;
             float theta_end = atan2f(dy_e, dx_e);
+
+            // Verify end-point radius matches start-point radius (GRBL ALARM:4)
+            float r_end = sqrtf(dx_e * dx_e + dy_e * dy_e);
+            if (fabsf(r_end - radius) > 0.002f) {
+                UART_SendAlarm(4);   // Arc radius tolerance exceeded
+                STEPPER_StopMotion();
+                appData->state    = APP_ALARM;
+                appData->alarmCode = 4;
+                return false;
+            }
 
             bool cw = event->data.arcMove.clockwise;
             float sweep;
