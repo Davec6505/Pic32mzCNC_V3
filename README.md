@@ -1,5 +1,11 @@
 # Pic32mzCNC_V3 — CNC Motion Control System
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![MCU](https://img.shields.io/badge/MCU-PIC32MZ2048EFH100-blue)]()
+[![Protocol](https://img.shields.io/badge/Protocol-GRBL%20v1.1-green)]()
+[![Hardware Validated](https://img.shields.io/badge/Hardware-Validated%20March%202026-brightgreen)]()
+[![Compiler](https://img.shields.io/badge/Compiler-XC32%20v4.x-orange)]()
+
 GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, targeting LitePlacer pick-and-place and general CNC applications. Supports mixed TMC5160 (SPI) and DRV8825/A4988/TMC2208 (step-dir) stepper drivers on the same board.
 
 ---
