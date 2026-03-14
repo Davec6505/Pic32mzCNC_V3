@@ -59,7 +59,11 @@ typedef enum {
     GCODE_EVENT_CANNED_DRILL,       // G81           - Simple drill cycle
     GCODE_EVENT_CANNED_PECK,        // G83           - Peck drilling cycle
     GCODE_EVENT_CANNED_CANCEL,      // G80           - Cancel canned cycle
-    GCODE_EVENT_JOG                 // $J=           - Jog move (bypasses command queue)
+    GCODE_EVENT_JOG,                // $J=           - Jog move (bypasses command queue)
+    GCODE_EVENT_GOTO_G28,           // G28           - Rapid to stored G28 machine position
+    GCODE_EVENT_GOTO_G30,           // G30           - Rapid to stored G30 machine position
+    GCODE_EVENT_SET_G28,            // G28.1         - Store current machine pos as G28
+    GCODE_EVENT_SET_G30             // G30.1         - Store current machine pos as G30
 } GCODE_EventType;
 
 typedef struct {

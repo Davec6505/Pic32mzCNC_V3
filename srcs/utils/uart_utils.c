@@ -68,12 +68,15 @@ bool UART_Printf(const char* format, ...) {
 /* ========== GRBL PROTOCOL MESSAGE HELPERS ========== */
 
 bool UART_SendOK(void) {
-    size_t written;
-
     s_uart_tx_stats.ok_attempted++;
     s_uart_tx_stats.last_ok_tx_free = (uint32_t)UART3_WriteFreeBufferCountGet();
 
-    written = UART3_Write((uint8_t*)"ok\r\n", 4);
+    /* Spin-wait for 4 bytes of TX space.  "ok\r\n" is only 4 bytes; at
+     * 115200 baud this takes at most ~0.35 ms — acceptable to guarantee
+     * an atomic ok write and avoid the partial-write "okok" corruption. */
+    while (UART3_WriteFreeBufferCountGet() < 4u) { /* spin */ }
+
+    size_t written = UART3_Write((uint8_t*)"ok\r\n", 4);
     if (written == 4u) {
         s_uart_tx_stats.ok_enqueued++;
         return true;
@@ -84,8 +87,6 @@ bool UART_SendOK(void) {
 }
 
 bool UART_WriteStatusReport(const uint8_t* msg, size_t len) {
-    size_t written;
-
     if (msg == NULL || len == 0u) {
         return false;
     }
@@ -94,7 +95,15 @@ bool UART_WriteStatusReport(const uint8_t* msg, size_t len) {
     s_uart_tx_stats.last_status_tx_free = (uint32_t)UART3_WriteFreeBufferCountGet();
     s_uart_tx_stats.last_status_len = (uint32_t)len;
 
-    written = UART3_Write((uint8_t*)msg, len);
+    // Guard: only write if the ring buffer has room for the ENTIRE message.
+    // A partial write causes interleaved output when polled faster than UART drains.
+    // Drop silently rather than corrupt the byte stream.
+    if ((size_t)UART3_WriteFreeBufferCountGet() < len) {
+        s_uart_tx_stats.status_dropped++;
+        return false;
+    }
+
+    size_t written = UART3_Write((uint8_t*)msg, len);
     if (written == len) {
         s_uart_tx_stats.status_enqueued++;
         return true;

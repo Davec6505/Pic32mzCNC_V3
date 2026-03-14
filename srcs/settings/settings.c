@@ -108,6 +108,10 @@ static const CNC_Settings default_settings = {
     
     // Tool length offset - initialized to zero
     .tool_length_offset = 0.0f,
+
+    // G28 / G30 stored machine positions - initialized to machine origin
+    .g28_position = {0.0f, 0.0f, 0.0f, 0.0f},  // [X, Y, Z, A]
+    .g30_position = {0.0f, 0.0f, 0.0f, 0.0f},  // [X, Y, Z, A]
     
     // Arc configuration ($12-$13)
     .mm_per_arc_segment = 0.5f,    // $12 - Increased from 0.1mm - creates larger segments with reliable step counts
@@ -576,7 +580,7 @@ void SETTINGS_PrintBuildInfo(void)
 {
     // ✅ GRBL v1.1 format - UGS expects specific format!
     // Format: [VER:version] [OPT:options,blockbuffersize,rxbuffersize]
-    const char build_info[] = "[VER:1.1h.20251102]\r\n[OPT:VHM,35,127,4]\r\nok\r\n";
+    const char build_info[] = "[VER:1.1h.20251102]\r\n[OPT:VHM,35,1023,4]\r\nok\r\n";
     
     // ✅ Write to PLIB TX ring buffer - ISR transmits in background
     UART3_Write((uint8_t*)build_info, sizeof(build_info) - 1);  // -1 excludes null terminator
@@ -662,4 +666,26 @@ float SETTINGS_GetToolLengthOffset(void) {
 void SETTINGS_SetToolLengthOffset(float offset) {
     current_settings.tool_length_offset = offset;
     SETTINGS_SaveToFlash(&current_settings);  // Save TLO to flash
+}
+
+/* Get stored G28 machine position */
+void SETTINGS_GetG28Position(float out[4]) {
+    for (int i = 0; i < 4; i++) out[i] = current_settings.g28_position[i];
+}
+
+/* Save current position as G28 and persist to NVM */
+void SETTINGS_SetG28Position(const float pos[4]) {
+    for (int i = 0; i < 4; i++) current_settings.g28_position[i] = pos[i];
+    SETTINGS_SaveToFlash(&current_settings);
+}
+
+/* Get stored G30 machine position */
+void SETTINGS_GetG30Position(float out[4]) {
+    for (int i = 0; i < 4; i++) out[i] = current_settings.g30_position[i];
+}
+
+/* Save current position as G30 and persist to NVM */
+void SETTINGS_SetG30Position(const float pos[4]) {
+    for (int i = 0; i < 4; i++) current_settings.g30_position[i] = pos[i];
+    SETTINGS_SaveToFlash(&current_settings);
 }

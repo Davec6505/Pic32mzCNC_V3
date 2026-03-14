@@ -915,6 +915,76 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             }
             return true;
 
+        case GCODE_EVENT_SET_G28:
+        case GCODE_EVENT_SET_G30:
+        {
+            // Store current machine position.  Drain first so step counters are stable.
+            if (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive()) return false;
+            CoordinatePoint cur = KINEMATICS_GetCurrentPosition();
+            float pos[4];
+            pos[0] = cur.coordinate[AXIS_X];
+            pos[1] = cur.coordinate[AXIS_Y];
+            pos[2] = cur.coordinate[AXIS_Z];
+            pos[3] = cur.coordinate[AXIS_A];
+            if (event->type == GCODE_EVENT_SET_G28) SETTINGS_SetG28Position(pos);
+            else                                    SETTINGS_SetG30Position(pos);
+            DEBUG_PRINT_MOTION("[G28/30] Stored (%.3f,%.3f,%.3f,%.3f) as %s\r\n",
+                (double)pos[0], (double)pos[1], (double)pos[2], (double)pos[3],
+                (event->type == GCODE_EVENT_SET_G28) ? "G28" : "G30");
+            return true;
+        }
+
+        case GCODE_EVENT_GOTO_G28:
+        case GCODE_EVENT_GOTO_G30:
+        {
+            // Rapid to the stored G28 or G30 machine position.
+            const CNC_Settings *s = SETTINGS_GetCurrent();
+            float stored[4];
+            if (event->type == GCODE_EVENT_GOTO_G28) SETTINGS_GetG28Position(stored);
+            else                                     SETTINGS_GetG30Position(stored);
+
+            // Resolve start: use planned position if motion in flight, else step counter.
+            CoordinatePoint start;
+            if (s_planned_position_valid &&
+                (TRAJECTORY_QueueCount() > 0u || INTERPOLATOR_IsActive())) {
+                start = s_planned_position;
+            } else {
+                start = KINEMATICS_GetCurrentPosition();
+                s_planned_position_valid = false;
+            }
+
+            CoordinatePoint end;
+            end.coordinate[AXIS_X] = stored[0];
+            end.coordinate[AXIS_Y] = stored[1];
+            end.coordinate[AXIS_Z] = stored[2];
+            end.coordinate[AXIS_A] = stored[3];
+
+            float fr = cc_rapid_fr(s);
+            fr *= (float)s_rapid_override_pct * 0.01f;
+            if (fr < 1.0f) fr = 1.0f;
+
+            if (!TRAJECTORY_AddMove(start, end, fr, 0.0f, 0.0f)) {
+                // Zero-length move — silently done.
+                return true;
+            }
+            s_planned_position       = end;
+            s_planned_position_valid = true;
+            s_jog_executing          = false;
+
+            TRAJECTORY_Recalculate();
+            if (!INTERPOLATOR_IsActive()) {
+                SCurveMove mv;
+                if (TRAJECTORY_GetNextMove(&mv)) {
+                    STEPPERS_Enable();
+                    INTERPOLATOR_LoadMove(&mv);
+                }
+            }
+            DEBUG_PRINT_MOTION("[G28/30] Rapid to (%.3f,%.3f,%.3f,%.3f) @ %.1f mm/min\r\n",
+                (double)end.coordinate[AXIS_X], (double)end.coordinate[AXIS_Y],
+                (double)end.coordinate[AXIS_Z], (double)end.coordinate[AXIS_A], (double)fr);
+            return true;
+        }
+
         case GCODE_EVENT_PROBE_TOWARD:
         case GCODE_EVENT_PROBE_AWAY:
         {
@@ -1292,4 +1362,10 @@ bool MOTION_IsJogging(void)
 {
     // True when a jog move is currently executing OR queued in the trajectory.
     return s_jog_executing || TRAJECTORY_HasJogMoves();
+}
+
+uint32_t MOTION_GetTrajectoryFree(void)
+{
+    uint32_t used = TRAJECTORY_QueueCount();
+    return (used < (uint32_t)TRAJ_QUEUE_SIZE) ? ((uint32_t)TRAJ_QUEUE_SIZE - used) : 0u;
 }
