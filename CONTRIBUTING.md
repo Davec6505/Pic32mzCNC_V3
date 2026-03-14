@@ -8,15 +8,22 @@ CNC machines, the bar for correctness is high. Please read this guide before ope
 
 ## Table of Contents
 
-1. [Branch Convention](#branch-convention)
-2. [Build Requirements](#build-requirements)
-3. [Code Style](#code-style)
-4. [Hardware Testing](#hardware-testing)
-5. [Submitting a Pull Request](#submitting-a-pull-request)
-6. [Reporting Bugs](#reporting-bugs)
-7. [Requesting Features](#requesting-features)
-8. [Safe Files to Modify](#safe-files-to-modify)
-9. [Files That Require Extra Care](#files-that-require-extra-care)
+- [Contributing to Pic32mzCNC\_V3](#contributing-to-pic32mzcnc_v3)
+  - [Table of Contents](#table-of-contents)
+  - [Branch Convention](#branch-convention)
+  - [Build Requirements](#build-requirements)
+  - [Code Style](#code-style)
+    - [GPIO access](#gpio-access)
+    - [Coordinate access](#coordinate-access)
+  - [Hardware Testing](#hardware-testing)
+    - [Minimum test suite (run all with UGS in pipelined streaming mode)](#minimum-test-suite-run-all-with-ugs-in-pipelined-streaming-mode)
+    - [ISR-critical files](#isr-critical-files)
+  - [Submitting a Pull Request](#submitting-a-pull-request)
+  - [Reporting Bugs](#reporting-bugs)
+  - [Requesting Features](#requesting-features)
+  - [Safe Files to Modify](#safe-files-to-modify)
+  - [Files That Require Extra Care](#files-that-require-extra-care)
+  - [Questions?](#questions)
 
 ---
 
