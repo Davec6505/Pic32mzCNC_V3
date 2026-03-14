@@ -1,8 +1,46 @@
 # Pic32mzCNC_V3 - Development Status Tracker
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
-**Branch**: `scurve_motion`
+**Branch**: `laser`
 **Last Updated**: March 14, 2026
+
+---
+
+## ✅ FEATURE: Laser mode — dynamic power scaling via DDS interpolator ISR (March 14, 2026)
+
+Branch `laser` (from master `b83ca2f`).
+
+### Architecture: `$32=1` laser mode — exact GRBL v1.1 behaviour
+When `$32=1` and `M3 Sxxx` has been received, the OC8 PWM duty is scaled
+proportionally to the instantaneous feedrate every 10 µs inside the DDS ISR:
+
+  `scale = v_now_mm_s / nominal_speed_mm_s`   (clamped to [0, 1])
+  `OC8RS = commanded_duty × scale`
+
+- At cruise speed: `scale = 1.0` → full S-commanded laser power
+- During S-curve accel/decel: power tracks velocity continuously
+- At corners / full stop: `scale → 0` → laser goes dark — no corner over-burn
+- Feed override: if override compresses feedrate, laser dims to match
+- `INTERPOLATOR_Stop()`: immediately kills laser power (hard stop / E-Stop)
+- `INTERPOLATOR_SoftStop()`: power naturally ramps to zero with velocity
+
+Settings that interact:
+- `$32=1`  — enable laser mode (0 = CNC spindle mode, default)
+- `$30`    — `S` scale max (S1000 = full power if `$30=1000`)
+- `$31`    — S scale min (normally 0)
+- G-code: `M3 Sxxx` arm laser, `M5` disarm, `S` word adjusts mid-job power
+
+### Files changed
+- `incs/motion/spindle.h:23`  — added `SPINDLE_LaserScale(float scale)` (ISR-safe)
+- `incs/motion/spindle.h:29`  — added `SPINDLE_GetCommandedDuty(void)` getter
+- `srcs/motion/spindle.c`     — `SPINDLE_LaserScale()`: scales OC8RS duty (one SFR write — ISR-safe); `SPINDLE_GetCommandedDuty()`: returns `current_pwm_duty`
+- `srcs/motion/interpolator.c` — `#include "motion/spindle.h"` added
+- `srcs/motion/interpolator.c` — static `laser_mode_active` / `laser_duty_cmd` cached vars
+- `srcs/motion/interpolator.c` — `INTERPOLATOR_LoadMove()`: caches `$32` + `SPINDLE_IsRunning()` + `SPINDLE_GetCommandedDuty()` before `TMR4_Start()`
+- `srcs/motion/interpolator.c` — `INTERPOLATOR_Tick()` normal path: laser scale after `v_now` computed
+- `srcs/motion/interpolator.c` — `INTERPOLATOR_Tick()` soft-stop path: laser scale after decel `v_now` computed
+- `srcs/motion/interpolator.c` — `INTERPOLATOR_Stop()`: immediate `SPINDLE_LaserScale(0.0f)` on hard stop
+- `tests/laser_utility.gcode`  — comprehensive laser test file (sections A–G: power cal, speed cal, corner sharpness, arc continuity, spiral/junction, raster fill)
 
 ---
 

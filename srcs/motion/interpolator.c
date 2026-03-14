@@ -62,6 +62,7 @@
 #include "motion/interpolator.h"
 #include "motion/trajectory.h"
 #include "motion/motion_utils.h"
+#include "motion/spindle.h"
 #include "utils/utils.h"
 #include "settings/settings.h"
 #include "data_structures.h"
@@ -114,6 +115,13 @@ static SCurveMove active_move;
 // also re-computes dds_inc[] and restarts if active.
 static float feed_override_val = 1.0f;   // 1.0 = 100 %
 
+// ── Laser mode: cached at LoadMove so the ISR avoids settings lookups ────────
+// laser_mode_active: true when $32=1 AND spindle armed (M3 has fired).
+// laser_duty_cmd:    OC8 duty count for the current S word (0–PR6).
+// Both written by main-loop LoadMove, read by ISR only — one-directional.
+static volatile bool     laser_mode_active = false;
+static volatile uint16_t laser_duty_cmd    = 0u;
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 // Recompute dds_inc[] from current active_move and feed_override_val.
@@ -145,6 +153,14 @@ static void INTERPOLATOR_Tick(uint32_t status, uintptr_t context)
         hold_decel_ticks++;
         float elapsed_s = (float)hold_decel_ticks / (float)INTERPOLATOR_TICK_RATE_HZ;
         float v_now = hold_decel_v_start - hold_decel_rate * elapsed_s;
+
+        // ── Laser mode: scale PWM with instantaneous velocity ────────────────
+        if (laser_mode_active && laser_duty_cmd > 0u) {
+            float v_nom = active_move.nominal_speed;
+            float scale = (v_nom > 0.001f) ? (v_now / v_nom) : 0.0f;
+            if (scale > 1.0f) scale = 1.0f;
+            SPINDLE_LaserScale(scale);
+        }
 
         if (v_now <= 0.0f) {
             // Deceleration complete — fully stop
@@ -190,6 +206,17 @@ static void INTERPOLATOR_Tick(uint32_t status, uintptr_t context)
                              - (float)ticks_remaining + 0.5f;
     float elapsed_s = (float)elapsed_ticks / (float)INTERPOLATOR_TICK_RATE_HZ;
     float v_now = TRAJECTORY_VelocityAt(&active_move, elapsed_s) * feed_override_val;
+
+    // ── Laser mode: scale PWM with instantaneous velocity ──────────────────
+    // v_now varies from v_entry through cruise to v_exit across the S-curve.
+    // Dividing by nominal_speed gives a [0, 1] fraction that tracks the
+    // actual step rate, so the laser dims at corners and goes dark on stops.
+    if (laser_mode_active && laser_duty_cmd > 0u) {
+        float v_nom = active_move.nominal_speed;
+        float scale = (v_nom > 0.001f) ? (v_now / v_nom) : 0.0f;
+        if (scale > 1.0f) scale = 1.0f;
+        SPINDLE_LaserScale(scale);
+    }
 
     for (int i = 0; i < NUM_AXIS; i++) {
         float inc_f = v_now * fabsf(active_move.unit_vec[i]) * axis_scale[i];
@@ -321,7 +348,14 @@ void INTERPOLATOR_LoadMove(const SCurveMove *move)
     if (total_s < 1e-9f) return;
     ticks_remaining = ticks_calc + 2u;
     if (ticks_remaining <= 2u) return;
-
+    // ── Laser mode: cache settings so ISR avoids main-loop calls ───────────
+    // Must happen after direction / DDS setup and before TMR4_Start().
+    {
+        const CNC_Settings *s = SETTINGS_GetCurrent();
+        bool laser_on = (s->laser_mode != 0u) && SPINDLE_IsRunning();
+        laser_mode_active = laser_on;
+        laser_duty_cmd    = laser_on ? SPINDLE_GetCommandedDuty() : 0u;
+    }
     // ── Arm and start ──────────────────────────────────────────────────────
     move_complete = false;
     interp_active = true;
@@ -333,6 +367,10 @@ void INTERPOLATOR_Stop(void)
 {
     feed_hold = true;     // ISR will see this on next tick and do nothing
     hold_decel_active = false; // cancel any in-progress soft decel
+    // In laser mode, kill power immediately so material doesn’t burn while stopped.
+    if (laser_mode_active) {
+        SPINDLE_LaserScale(0.0f);
+    }
     // Optionally stop the timer to save power; re-enable on Resume
     TMR4_Stop();
     interp_active = false;
