@@ -61,26 +61,26 @@ motion controller. It speaks the GRBL v1.1 protocol — the same protocol unders
 by Universal G-Code Sender (UGS), Candle, and bCNC. A sender streams G-code text
 over USB serial; the firmware translates each command into precisely timed GPIO pulses
 to stepper motor drivers.
-
-| Capability | Implementation |
-|---|---|
-| GRBL v1.1 protocol | `gcode_parser.c` |
-| 4-axis coordinated motion | `interpolator.c` (DDS) + `trajectory.c` (S-curve) |
-| S-curve jerk-limited velocity profiles | `trajectory.c` |
-| Arc interpolation (G2/G3) | `motion_bridge.c` |
-| Junction speed blending | `trajectory.c::TRAJECTORY_AddMove()` |
-| Homing cycle (`$H`) | `homing.c` |
-| Six work coordinate systems (G54–G59) | `kinematics.c` |
-| Tool length offsets (G43/G43.1/G49) | `kinematics.c` |
-| Canned drilling cycles (G81/G83) | `motion_bridge.c` |
-| Software jog (`$J=`) | `gcode_parser.c` / `motion_bridge.c` |
-| Spindle PWM (M3/M5) | `spindle.c` |
-| Laser power-velocity tracking (`$32=1`) | `interpolator.c` |
-| Persistent settings (NVM flash) | `settings.c` |
-| Real-time overrides (feed / rapid / spindle) | `gcode_parser.c` / `interpolator.c` |
-| Smooth feed-hold deceleration | `interpolator.c::INTERPOLATOR_SoftStop()` |
-| TMC5160 SPI driver (conditional) | `tmc5160.c` (`#ifdef HAS_TMC5160_AXIS`) |
-
+____________________________________________________________________________________________________
+| Capability                                    | Implementation                                    |
+|-----------------------------------------------|---------------------------------------------------|
+| GRBL v1.1 protocol                            | `gcode_parser.c`                                  |
+| 4-axis coordinated motion                     | `interpolator.c` (DDS) + `trajectory.c` (S-curve) |
+| S-curve jerk-limited velocity profiles        | `trajectory.c`                                    |
+| Arc interpolation (G2/G3)                     | `motion_bridge.c`                                 |
+| Junction speed blending                       | `trajectory.c::TRAJECTORY_AddMove()`              |
+| Homing cycle (`$H`)                           | `homing.c`                                        |
+| Six work coordinate systems (G54–G59)         | `kinematics.c`                                    |
+| Tool length offsets (G43/G43.1/G49)           | `kinematics.c`                                    |
+| Canned drilling cycles (G81/G83)              | `motion_bridge.c`                                 |
+| Software jog (`$J=`)                          | `gcode_parser.c` / `motion_bridge.c`              |
+| Spindle PWM (M3/M5)                           | `spindle.c`                                       |
+| Laser power-velocity tracking (`$32=1`)       | `interpolator.c`                                  |
+| Persistent settings (NVM flash)               | `settings.c`                                      |
+| Real-time overrides (feed / rapid / spindle)  | `gcode_parser.c` / `interpolator.c`               |
+| Smooth feed-hold deceleration                 | `interpolator.c::INTERPOLATOR_SoftStop()`         |
+| TMC5160 SPI driver (conditional)              | `tmc5160.c` (`#ifdef HAS_TMC5160_AXIS`)           |
+|_______________________________________________|___________________________________________________|
 ### 1.2 The Two Worlds: ISR and Main Loop
 
 **The real-time world (ISR):**  
@@ -152,25 +152,27 @@ withheld when the trajectory queue is near-full so the sender paces itself.
 ## Chapter 2: The PIC32MZ Hardware Platform
 
 ### 2.1 The Microcontroller — PIC32MZ2048EFH100
-
-| Sub-field | Meaning |
-|---|---|
-| PIC32 | 32-bit MIPS M-class processor |
-| MZ | "Majestic" — Microchip's high-performance PIC32 family |
-| 2048 | 2,048 KB (2 MB) internal flash |
-| EF | Hardware Single-Precision FPU (IEEE 754) |
-| H | Extended temperature range |
-| 100 | 100-pin QFP package |
-
-| Parameter | Value | Notes |
-|---|---|---|
-| CPU clock | 200 MHz | 5-stage MIPS pipeline |
-| Flash | 2 MB | Application + bootloader + NVM settings |
-| RAM | 512 KB | ~128 KB in use |
-| FPU | Single-precision | `-mhard-float -msingle-float -mfp64` |
-| PBCLK3 | 50 MHz | Peripheral bus — source for all timers and OC modules |
-| UART3 | 115,200 baud | G-code serial link |
-| SPI2 | Up to 25 MHz | TMC5160 configuration (conditional) |
+_____________________________________________________________________
+| Sub-field | Meaning                                                |
+|-----------|--------------------------------------------------------|
+| PIC32     | 32-bit MIPS M-class processor                          |
+| MZ        | "Majestic" — Microchip's high-performance PIC32 family |
+| 2048      | 2,048 KB (2 MB) internal flash                         |
+| EF        | Hardware Single-Precision FPU (IEEE 754)               |
+| H         | Extended temperature range                             |
+| 100       | 100-pin QFP package                                    |
+|___________|________________________________________________________|
+________________________________________________________________________________________
+| Parameter |   Value           | Notes                                                 |
+|-----------|-------------------|-------------------------------------------------------|
+| CPU clock | 200 MHz           | 5-stage MIPS pipeline                                 |
+| Flash     | 2 MB              | Application + bootloader + NVM settings               |
+| RAM       | 512 KB            | ~128 KB in use                                        |
+| FPU       | Single-precision  | `-mhard-float -msingle-float -mfp64`                  |
+| PBCLK3    | 50 MHz            | Peripheral bus — source for all timers and OC modules |
+| UART3     | 115,200 baud      | G-code serial link                                    |
+| SPI2      | Up to 25 MHz      | TMC5160 configuration (conditional)                   |
+|___________|___________________|_______________________________________________________|
 
 ### 2.2 Clock Tree
 
@@ -364,7 +366,8 @@ and bCNC in both single-step and pipelined streaming modes.
 **Startup banner** — sent on power-up and every soft reset:
 
 ```
-Pic32mzCNC v1.1h ['$' for help]
+Pic32mzCNC v1.1h ['$' for help]
+
 
 ```
 
@@ -379,9 +382,11 @@ This exact string is how senders identify the controller. It is defined in
 > string "Grbl" may need their detection regex loosened.
 
 **The ok/error handshake:**  
-Every complete line sent to the firmware receives exactly one response: `ok
+Every complete line sent to the firmware receives exactly one response: `ok
+
 `
-on success, or `error:N
+on success, or `error:N
+
 ` on parse error. The firmware's flow control (Chapter 9)
 determines whether `ok` is sent immediately or deferred until the motion queue drains.
 
@@ -1297,7 +1302,8 @@ iteration while a probe move is in progress. When the probe triggers:
 1. `INTERPOLATOR_SoftStop()` — smooth deceleration
 2. Main loop monitors `INTERPOLATOR_IsMoveComplete()`
 3. On completion, read `STEPPER_GetPosition()` → latch as probe result
-4. Report: `[PRB:x.xxx,y.xxx,z.xxx:1]
+4. Report: `[PRB:x.xxx,y.xxx,z.xxx:1]
+
 `  (`:0` on miss, ALARM:5 for G38.2 miss)
 
 `$6` (probe pin invert) is applied in the probe-pin read:
@@ -1605,11 +1611,13 @@ after `APP_STATE_CONFIG` completes:
 case APP_STATE_LOAD_SETTINGS:
     if (SETTINGS_LoadFromFlash(SETTINGS_GetCurrent())) {
         // Successfully loaded from flash
-        UART_Printf("Loaded settings from flash
+        UART_Printf("Loaded settings from flash
+
 ");
     } else {
         // CRC mismatch / version change: use defaults already in RAM
-        UART_Printf("Using default settings
+        UART_Printf("Using default settings
+
 ");
     }
     app->state = APP_STATE_IDLE;
@@ -1646,7 +1654,8 @@ nBytesRead = 0;
 okPendingCount = 0;
 // Clear modal state: distance mode, plane, units (retain WCS offsets and settings)
 app->state = APP_STATE_INIT;    // re-init but NOT APP_STATE_RESET to flash
-UART_Printf(STARTUP_BANNER_STRING);   // "Pic32mzCNC v1.1h ['\$' for help]
+UART_Printf(STARTUP_BANNER_STRING);   // "Pic32mzCNC v1.1h ['\$' for help]
+
 "
 ```
 
@@ -1688,7 +1697,8 @@ if (settings.hard_limits_enabled) {
             INTERPOLATOR_Stop();
             STEPPERS_Disable();
             app->state = APP_STATE_ALARM;
-            UART_Printf("ALARM:1
+            UART_Printf("ALARM:1
+
 ");
             break;
         }
@@ -2109,7 +2119,8 @@ Usage:
 
 ```c
 // In motion planning code:
-DEBUG_PRINT_MOTION("[MOTION] Loading segment: dist=%.3f mm, v_entry=%.1f mm/s
+DEBUG_PRINT_MOTION("[MOTION] Loading segment: dist=%.3f mm, v_entry=%.1f mm/s
+
 ",
                    move->millimeters, move->v_entry);
 
@@ -2117,7 +2128,8 @@ DEBUG_PRINT_MOTION("[MOTION] Loading segment: dist=%.3f mm, v_entry=%.1f mm/s
 DEBUG_EXEC_STEPPER(LED2_Toggle());
 
 // At trajectory queue boundaries:
-DEBUG_PRINT_SEGMENT("[SEG] Queue: count=%u, head=%u, tail=%u
+DEBUG_PRINT_SEGMENT("[SEG] Queue: count=%u, head=%u, tail=%u
+
 ",
                     count, head, tail);
 ```
@@ -2131,7 +2143,8 @@ of code, zero stack usage, zero CPU time.
 // incs/utils/uart_utils.h
 bool UART_Printf(const char *fmt, ...);      // non-blocking formatted output
 bool UART_Write(const uint8_t *msg, size_t len);  // raw bytes
-bool UART_SendOK(void);                      // send "ok
+bool UART_SendOK(void);                      // send "ok
+
 "
 bool UART_IsReady(void);                     // TX buffer not full
 ```
