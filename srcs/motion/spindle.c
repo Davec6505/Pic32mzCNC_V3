@@ -199,6 +199,40 @@ uint8_t SPINDLE_GetOverridePct(void) {
 // DIAGNOSTIC/DEBUG FUNCTIONS
 // =============================================================================
 
+// ─── Laser mode helpers ─────────────────────────────────────────────────────
+
+/*
+ * SPINDLE_LaserScale — ISR-safe laser power scaling.
+ *
+ * Called every 10 µs from the DDS interpolator when $32=1 (laser mode).
+ * Scales the OC8 PWM duty proportionally to the instantaneous feedrate so
+ * the laser dims automatically during acceleration / deceleration and goes
+ * dark completely when the machine stops at a corner.
+ *
+ * Safety properties:
+ *   – Only writes OC8RS (one SFR write — atomic on PIC32MZ).
+ *   – Reads spindle_state.current_pwm_duty, written only by main-loop
+ *     context; worst-case is one tick at a stale value which is negligible.
+ *   – No heap allocation, no locking, no branching on hardware state.
+ */
+void SPINDLE_LaserScale(float scale)
+{
+    if (scale < 0.0f) scale = 0.0f;
+    if (scale > 1.0f) scale = 1.0f;
+    uint16_t duty = (uint16_t)((float)spindle_state.current_pwm_duty * scale + 0.5f);
+    OCMP8_CompareSecondaryValueSet(duty);
+}
+
+/*
+ * SPINDLE_GetCommandedDuty — return the PWM duty for the current S value.
+ * Cached by INTERPOLATOR_LoadMove so the ISR can use it without calling
+ * into the spindle module every tick.
+ */
+uint16_t SPINDLE_GetCommandedDuty(void)
+{
+    return spindle_state.current_pwm_duty;
+}
+
 void SPINDLE_GetDiagnostics(void) {
     // For debugging - can be called from debug builds
     // PWM frequency: 3.338kHz

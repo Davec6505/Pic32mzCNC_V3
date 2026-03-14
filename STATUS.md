@@ -6,6 +6,73 @@
 
 ---
 
+## ✅ HARDWARE VALIDATED: Full motion suite — UGS pipelined, 1:59 run (March 14, 2026)
+
+Connected: COM9 115200, UGS jSerialComm, firmware `a6d904e`.
+
+### Observations confirmed on hardware
+- **S-curve 7-phase profiles**: `FS` ramps smooth — `7→27→59→101→158→...→5000 mm/min` on standing-start long moves; no step at entry
+- **64-slot lookahead always full**: `Bf:64` during raster/zigzag — planner never starves interpolator
+- **Junction blending at speed**: consecutive G2/G3 arcs (cross, concentric, petal patterns) cruise at 5000–8000 mm/min without stopping at arc boundaries
+- **Short-move decel**: F1200 circle arcs show clean `FS` sine-like shape through each chord — `v_entry/v_exit` correctly resolved by reverse+forward planner pass
+- **Dwell (G4 P1.0 / P2.0)**: machine stops, `<Idle>` shows, motion resumes cleanly
+- **Feed overrides (0x90/0x95/0x99)**: rapid 100% / feed −10% / spindle 100% all accepted mid-session
+- **Return to origin exact**: final `<Idle|MPos:0.000,0.000,0.000,0.000>` — DDS step-accuracy correction (penultimate-tick deficit flush) working correctly
+- **Total run time**: 1 min 59 s for mixed suite: squares at 4k–8k mm/min, nested squares, cross patterns, CW+CCW arc chains (R10/R20/R30), spiral junction, diagonal hatches, full-circle arcs at R30, raster zig-zag at F1200
+
+### Test patterns run
+| Pattern | F (mm/min) | Result |
+|---------|-----------|--------|
+| 60×60 squares ×3 | 5000–6000 | ✅ corners sharp |
+| Nested squares 5 mm inset | 4000–6000 | ✅ no overrun |
+| Cross / diagonal fills | 8000 | ✅ return exact |
+| CW+CCW arc chains R10/20/30 | 5916 | ✅ no junction dip |
+| Concentric petals (G3/G2 mix) | 5000–8000 | ✅ continuous speed |
+| Full-circle R30 (2×180°) | 1200 | ✅ smooth FS sine |
+| Raster zig-zag 60×60, pitch=6mm | 4000–5500 | ✅ Bf=64 throughput |
+| G4 dwell + resume | — | ✅ clean idle/run |
+| G0 rapid returns, G92 zero | — | ✅ origin 0.000 |
+
+---
+
+## ✅ FEATURE: Laser mode — dynamic power scaling via DDS interpolator ISR (March 14, 2026)
+
+Branch `laser` (from master `b83ca2f`).
+
+### Architecture: `$32=1` laser mode — exact GRBL v1.1 behaviour
+When `$32=1` and `M3 Sxxx` has been received, the OC8 PWM duty is scaled
+proportionally to the instantaneous feedrate every 10 µs inside the DDS ISR:
+
+  `scale = v_now_mm_s / nominal_speed_mm_s`   (clamped to [0, 1])
+  `OC8RS = commanded_duty × scale`
+
+- At cruise speed: `scale = 1.0` → full S-commanded laser power
+- During S-curve accel/decel: power tracks velocity continuously
+- At corners / full stop: `scale → 0` → laser goes dark — no corner over-burn
+- Feed override: if override compresses feedrate, laser dims to match
+- `INTERPOLATOR_Stop()`: immediately kills laser power (hard stop / E-Stop)
+- `INTERPOLATOR_SoftStop()`: power naturally ramps to zero with velocity
+
+Settings that interact:
+- `$32=1`  — enable laser mode (0 = CNC spindle mode, default)
+- `$30`    — `S` scale max (S1000 = full power if `$30=1000`)
+- `$31`    — S scale min (normally 0)
+- G-code: `M3 Sxxx` arm laser, `M5` disarm, `S` word adjusts mid-job power
+
+### Files changed
+- `incs/motion/spindle.h:23`  — added `SPINDLE_LaserScale(float scale)` (ISR-safe)
+- `incs/motion/spindle.h:29`  — added `SPINDLE_GetCommandedDuty(void)` getter
+- `srcs/motion/spindle.c`     — `SPINDLE_LaserScale()`: scales OC8RS duty (one SFR write — ISR-safe); `SPINDLE_GetCommandedDuty()`: returns `current_pwm_duty`
+- `srcs/motion/interpolator.c` — `#include "motion/spindle.h"` added
+- `srcs/motion/interpolator.c` — static `laser_mode_active` / `laser_duty_cmd` cached vars
+- `srcs/motion/interpolator.c` — `INTERPOLATOR_LoadMove()`: caches `$32` + `SPINDLE_IsRunning()` + `SPINDLE_GetCommandedDuty()` before `TMR4_Start()`
+- `srcs/motion/interpolator.c` — `INTERPOLATOR_Tick()` normal path: laser scale after `v_now` computed
+- `srcs/motion/interpolator.c` — `INTERPOLATOR_Tick()` soft-stop path: laser scale after decel `v_now` computed
+- `srcs/motion/interpolator.c` — `INTERPOLATOR_Stop()`: immediate `SPINDLE_LaserScale(0.0f)` on hard stop
+- `tests/laser_utility.gcode`  — comprehensive laser test file (sections A–G: power cal, speed cal, corner sharpness, arc continuity, spiral/junction, raster fill)
+
+---
+
 ## ✅ FIX: CNC completeness — probe, check mode, ALARM:4, soft limits, $RST=# (March 14, 2026)
 
 Commit `0f7d72d` — 6 bugs found in completeness audit, all fixed, clean build.
