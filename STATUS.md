@@ -1,8 +1,37 @@
 # Pic32mzCNC_V3 - Development Status Tracker
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
-**Branch**: `laser`
+**Branch**: `scurve_motion`
 **Last Updated**: March 14, 2026
+
+---
+
+## ✅ HARDWARE VALIDATED: Full motion suite — UGS pipelined, 1:59 run (March 14, 2026)
+
+Connected: COM9 115200, UGS jSerialComm, firmware `a6d904e`.
+
+### Observations confirmed on hardware
+- **S-curve 7-phase profiles**: `FS` ramps smooth — `7→27→59→101→158→...→5000 mm/min` on standing-start long moves; no step at entry
+- **64-slot lookahead always full**: `Bf:64` during raster/zigzag — planner never starves interpolator
+- **Junction blending at speed**: consecutive G2/G3 arcs (cross, concentric, petal patterns) cruise at 5000–8000 mm/min without stopping at arc boundaries
+- **Short-move decel**: F1200 circle arcs show clean `FS` sine-like shape through each chord — `v_entry/v_exit` correctly resolved by reverse+forward planner pass
+- **Dwell (G4 P1.0 / P2.0)**: machine stops, `<Idle>` shows, motion resumes cleanly
+- **Feed overrides (0x90/0x95/0x99)**: rapid 100% / feed −10% / spindle 100% all accepted mid-session
+- **Return to origin exact**: final `<Idle|MPos:0.000,0.000,0.000,0.000>` — DDS step-accuracy correction (penultimate-tick deficit flush) working correctly
+- **Total run time**: 1 min 59 s for mixed suite: squares at 4k–8k mm/min, nested squares, cross patterns, CW+CCW arc chains (R10/R20/R30), spiral junction, diagonal hatches, full-circle arcs at R30, raster zig-zag at F1200
+
+### Test patterns run
+| Pattern | F (mm/min) | Result |
+|---------|-----------|--------|
+| 60×60 squares ×3 | 5000–6000 | ✅ corners sharp |
+| Nested squares 5 mm inset | 4000–6000 | ✅ no overrun |
+| Cross / diagonal fills | 8000 | ✅ return exact |
+| CW+CCW arc chains R10/20/30 | 5916 | ✅ no junction dip |
+| Concentric petals (G3/G2 mix) | 5000–8000 | ✅ continuous speed |
+| Full-circle R30 (2×180°) | 1200 | ✅ smooth FS sine |
+| Raster zig-zag 60×60, pitch=6mm | 4000–5500 | ✅ Bf=64 throughput |
+| G4 dwell + resume | — | ✅ clean idle/run |
+| G0 rapid returns, G92 zero | — | ✅ origin 0.000 |
 
 ---
 
