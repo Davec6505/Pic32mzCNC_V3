@@ -22,7 +22,7 @@
 #include "motion/homing.h"  // For homing state machine
 #include "motion/spindle.h"  // For spindle PWM control
 #include "motion_utils.h"  // For hard limit checking
-#include "stepper.h"  // For g_hard_limit_alarm flag
+#include "motion_bridge.h"  // For g_hard_limit_alarm and STEPPER_* API
 #include "config/default/peripheral/coretimer/plib_coretimer.h"  // For CORETIMER heartbeat counter
 #include "utils/uart_utils.h"  // Non-blocking UART utilities
 #include "utils/utils.h"       // For UTILS_InitAxisConfig
@@ -79,9 +79,6 @@ static void ESTOP_Callback(EXTERNAL_INT_PIN pin, uintptr_t context)
 
     // 4. Flush motion queue
     appData.motionQueueCount = 0;
-    appData.motionQueueHead  = 0;
-    appData.motionQueueTail  = 0;
-    appData.currentSegment   = NULL;
 
     // 5. Signal application state machine
     appData.eStopTriggered = true;
@@ -126,9 +123,6 @@ void APP_Initialize ( void )
     appData.state = APP_CONFIG;
 
     // Initialize all single instances in appData (centralized pattern)
-    memset((void*)&appData.motionQueue, 0, sizeof(appData.motionQueue));
-    appData.motionQueueHead = 0;
-    appData.motionQueueTail = 0;
     appData.motionQueueCount = 0;
     
     // ✅ Initialize G-code command queue
@@ -156,14 +150,6 @@ void APP_Initialize ( void )
     // ✅ Initialize alarm state
     appData.alarmCode = 0;             // No alarm
     appData.machine_homed = false;     // Not homed; soft limits inactive until $H completes
-    
-    appData.dominantAxis = AXIS_X;             // Default dominant axis
-    appData.currentSegment = NULL;             // No active segment
-    
-    // ✅ ARRAY-BASED: Initialize Bresenham errors for all axes
-    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
-        appData.bresenham_error[axis] = 0;
-    }
     
     appData.uartPollCounter = 0;               // Rate limiting counter
     

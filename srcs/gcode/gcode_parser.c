@@ -19,7 +19,7 @@
 #include "gcode_parser.h"
 #include "common.h"
 #include "app.h"          // For APP_Initialize()
-#include "stepper.h"
+#include "motion_bridge.h"
 #include "motion.h"
 #include "motion_utils.h" // For MOTION_UTILS_EnableAllAxes()
 #include "kinematics.h"
@@ -188,12 +188,8 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
     nBytesRead = 0;
     memset(rxBuffer, 0, sizeof(rxBuffer));
 
-    /* 3. Clear motion queue */
-    memset(appData->motionQueue, 0, sizeof(appData->motionQueue));
-    appData->motionQueueHead = 0;
-    appData->motionQueueTail = 0;
+    /* 3. Reset motion queue count */
     appData->motionQueueCount = 0;
-    appData->currentSegment = NULL;
     appData->motionSegmentCompleted = false;
     
     /* 4. Clear arc generator state */

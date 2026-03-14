@@ -21,7 +21,7 @@
  * app.c, gcode_parser.c, and homing.c via `extern` declarations in stepper.h.
  */
 
-#include "motion/stepper.h"
+#include "motion/motion_bridge.h"
 #include "motion/motion.h"
 #include "motion/trajectory.h"
 #include "motion/interpolator.h"
