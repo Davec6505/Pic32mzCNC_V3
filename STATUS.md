@@ -2,7 +2,18 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 14, 2026
+**Last Updated**: March 2026
+
+---
+
+## ✅ DOCS: Comprehensive book overhaul (March 2026)
+
+- `docs/CNC_FIRMWARE_BOOK.md` — Major expansion across all chapters; now the single authoritative technical reference
+  - Section 2.2 rewritten: full PIC32MZ memory map with KSEG0/KSEG1 explanation, NVM write pattern, address boundary table
+  - Section 4.5 rewritten: junction deviation with complete mathematical derivation, geometry diagram, worked 90° corner example, look-ahead interaction, tuning guidelines
+  - Chapter 12 added: System Architecture — layer hierarchy diagram, ISR vs main-loop division, three-queue pipeline, inline dispatch rationale, GPIO LED pattern, settings pointer web, build system reference
+  - Appendix A rewritten: complete GRBL settings reference — all $0–$253 parameters with calculation examples, TMC5160 table, troubleshooting guide
+- `docs/readme/` — Deleted 18 obsolete session/debug/planning documents; only `LITEPLACER_GRBL_IMPLEMENTATION.md` retained
 
 ---
 

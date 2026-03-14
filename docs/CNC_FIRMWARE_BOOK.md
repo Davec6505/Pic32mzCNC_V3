@@ -38,9 +38,10 @@ The goal is simple: by the time you finish reading, you should be able to open a
 9. [Chapter 9: The Application State Machine — The Conductor](#chapter-9-the-application-state-machine)
 10. [Chapter 10: Safety, Alarms, and Homing](#chapter-10-safety-alarms-homing)
 11. [Chapter 11: Settings — The Machine's Personality](#chapter-11-settings)
-12. [Appendix A: GRBL Settings Reference](#appendix-a-settings)
-13. [Appendix B: File and Module Map](#appendix-b-module-map)
-14. [Appendix C: Timing Reference](#appendix-c-timing)
+12. [Chapter 12: System Architecture — How the Modules Fit Together](#chapter-12-system-architecture)
+13. [Appendix A: Complete GRBL Settings Reference](#appendix-a-settings)
+14. [Appendix B: File and Module Map](#appendix-b-module-map)
+15. [Appendix C: Timing Reference](#appendix-c-timing)
 
 ---
 
@@ -134,20 +135,81 @@ The heart of the system is a **PIC32MZ2048EFH100** — a 32-bit microcontroller 
 
 ### 2.2 Memory Layout
 
-Flash memory is precious. The 2 MB is carefully partitioned:
+Flash memory is precious. The 2 MB is divided into four regions, each with its own purpose and access rules:
 
 ```
-Flash Address     Virtual Address    Size     Purpose
-─────────────     ───────────────    ─────    ──────────────────────────────
-0x1D000000        0x9D000000         1.87 MB  Application firmware (this code)
-0x1D1F0000        0xBD1F0000         16 KB    GRBL Settings (NVM storage)
-0x1D1F4000        0x9D1F4000         48 KB    MikroE USB HID Bootloader
-0x1FC00000        0xBFC00000         12 KB    Boot flash (config words)
+Physical Address    Virtual (KSEG0/1)   Size      Purpose
+────────────────    ─────────────────   ───────   ────────────────────────────────────
+0x1D000000          0x9D000000 (KSEG0)  1.875 MB  Application firmware (code + const data)
+0x1D1F0000          0xBD1F0000 (KSEG1)  16 KB     GRBL Settings (NVM — persistent storage)
+0x1D1F4000          0x9D1F4000 (KSEG0)  48 KB     MikroE USB HID Bootloader (read-only)
+0x1FC00000          0xBFC00000 (KSEG1)  12 KB     Boot flash (PIC32 configuration words)
 ```
 
-The **bootloader** occupies the top 48 KB. It is a USB bootloader that lets new firmware be flashed over USB without a hardware programmer. The firmware must never write into the bootloader region.
+#### Application Region (0x9D000000)
 
-The **NVM settings area** at 0xBD1F0000 stores all 29 GRBL parameters persistently across power cycles. This is raw NOR flash — it must be erased in 16 KB pages before writing, and it must be accessed through the uncached KSEG1 address space (0xBD...) for NVM operations.
+This is where all firmware code lives. The linker places `.text` (instructions), `.rodata` (constant tables), and startup code here. The XC32 compiler targets this region automatically. Maximum usable size is 1.875 MB — the current firmware occupies approximately 264 KB (14%), leaving abundant room for future features.
+
+#### GRBL Settings / NVM Region (0xBD1F0000)
+
+All 29 GRBL parameters (`$0`–`$143`), the six Work Coordinate System offsets (G54–G59), tool length offset, and TMC5160 driver settings are stored here as a raw `CNC_Settings` struct. This memory survives power cycles because it is internal NOR flash, not RAM.
+
+**Critical rules for NVM access:**
+
+```c
+// ✅ CORRECT — KSEG1 (uncached) address — required for NVM read AND write
+#define SETTINGS_NVM_ADDRESS  0xBD1F0000UL
+
+// ❌ WRONG — KSEG0 (cached) address — reads may return stale cache data,
+//            writes FAIL silently on PIC32MZ
+#define SETTINGS_NVM_ADDRESS  0x9D1F0000UL  // do not use
+```
+
+The PIC32MZ flash controller requires **uncached** address space (KSEG1, 0xBD...) for all NVM operations. Using the cached KSEG0 address (0x9D...) for writes causes silent failure — the write appears to complete but the flash is not actually programmed.
+
+**NVM erase and write pattern (Harmony):**
+
+```c
+// Write buffer must be cache-line aligned (CRITICAL on PIC32MZ)
+static uint32_t write_buf[512] CACHE_ALIGN;   // 512 words = 2048 bytes = 1 row
+
+// 1. Erase the full 16 KB page (smallest erasable unit)
+static volatile bool xfer_done = false;
+NVM_CallbackRegister(nvm_event, 0UL);
+NVM_PageErase(SETTINGS_NVM_ADDRESS);
+while (!xfer_done);    // wait for hardware erase completion (~20 ms)
+xfer_done = false;
+
+// 2. Write one 2048-byte row (smallest writable unit)
+memcpy(write_buf, &current_settings, sizeof(current_settings));
+NVM_RowWrite(write_buf, SETTINGS_NVM_ADDRESS);
+while (!xfer_done);    // wait for write completion (~5 ms)
+```
+
+**Why delay NVM reads until `APP_LOAD_SETTINGS`?**
+
+During `APP_CONFIG` (the very first state), peripheral buses are still stabilising. Attempting `NVM_PageRead()` before the peripheral clock tree is fully configured can return corrupted data. Settings are therefore read in `APP_LOAD_SETTINGS` — the second state — after all peripherals are confirmed running. Default values are loaded at startup so the system is never in an uninitialised state.
+
+#### Bootloader Region (0x9D1F4000)
+
+The MikroE USB HID bootloader occupies the 48 KB block immediately before the settings area. It handles USB enumeration and flash programming when the board is powered on in bootloader mode. The application must **never** write to addresses 0x9D1F4000 and above. The linker script enforces this:
+
+```
+/* p32MZ2048EFH100.ld */
+kseg0_program_mem : ORIGIN = 0x9D000000, LENGTH = 0x1F0000   /* 1.875 MB — stop here */
+```
+
+#### Boot Flash / Configuration Words (0xBFC00000)
+
+The PIC32MZ stores its hardware configuration (clock multipliers, watchdog, code-protection, debug enable) in a separate 12 KB boot flash region. These are programmed once during manufacturing or initial board setup. Normal firmware updates do not touch this region.
+
+**Safe address boundaries summary:**
+
+| Safe to write | Address | Size |
+|--------------|---------|------|
+| ✅ Settings only | 0xBD1F0000 | 16 KB |
+| ❌ Never — bootloader | 0x9D1F4000 | 48 KB |
+| ❌ Never — config | 0xBFC00000 | 12 KB |
 
 ### 2.3 Clock Tree
 
@@ -481,27 +543,189 @@ $$J = \frac{5000 \cdot 500}{2} = 1{,}250{,}000 \text{ mm/s}^3$$
 
 ### 4.5 Junction Speed — Blending Consecutive Moves
 
-When one move ends and the next begins, there is a corner. Rather than decelerating to zero, stopping, and reaccelerating, the firmware can carry some speed through the corner — the amount depends on how sharp the corner is.
+#### The Problem with Exact-Stop Cornering
 
-GRBL's **centripetal acceleration** approximation computes the maximum safe junction speed by treating the corner as a circular arc with radius derived from the configured junction deviation `$11`:
+When one move ends and the next begins at an angle, the naïve approach is to decelerate to zero, change direction, then re-accelerate. This is called **exact-stop** mode. It is correct, but crushingly slow for programs with many direction changes — a 3D contour with thousands of tiny facet moves would be unusably slow with exact-stop at every facet boundary.
+
+Worse, exact-stop causes a quality problem: the tool momentarily sits still at each corner while the machine decelerates and re-accelerates. Even a 10 ms pause leaves a visible dwell mark in the workpiece surface.
+
+**Corner blending** carries nonzero speed through corners. The question is: *how much speed can safely be carried, and at what cost to path accuracy?*
+
+#### The Junction Deviation Principle (`$11`)
+
+GRBL's answer is elegant: instead of asking "how fast can I corner?" it asks "how much path deviation am I willing to accept?" The user answers with `$11` (junction deviation, in mm). Default: 0.010 mm (10 microns).
+
+> **The geometry trade-off**: to carry speed through a corner, the machine must follow a small curved arc instead of the ideal sharp corner. The setting `$11` is your budget for how far the actual path may deviate from the ideal corner vertex.
+
+- `$11 = 0.005 mm` → very tight to the ideal corner → slow but precise
+- `$11 = 0.010 mm` → 10 µm deviation (invisible to most tools) → good balance
+- `$11 = 0.100 mm` → 100 µm deviation → fast, suitable for roughing or foam cutting
+- `$11 = 0` → pure exact-stop mode, no blending at all
+
+#### The Circular Arc Approximation — Geometry
+
+The firmware models the corner as a small circular arc that is tangent to both straight segments. This is an approximation — the machine does not literally travel the arc; it uses the arc's geometry to compute the safe junction speed.
 
 ```
-                       v²
-a_centripetal = k · ───────
-                    junction_deviation
+                     ↗  next move direction
+                    /
+   prev move       /
+   direction →    /
+   ──────────────X         ← ideal sharp corner
+                 │
+                 │  deviation = $11 = e_d (mm)
+                 ↓
+          ╭──────╮         ← blending arc with radius R
+         /        \
+        /          \
 ```
 
-The unit vectors of the two moves are used in a **dot product** to find the cosine of the angle between them:
+For a turn of angle θ (measured as: 0° = straight through, 90° = right-angle turn, 180° = U-turn), the relationship between the arc radius R and the path deviation e_d is:
 
-$$\cos\theta = -(\hat{u}_{prev} \cdot \hat{u}_{next})$$
+$$e_d = R \cdot \frac{1 - \sin(\theta/2)}{\cos(\theta/2)}$$
 
-(The negative sign is because the vectors point in opposite directions at a junction — one is the direction arriving, one is the direction leaving.)
+Solving for R:
 
-From this, the maximum junction speed is:
+$$R = \frac{e_d \cdot \cos(\theta/2)}{1 - \sin(\theta/2)}$$
 
-$$v_j = \sqrt{a_{combined} \cdot J_{dev} \cdot \frac{1 - \cos\theta}{\cos\theta}}$$
+The **centripetal acceleration** required to navigate this arc at junction speed v_j is:
 
-This is implemented in `trajectory.c::TRAJECTORY_AddMove()`.
+$$a_{centripetal} = \frac{v_j^2}{R} = \frac{v_j^2 \cdot (1 - \sin(\theta/2))}{e_d \cdot \cos(\theta/2)}$$
+
+Setting this equal to the available motor acceleration $a_{combined}$ and solving for $v_j$ gives the **GRBL junction speed formula**:
+
+$$\boxed{v_j = \sqrt{a_{combined} \cdot e_d \cdot \frac{\sin(\theta/2)}{1 - \sin(\theta/2)}}}$$
+
+#### Computing the Turn Angle from Unit Vectors
+
+Each planned move stores its direction as a unit vector `unit_vec[NUM_AXIS]` — a vector of length exactly 1.0 pointing in the direction of travel. The angle between two consecutive moves is extracted from the dot product:
+
+```c
+// unit_vec[i] for the arriving move points INTO the junction.
+// unit_vec[i+1] for the departing move points AWAY from the junction.
+// Both point in the "forward" sense of travel, so:
+float dot = 0.0f;
+for (int i = 0; i < NUM_AXIS; i++)
+    dot += prev->unit_vec[i] * curr->unit_vec[i];
+
+// junction_cos_theta = cos(turn_angle):
+// dot =  1.0 → same direction (0° turn)  → junction_cos_theta = -1 → sin(θ/2) = 0
+// dot =  0.0 → 90° turn                  → junction_cos_theta =  0 → sin(θ/2) = 0.707
+// dot = -1.0 → U-turn (180°)             → junction_cos_theta =  1 → sin(θ/2) = 1
+float junction_cos_theta = -dot;
+
+// sin(θ/2) via the half-angle identity: sin²(θ/2) = (1 - cos θ)/2
+float sin_theta_d2 = sqrtf(0.5f * (1.0f - junction_cos_theta));
+
+// The junction speed formula (trajectory.c):
+float v_j_sqr = a_combined * junction_deviation * sin_theta_d2 / (1.0f - sin_theta_d2);
+float v_j = sqrtf(v_j_sqr);
+```
+
+**Behaviour at the extremes:**
+
+| Turn angle | `junction_cos_theta` | `sin_theta_d2` | Result |
+|---|---|---|---|
+| 0° (straight) | −1.0 | 0 | v_j = ∞ (no limit) |
+| 45° | −0.707 | 0.383 | moderate speed |
+| 90° | 0 | 0.707 | ~659 mm/min at defaults |
+| 135° | +0.707 | 0.924 | very slow |
+| 180° (U-turn) | +1.0 | 1.0 | v_j = 0 (must stop) |
+
+A straight-line continuation (0° turn) correctly removes all junction speed limits. A sharp reversal correctly demands a complete stop.
+
+#### Combined Acceleration at a Junction
+
+Both moves adjacent to a junction may be on different axes or at different feedrates. The formula needs a single $a_{combined}$. The firmware uses GRBL's **axis-limited combined acceleration**:
+
+$$a_{combined} = \min_{axis} \left(\frac{a_{axis}}{|u_{axis}|}\right)$$
+
+Where $u_{axis}$ is the component of the junction's direction unit vector for that axis, and $a_{axis}$ is from `$120`–`$123`.
+
+**Example**: 45° diagonal move (X=Y=0.707), with X-accel = Y-accel = 5000 mm/s²:
+$$a_{combined} = \min\!\left(\frac{5000}{0.707}, \frac{5000}{0.707}\right) = 7071 \text{ mm/s}^2$$
+
+The diagonal can use the combined power of both motors — logically, 1.41× the per-axis limit.
+
+#### Worked Example: Machining a Square at 5000 mm/min
+
+Settings: `$11=0.010` mm, `$120=$121=5000` mm/s², `$110=$111=5000` mm/min.
+
+The square has four 90° corners (X→Y, Y→−X, −X→−Y, −Y→X). For each:
+
+```
+Arriving:   unit_vec = [1, 0, 0, 0]
+Departing:  unit_vec = [0, 1, 0, 0]
+dot = 0.0 → junction_cos_theta = 0.0
+sin_theta_d2 = sqrt(0.5 * (1 - 0)) = 0.7071
+
+a_combined = min(5000/1.0, 5000/1.0) = 5000 mm/s²
+
+v_j² = 5000 × 0.010 × 0.7071 / (1 - 0.7071)
+      = 5000 × 0.010 × 2.414
+      = 120.7 mm²/s²
+v_j  = 10.99 mm/s = 659 mm/min
+```
+
+At each corner the machine carries **659 mm/min** rather than stopping to zero. The path deviates by at most 10 µm from the ideal corner — invisible to any realistic machining operation.
+
+**What if you need 1000 mm/min through the corner?**
+
+$$e_d = \frac{v_j^2}{a_{combined} \cdot 2.414} = \frac{(1000/60)^2}{5000 \times 2.414} = \frac{277.8}{12070} \approx 0.023 \text{ mm}$$
+
+Set `$11=0.023` to carry 1000 mm/min through 90° corners.
+
+#### Junction Speed Caps — The Look-Ahead Planner
+
+The junction speed $v_j$ computed above is a **maximum**, not a guarantee. Three additional constraints apply:
+
+1. **Feedrate cap**: $v_j$ cannot exceed the programmed feedrate of *either* adjacent move.
+2. **Deceleration feasibility**: the previous move must be able to decelerate *from its cruise speed* to $v_j$ before reaching the junction.
+3. **Acceleration feasibility**: the next move must be able to accelerate *from $v_j$* to its cruise speed within the available distance.
+
+These constraints are enforced by the **dual-pass look-ahead planner** in `trajectory.c`:
+
+**Reverse pass** (newest → oldest move in the queue):
+
+$$v_{entry,n}^2 \leq v_{exit,n}^2 + 2 \cdot a_{n} \cdot L_n$$
+
+Each move's entry speed is limited by what the move can realistically reach given its length and the exit condition from the next move.
+
+**Forward pass** (oldest → newest):
+
+$$v_{entry,n}^2 \leq v_{exit,n-1}^2 + 2 \cdot a_{n-1} \cdot L_{n-1}$$
+
+Adds the constraint that you cannot enter faster than the previous move's exit permits.
+
+After both passes, `TRAJECTORY_SolveSCurve()` computes the full 7-phase S-curve timing for each move using the settled entry and exit speeds as boundary conditions.
+
+#### Interaction with the S-Curve Planner
+
+The junction speed $v_j$ is passed as both the **exit speed of the previous move** and the **entry speed of the next move**. The S-curve solver then constructs a velocity profile that:
+
+- Begins at entry speed (which may be $v_j$ from a prior corner)
+- Accelerates smoothly (no jerk discontinuity) to nominal cruise speed
+- Cruises
+- Decelerates smoothly to exit speed $v_j$ for the upcoming corner
+
+The result is a completely continuous velocity profile over the entire program, with no abrupt changes at any order of derivative.
+
+#### Tuning `$11` — Practical Guidelines
+
+| Application | Recommended `$11` | Reason |
+|---|---|---|
+| High-precision finishing pass | 0.005–0.010 mm | Tight path fidelity required |
+| General-purpose milling | 0.010–0.025 mm | Good balance; 10–25 µm invisible |
+| Roughing / bulk material removal | 0.050–0.100 mm | Speed more important than corner accuracy |
+| 3D printing / foam / soft material | 0.100–0.200 mm | Large deviation acceptable for speed |
+| Exact-stop debugging / calibration | 0 | Disable blending entirely |
+
+**Signs `$11` is too large**: noticeable corner rounding on sharp features, workpiece corners are visibly radiused.
+
+**Signs `$11` is too small**: long pauses at each corner even at high feedrates; slow overall cycle time on contoured paths.
+
+---
+
 
 ### 4.6 Arc Interpolation Mathematics
 
@@ -1624,56 +1848,503 @@ The banner is configured in `common.h`:
 
 ---
 
-## Appendix A: GRBL Settings Reference
+## Chapter 12: System Architecture — How the Modules Fit Together
 
-| Setting | Parameter | Default | Description |
-|---------|-----------|---------|-------------|
-| `$0` | Step pulse time | 10 µs | Duration of STEP pin HIGH pulse |
-| `$1` | Step idle delay | 25 ms | Time before steppers power down after motion |
-| `$2` | Step invert mask | 0 | Bitmask to invert step signals per axis |
-| `$3` | Dir invert mask | 0 | Bitmask to invert DIR signals per axis |
-| `$4` | Enable invert | 0 | Invert EN pin polarity (0=active LOW) |
-| `$5` | Limit invert | 0 | Invert limit switch logic |
-| `$6` | Probe invert | 0 | Invert probe pin logic |
-| `$10` | Status options | 3 | Bit 0=MPos, bit 1=WPos in status reports |
-| `$11` | Junction deviation | 0.010 mm | Controls corner blending speed |
-| `$12` | Arc tolerance | 0.500 mm | Maximum chord deviation for arc segments |
-| `$13` | Report inches | 0 | 0=mm, 1=inches in status reports |
-| `$20` | Soft limits | 0 | Enable software travel limits |
-| `$21` | Hard limits | 0 | Enable hardware limit switches |
-| `$22` | Homing enable | 1 | Enable `$H` homing command |
-| `$23` | Homing dir mask | 0 | Bitmask: 1=home in positive direction |
-| `$24` | Homing feed rate | 500 mm/min | Slow precision homing speed |
-| `$25` | Homing seek rate | 2000 mm/min | Fast initial search speed |
-| `$26` | Homing debounce | 25 ms | Limit switch debounce delay |
-| `$27` | Homing pull-off | 2.0 mm | Distance to back off after homing |
-| `$30` | Max spindle RPM | 24000 | Maps to 100% PWM duty |
-| `$31` | Min spindle RPM | 0 | Maps to 0% PWM duty |
-| `$32` | Laser mode | 0 | Enables laser-mode PWM behaviour |
-| `$100` | X steps/mm | 80 | Step resolution for X axis |
-| `$101` | Y steps/mm | 80 | Step resolution for Y axis |
-| `$102` | Z steps/mm | 3200 | Step resolution for Z axis |
-| `$103` | A steps/mm | 80 | Step resolution for A axis |
-| `$110` | X max rate | 5000 mm/min | Maximum X velocity |
-| `$111` | Y max rate | 5000 mm/min | Maximum Y velocity |
-| `$112` | Z max rate | 300 mm/min | Maximum Z velocity |
-| `$113` | A max rate | 5000 mm/min | Maximum A velocity |
-| `$120` | X acceleration | 5000 mm/s² | X axis acceleration limit |
-| `$121` | Y acceleration | 5000 mm/s² | Y axis acceleration limit |
-| `$122` | Z acceleration | 200 mm/s² | Z axis acceleration limit |
-| `$123` | A acceleration | 500 mm/s² | A axis acceleration limit |
-| `$130` | X max travel | 300 mm | X soft limit (requires `$20=1`) |
-| `$131` | Y max travel | 300 mm | Y soft limit |
-| `$132` | Z max travel | 100 mm | Z soft limit |
-| `$133–$143` | A / extended | various | A-axis limits and jerk settings |
+### 12.1 The Layer Hierarchy
 
-### Tuning Tips
+The firmware is organised into five software layers. Data flows downward from the PC; control signals flow upward from hardware events (limit triggers, step counts).
 
-**Junction deviation (`$11`):** Lower values give sharper corners but slower corner speed. Higher values give faster operation but may cause path deviation at corners. Start at 0.010 mm and increase if cornering takes too long.
+```
+┌────────────────────────────────────────────────────────────┐
+│                    PC / UGS / Candle                       │
+│              (G-code sender, 115200 baud USB-serial)       │
+└───────────────────────────┬────────────────────────────────┘
+                            │ raw UART3 bytes
+┌───────────────────────────▼────────────────────────────────┐
+│                   PROTOCOL LAYER                           │
+│                  gcode_parser.c                            │
+│  • GRBL v1.1 state machine (IDLE / CONTROL / QUERY / CMD) │
+│  • Real-time character dispatch (?, !, ~, 0x18)           │
+│  • Inline G-code dispatch → motion_bridge                  │
+│  • Flow control: SendOrDeferOk, GCODE_CheckDeferredOk      │
+│  • Arc retry: push-back slot, drain gate                   │
+└───────────────────────────┬────────────────────────────────┘
+                            │ G-code events (inline dispatch)
+┌───────────────────────────▼────────────────────────────────┐
+│                  TRANSLATION LAYER                         │
+│                  motion_bridge.c                           │
+│  • G-code event → trajectory move call                     │
+│  • Arc interpolation (G2/G3 → N chord segments)            │
+│  • Coordinate transform: Work → Machine space              │
+│  • Planned-position tracking (for pipelined commands)      │
+│  • Canned cycles (G81/G83), probing, jog state machine     │
+└───────────────────────────┬────────────────────────────────┘
+                            │ TRAJECTORY_AddMove() calls
+┌───────────────────────────▼────────────────────────────────┐
+│                  PLANNING LAYER                            │
+│           trajectory.c    +    kinematics.c               │
+│  • 64-slot SCurveMove queue                                │
+│  • S-curve 7-phase velocity profile per move               │
+│  • Look-ahead: reverse pass + forward pass + solve         │
+│  • Junction deviation blending (Section 4.5)               │
+│  • Axis-limited combined acceleration / rate               │
+│  • Feed-hold: INTERPOLATOR_SoftStop for smooth decel       │
+└───────────────────────────┬────────────────────────────────┘
+                            │ active SCurveMove (one at a time)
+┌───────────────────────────▼────────────────────────────────┐
+│                 EXECUTION LAYER (ISR)                      │
+│                   interpolator.c                           │
+│  • Fixed-rate 100 kHz DDS step generator (TMR4 ISR)        │
+│  • 32-bit DDS accumulators × 4 axes                        │
+│  • TRAJECTORY_VelocityAt() for per-tick speed              │
+│  • Step pulse: GPIO SET then TMR5 one-shot clear (~3 µs)   │
+│  • Position tracking: step count per axis (atomic write)   │
+└───────────────────────────┬────────────────────────────────┘
+                            │ GPIO pulses
+┌───────────────────────────▼────────────────────────────────┐
+│                  HARDWARE LAYER                            │
+│      Step/Dir/En GPIO → TMC5160/DRV8825 → Motor coils      │
+│      Limit switches → GPIO input → polled / interrupt       │
+│      UART3 ring (1024 B RX, 1024 B TX) → USB-serial        │
+└────────────────────────────────────────────────────────────┘
+```
 
-**Arc tolerance (`$12`):** Lower values give smoother arcs (more segments, smaller chords). Higher values give fewer segments. At 0.500 mm, typical arcs use 3–10 segments per quarter-circle, which is a good balance between smoothness and queue efficiency.
+### 12.2 The Two Worlds: ISR and Main Loop
 
-**Acceleration (`$120`–`$123`):** Setting too high causes missed steps. Too low wastes time. Tuning: increase until occasional missed steps appear, then back off 20%.
+The firmware has exactly two execution contexts, and they must coexist without interference.
+
+**The ISR World** (TMR4 overflow, IPL6, every 10 µs):
+- Fires 100,000 times per second — no exceptions, no skipped ticks
+- Must complete in under 2,000 cycles at 200 MHz (~10 µs)
+- Reads `active_move` (S-curve data, unit vectors, steps_per_mm)
+- Accumulates four DDS values, fires step GPIO pins when thresholds crossed
+- Writes step counts atomically (32-bit aligned writes on MIPS are always atomic)
+- **No floating-point I/O, no dynamic allocation, no function calls with variable cost**
+
+**The Main Loop World** (`APP_Tasks()` in `app.c`, running continuously):
+- UART reading, G-code parsing, arc chord generation, trajectory planning
+- Can take as long as needed — as long as it does not miss real-time events
+- Communicates with ISR via a few shared variables protected by brief interrupt disables:
+
+```c
+// Loading a new move (INTERPOLATOR_LoadMove):
+__builtin_disable_interrupts();
+active_move = *mv;      // copy entire SCurveMove structure
+interp_active = true;
+__builtin_enable_interrupts();
+// ISR is disabled for < 10 cycles — no ticks are lost at 100 kHz
+```
+
+Importantly, the main loop does **not** hold a lock during normal operation. The ISR runs freely between main-loop calls. There are no mutexes or semaphores — the design avoids all such synchronisation primitives.
+
+### 12.3 The Three-Queue Pipeline
+
+```
+     UART3 RX ring
+     (1024 bytes)
+          ↓
+  [Inline dispatch — no queue at this stage]
+          ↓
+  Trajectory Queue
+  (64 × SCurveMove)
+          ↓
+  Active Move
+  (1 × SCurveMove in interpolator)
+```
+
+**An important architectural choice**: the GCODE text command queue that existed in earlier architectures has been **eliminated**. The parser now calls `dispatch_command_line()` directly — which calls `TRAJECTORY_AddMove()` — on the same iteration the command is received. This is called **inline dispatch**.
+
+Why? The old two-stage approach (parse text → queue → consume later) caused the arc-to-arc stall: when the trajectory queue was full, the text had already been consumed from `rxBuffer` and could not be held. Inline dispatch keeps `rxBuffer` intact during retry — the parser stays in `GCODE_STATE_GCODE_COMMAND` until the trajectory has space, then re-dispatches the same text.
+
+**Backpressure propagates upward naturally:**
+
+```
+Trajectory full
+    → dispatch returns false
+    → parser stays in GCODE_STATE_GCODE_COMMAND (rxBuffer intact)
+    → "ok" is withheld (SendOrDeferOk defers)
+    → UGS does not send more commands (credit window exhausted)
+    → UART3 ring stops filling
+    → system waits gracefully until ISR drains the trajectory queue
+```
+
+### 12.4 Module Ownership and Data Governance
+
+Every piece of shared state has exactly one owning module. No two modules write the same data. This eliminates entire categories of bugs.
+
+| Data | Authoritative Owner | Readers |
+|------|-------------------|---------|
+| `stepper_position[NUM_AXIS]` (step counts) | `interpolator.c` ISR | `stepper.c::STEPPER_GetPosition()` |
+| `active_move` (current SCurveMove) | `interpolator.c::INTERPOLATOR_LoadMove()` | ISR |
+| `trajectory_queue[]` | `trajectory.c` | `interpolator.c`, `motion_bridge.c` |
+| `planned_position` | `motion_bridge.c` static | `motion_bridge.c` only |
+| `wcs_offset[6]` | `settings.c` + `kinematics.c` | `kinematics.c::WorkToMachine()` |
+| `okPendingCount` | `gcode_parser.c` static | `gcode_parser.c` only |
+
+**No copies of queue depths.** A previous bug involved copying `appData->motionQueueCount` to a separate struct field for flow control. The copy became stale — the deferred-ok release stopped working. Fix: flow control always reads the authoritative count directly from the owning module. No copies, ever.
+
+### 12.5 GPIO Architecture — The LED Pattern
+
+All GPIO operations use **function pointer arrays** — the "LED pattern", named after the first use of this style for LED toggling in the codebase. This lets axis-generic code operate with zero overhead:
+
+```c
+// In utils.h — the LED pattern:
+typedef void (*GPIO_SetFunc)(void);
+typedef void (*GPIO_ClearFunc)(void);
+
+extern GPIO_SetFunc  axis_step_set  [NUM_AXIS];  // {step_x_set, step_y_set, ...}
+extern GPIO_ClearFunc axis_step_clear[NUM_AXIS];
+extern GPIO_SetFunc  axis_dir_set   [NUM_AXIS];
+
+// Zero-overhead inline wrappers:
+static inline void AXIS_StepSet(E_AXIS axis) {
+    axis_step_set[axis]();   // → LATxSET = bitmask (single store instruction)
+}
+static inline void AXIS_StepClear(E_AXIS axis) {
+    axis_step_clear[axis](); // → LATxCLR = bitmask
+}
+```
+
+The XC32 compiler expands this entire chain — `AXIS_StepSet(AXIS_X)` → `axis_step_set[0]()` → `step_x_set()` → `StepX_Set()` → `LATDSET = 0x10` — to a **single machine instruction**: `sw $t1, 0($t0)` (store word to LATxSET). There is genuinely zero overhead versus hand-coding the register write.
+
+**PCB constraint — single shared enable pin**: The hardware PCB has ONE enable pin (`EnXYZA`, RE6) shared across all four axis drivers. There are no per-axis enable pins. All motors enable and disable simultaneously. Any code that tries to enable/disable individual axes is incorrect for this PCB.
+
+### 12.6 The Settings Pointer Web
+
+Settings values are needed in many modules. Rather than passing `CNC_Settings*` to every function or duplicating values, `utils.c` maintains **pointer arrays** wired at startup:
+
+```c
+typedef struct {
+    float*   max_rate;      // → CNC_Settings.max_rate[axis]
+    float*   acceleration;  // → CNC_Settings.acceleration[axis]
+    float*   steps_per_mm;  // → CNC_Settings.steps_per_mm[axis]
+    int32_t* step_count;    // → stepper_position[axis]
+} AxisSettings;
+
+extern AxisSettings g_axis_settings[NUM_AXIS];
+```
+
+The ISR reads `*g_axis_settings[axis].steps_per_mm` via this pointer every tick. When `$100` is updated via a `$100=80` command and saved to flash, the `CNC_Settings` RAM struct is updated in place. The pointer still points to the same struct field — **the change takes effect in the ISR immediately**, with no handoff or reload needed.
+
+### 12.7 Debug System Overview
+
+The firmware includes a **compile-time debug system** with zero runtime overhead in Release builds. All debug output is gated by preprocessor symbols:
+
+```c
+// In Release: both lines compile to nothing ((void)0):
+DEBUG_PRINT_MOTION("[MOTION] v=%.2f mm/s at t=%.3f ms\r\n", velocity, elapsed_ms);
+DEBUG_EXEC_SEGMENT(LED1_Toggle());
+
+// In Debug (make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION"):
+// Both expand to real code — UART_Printf and LED toggle.
+```
+
+Available debug subsystems (passed as `DEBUG_FLAGS` to make):
+
+| Flag | Subsystem |
+|------|--------------------|
+| `DEBUG_MOTION` | Trajectory planning, junction speed computation |
+| `DEBUG_GCODE` | GRBL protocol, flow control, ok credits |
+| `DEBUG_STEPPER` | ISR step counting, TMR4 state |
+| `DEBUG_SEGMENT` | Move loading to interpolator |
+| `DEBUG_UART` | UART3 TX/RX byte activity |
+| `DEBUG_APP` | State machine transitions |
+
+Build commands:
+
+```powershell
+# Always run from repository root:
+make                                               # Release (default)
+make BUILD_CONFIG=Debug DEBUG_FLAGS="DEBUG_MOTION DEBUG_GCODE"  # Debug
+make clean                                         # Clean current config
+```
+
+---
+
+## Appendix A: Complete GRBL Settings Reference
+
+### A.1 System Commands
+
+| Command | Description |
+|---------|-------------|
+| `$$` | Print all settings (each parameter on its own line) |
+| `$N` | Print startup lines N0 and N1 |
+| `$Nn=<gcode>` | Save G-code startup line (e.g. `$N0=G21 G90`) |
+| `$#` | Print work coordinate offsets (G54–G59, G92, TLO, probe) |
+| `$G` | Print current G-code modal state |
+| `$I` | Print build information (`[VER:...]` and `[OPT:...]`) |
+| `$H` | Run homing cycle (requires `$22=1`) |
+| `$X` | Clear alarm state (unlock) |
+| `$C` | Toggle check mode (parse only — no motion) |
+| `$RST=$` | Restore all settings to factory defaults |
+| `$RST=#` | Clear all work coordinate offsets to zero |
+| `$RST=*` | Full factory reset (settings + offsets) |
+| `$J=<gcode>` | Execute jog command (e.g. `$J=G91 X10 F500`) |
+| `$X=value` | Set parameter X to value (e.g. `$100=80.0`) |
+
+### A.2 Real-Time Commands (No `ok` Response)
+
+| Character | Hex | Action |
+|-----------|-----|--------|
+| `?` | 0x3F | Status report — `<State\|MPos:...\|WPos:...\|FS:...\|Ov:...>` |
+| `!` | 0x21 | Feed hold — smooth deceleration to stop |
+| `~` | 0x7E | Cycle start / resume from feed hold |
+| `Ctrl+X` | 0x18 | Soft reset — clears all queues, sends startup banner |
+| Override +10% feed | 0x91 | Increase feed rate override by 10% |
+| Override −10% feed | 0x92 | Decrease feed rate override by 10% |
+| Override feed 100% | 0x90 | Reset feed rate override to 100% |
+| Override +10% spindle | 0x9A | Increase spindle RPM override by 10% |
+| Override −10% spindle | 0x9B | Decrease spindle RPM override by 10% |
+| Override spindle 100% | 0x99 | Reset spindle override to 100% |
+| Jog cancel | 0x85 | Cancel active jog move, flush jog segments |
+
+### A.3 Core Settings Parameters
+
+#### Step Configuration ($0–$6)
+
+| Parameter | Name | Default | Unit | Description |
+|-----------|------|---------|------|-------------|
+| `$0` | Step pulse time | 10 | µs | Duration of STEP pin HIGH pulse. Must satisfy driver minimum (DRV8825: 1.9 µs, TMC5160: 100 ns). Firmware uses TMR5 one-shot for precise ~3 µs regardless of this setting. |
+| `$1` | Step idle delay | 25 | ms | Time before steppers de-energise after motion stops. 0 = disable motors immediately. 255 = always energised. |
+| `$2` | Step invert mask | 0 | bitmask | Invert STEP signal logic per axis. Bit 0=X, 1=Y, 2=Z, 3=A. Set bit if driver needs active-LOW step. |
+| `$3` | Dir invert mask | 0 | bitmask | Invert DIR signal logic per axis. Bit 0=X, 1=Y, 2=Z, 3=A. Use to reverse physical direction without rewiring. |
+| `$4` | Enable invert | 0 | bool | 0=active LOW (standard for most drivers), 1=active HIGH |
+| `$5` | Limit invert | 0 | bool | 0=limit switch normally open (triggers HIGH), 1=normally closed (triggers LOW) |
+| `$6` | Probe invert | 0 | bool | 0=probe pin active HIGH, 1=active LOW |
+
+#### Status and Reporting ($10–$13)
+
+| Parameter | Name | Default | Unit | Description |
+|-----------|------|---------|------|-------------|
+| `$10` | Status report mask | 3 | bitmask | Bit 0: include MPos in `?`. Bit 1: include WPos. Both set → both shown. |
+| `$11` | Junction deviation | 0.010 | mm | Maximum path deviation allowed at corners in exchange for higher junction speed. See Chapter 4.5 for full explanation. |
+| `$12` | Arc tolerance | 0.500 | mm | Maximum chord deviation for arc segment generation. Smaller = smoother arcs with more segments. GRBL default is 0.002 mm; this firmware defaults to 0.500 mm for queue efficiency. |
+| `$13` | Arc radius tolerance | 0.002 | mm | Maximum allowed difference between G2/G3 start-radius and end-radius. Exceeding this triggers ALARM:5. |
+
+**Choosing `$12` vs `$13`:**  
+`$12` (arc tolerance) controls *how many segments* an arc is broken into — it is a chord-deviation budget for the *shape* of the arc. `$13` (arc radius tolerance) is a sanity check on the *G-code itself* — it rejects arcs where the programmer's I/J/K values imply a slightly different radius at start vs end, which would represent a malformed arc.
+
+#### Homing Configuration ($20–$27)
+
+| Parameter | Name | Default | Unit | Description |
+|-----------|------|---------|------|-------------|
+| `$20` | Soft limits | 0 | bool | Enable soft limit checking. Rejects G-code targets outside `$130`–`$143`. Requires homing (`$22=1`) first. |
+| `$21` | Hard limits | 0 | bool | Enable hard limit monitoring. Any limit switch trigger during motion → ALARM. |
+| `$22` | Homing enable | 1 | bitmask | Per-axis bitmask: bit 0=X, 1=Y, 2=Z, 3=A. `$22=7` homes XYZ only. **Never set bits for axes without limit switches.** |
+| `$23` | Homing dir mask | 0 | bitmask | Bit set = home in positive direction. Bit clear = home negative. |
+| `$24` | Homing feed rate | 500 | mm/min | Slow precision-approach speed in locate phase. |
+| `$25` | Homing seek rate | 2000 | mm/min | Fast initial search speed in seek phase. |
+| `$26` | Homing debounce | 25 | ms | Limit switch debounce delay (core timer). Increase if switches show false triggers. |
+| `$27` | Homing pull-off | 2.0 | mm | Distance to retract from switch after homing. Must be enough to fully release the switch. |
+
+**Homing sequence per axis:**
+1. **SEEK** — move at `$25` until limit triggers
+2. **BACK OFF** — move away briefly so switch releases
+3. **LOCATE** — move toward switch again at `$24` — precise trigger
+4. **PULL-OFF** — retract `$27` mm; this is machine position 0 for the axis
+
+#### Spindle Control ($30–$32)
+
+| Parameter | Name | Default | Unit | Description |
+|-----------|------|---------|------|-------------|
+| `$30` | Max spindle RPM | 24000 | RPM | S value that produces 100% PWM duty (OC8 at 3.338 kHz). |
+| `$31` | Min spindle RPM | 0 | RPM | S value that produces 0% PWM duty. Use `$31>0` for drivers that need a minimum signal. |
+| `$32` | Laser mode | 0 | bool | Enables laser-mode PWM behaviour (spindle PWM tracks feed rate). |
+
+#### Steps Per mm ($100–$103)
+
+| Parameter | Axis | Default | Unit |
+|-----------|------|---------|------|
+| `$100` | X | 80.0 | steps/mm |
+| `$101` | Y | 80.0 | steps/mm |
+| `$102` | Z | 3200.0 | steps/mm |
+| `$103` | A | 80.0 | steps/mm |
+
+**Calculation formula:**
+
+$$\text{steps\_per\_mm} = \frac{\text{motor\_steps/rev} \times \text{microsteps}}{\text{mm/rev}}$$
+
+**Belt drive (GT2 belt, 20-tooth pulley, 16× microstepping, 200-step motor):**
+```
+mm/rev  = 20 teeth × 2 mm/tooth = 40 mm
+steps/mm = (200 × 16) / 40 = 80 steps/mm
+```
+
+**Lead screw (5 mm pitch, 16×, 200-step motor):**
+```
+steps/mm = (200 × 16) / 5 = 640 steps/mm
+```
+
+**Microstepping reference table:**
+
+| Microstep setting | Steps/rev | Factor vs full-step |
+|---|---|---|
+| Full step (1×) | 200 | 1× |
+| Half step (2×) | 400 | 2× |
+| Quarter step (4×) | 800 | 4× |
+| 8th step | 1600 | 8× |
+| 16th step (common) | 3200 | 16× |
+| 32nd step | 6400 | 32× |
+| 256th step | 51200 | 256× |
+
+> **When changing TMC5160 microstep resolution (`$230`–`$233`), always update `$100`–`$103` to match.**
+
+#### Maximum Rates ($110–$113)
+
+| Parameter | Axis | Default | Unit | Notes |
+|-----------|------|---------|------|-------|
+| `$110` | X | 5000.0 | mm/min | Maximum X velocity (rapids + feedrate cap) |
+| `$111` | Y | 5000.0 | mm/min | |
+| `$112` | Z | 300.0 | mm/min | Lower due to vertical load |
+| `$113` | A | 5000.0 | mm/min | |
+
+The DDS maximum step rate is 50,000 steps/s per axis. At `$100=80` steps/mm, theoretical max is 37,500 mm/min — far above the configured limits. Practical limits come from motor torque at speed and mechanical resonance.
+
+#### Acceleration ($120–$123)
+
+| Parameter | Axis | Default | Unit |
+|-----------|------|---------|------|
+| `$120` | X | 5000.0 | mm/s² |
+| `$121` | Y | 5000.0 | mm/s² |
+| `$122` | Z | 200.0 | mm/s² |
+| `$123` | A | 500.0 | mm/s² |
+
+These are the **axis acceleration limits** fed into the combined-acceleration formula. A diagonal move at 45° can use up to √2 × the per-axis limit. Higher values give faster ramp-up but increase the risk of missed steps. **Tuning**: increase until occasional missed steps appear at typical feedrates, then back off 20%.
+
+#### Maximum Travel — Soft Limits ($130–$133)
+
+| Parameter | Axis | Default | Unit |
+|-----------|------|---------|------|
+| `$130` | X | 300.0 | mm |
+| `$131` | Y | 300.0 | mm |
+| `$132` | Z | 100.0 | mm |
+| `$133` | A | 360.0 | mm |
+
+Only active when `$20=1` (soft limits enabled) and the machine has been homed. Moves targeting coordinates beyond these limits receive `error:2` without executing.
+
+### A.4 TMC5160 Driver Settings ($200–$253)
+
+These settings are only active when the firmware is built with `HAS_TMC5160_AXIS` defined (at least one axis uses a TMC5160). Changes take effect immediately via SPI — no reboot required.
+
+#### Chopper Mode ($200–$203)
+
+| Value | Mode | Description |
+|-------|------|-------------|
+| `1` | StealthChop | Voltage-mode commutation — nearly silent at low speed |
+| `2` | SpreadCycle | Current-mode high-torque — audible but powerful |
+| `3` | Mixed | StealthChop below `$24x` rpm threshold, SpreadCycle above |
+| `4` | CoolStep | Adaptive current reduction — saves motor heat |
+
+| Param | Axis | Default |
+|-------|------|---------|
+| `$200` | X | 1 |
+| `$201` | Y | 1 |
+| `$202` | Z | 1 |
+| `$203` | A | 1 |
+
+#### Run Current ($210–$213)
+
+Scale 0–31, approximately linear percentage of Vref. Default 20 ≈ 63% of Vref.
+
+| Param | Axis | Default | Range |
+|-------|------|---------|-------|
+| `$210` | X | 20 | 0–31 |
+| `$211` | Y | 20 | 0–31 |
+| `$212` | Z | 20 | 0–31 |
+| `$213` | A | 20 | 0–31 |
+
+#### Hold Current ($220–$223)
+
+Current when motor is stationary. Lower than run current to reduce heat. Default 10 ≈ 32% of Vref.
+
+| Param | Axis | Default |
+|-------|------|---------|
+| `$220` | X | 10 |
+| `$221` | Y | 10 |
+| `$222` | Z | 10 |
+| `$223` | A | 10 |
+
+#### Microstep Resolution ($230–$233)
+
+TMC5160 MRES register value:
+
+| Value | Microsteps | Steps/rev (200-step motor) |
+|-------|-----------|---------------------------|
+| `0` | 256 | 51,200 |
+| `1` | 128 | 25,600 |
+| `2` | 64 | 12,800 |
+| `3` | 32 | 6,400 |
+| `4` | **16** (default) | 3,200 |
+| `5` | 8 | 1,600 |
+| `6` | 4 | 800 |
+| `7` | 2 | 400 |
+| `8` | 1 (full step) | 200 |
+
+| Param | Axis | Default |
+|-------|------|---------|
+| `$230` | X | 4 (16µ) |
+| `$231` | Y | 4 (16µ) |
+| `$232` | Z | 4 (16µ) |
+| `$233` | A | 4 (16µ) |
+
+#### StealthChop → SpreadCycle Crossover ($240–$243)
+
+TPWMTHRS register — velocity threshold for mode crossover in Mixed mode (`$200=3`). Units are internal TMC5160 velocity units. Higher value = switches to SpreadCycle earlier (at lower speed).
+
+| Param | Axis | Default |
+|-------|------|---------|
+| `$240` | X | 500 |
+| `$241` | Y | 500 |
+| `$242` | Z | 500 |
+| `$243` | A | 500 |
+
+#### CoolStep Lower Threshold ($250–$253)
+
+TCOOLTHRS register — minimum velocity at which CoolStep is active. 0 = disabled.
+
+| Param | Axis | Default |
+|-------|------|---------|
+| `$250`–`$253` | X–A | 0 (disabled) |
+
+### A.5 Settings Tuning Guide
+
+**Start here — correct order of tuning:**
+
+1. **`$100`–`$103` (steps/mm)** — must be correct before anything else. Calibrate with a DTI and a known distance move.
+2. **`$110`–`$113` (max rate)** — increase until motors stall at rapids, then back off 20%.
+3. **`$120`–`$123` (acceleration)** — increase until occasional stall during acceleration, back off 20%.
+4. **`$11` (junction deviation)** — tune for the balance of corner speed vs path accuracy your application needs.
+5. **`$12` (arc tolerance)** — 0.500 mm is recommended for queue efficiency. Only reduce if arc geometry is visibly faceted at very small radii.
+
+**Common troubleshooting:**
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| Machine stops mid-file (UGS shows `<Idle>`) | Pipeline mode blank-line starvation | Verify firmware version ≥ b145f12 |
+| UGS status not updating during arcs | `?` bytes blocked during arc retry | Verify firmware has unsolicited status push in retry path |
+| `$$` command causes UGS disconnect | TX buffer too small | Verify `UART3_WRITE_BUFFER_SIZE = 1024` in `plib_uart3.c` |
+| Homing hangs on A-axis with `ALARM:9` | `$22` includes A-axis bit but no switch fitted | Set `$22=7` (XYZ only) |
+| Position drifts over long moves | Under-acceleration (steps lost) | Reduce `$120`–`$123` by 20% |
+| Arcs have visible flat spots | Arc tolerance too coarse | Reduce `$12` (e.g. from 0.500 to 0.100 mm) |
+| Stepper drivers run hot | Hold current too high | Reduce `$220`–`$223` for TMC5160 axes |
+
+### A.6 Status Report Format
+
+```
+<Run|MPos:30.013,50.013,0.000|WPos:30.013,50.013,0.000|FS:5000,12000|Ov:100,100,100>
+```
+
+| Field | Description |
+|-------|-------------|
+| `Run` | Machine state: `Idle`, `Run`, `Hold:0`, `Hold:1`, `Home`, `Alarm`, `Jog`, `Check` |
+| `MPos:x,y,z` | Machine position (mm, from machine zero / home switch) |
+| `WPos:x,y,z` | Work position (MPos minus active WCS offset and G92) |
+| `FS:f,s` | Current feedrate (mm/min) and spindle speed (RPM) |
+| `Ov:f,r,s` | Feed / rapid / spindle override percentages |
+| `\|Cm:1` | Present only in Check mode |
+| `\|FH:1` | Present during Feed Hold |
+
+The `?` character is a real-time command and can be sent at any time — even during motion — without disturbing the G-code stream. UGS sends it every ~200 ms to update the position display.
 
 ---
 
