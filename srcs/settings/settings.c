@@ -117,9 +117,9 @@ static const CNC_Settings default_settings = {
     .mm_per_arc_segment = 0.5f,    // $12 - Increased from 0.1mm - creates larger segments with reliable step counts
     .arc_tolerance = 0.002f,       // $13 - GRBL v1.1 default: 0.002mm (2 microns) for radius error compensation
     
-#ifdef HAS_TMC5160_AXIS
     // TMC5160 runtime defaults ($200-$253)
     // irun=20 (~63% of Vref), ihold=10, mres=4 (16 microsteps), mode=StealthChop
+    // Always compiled in; hardware driver only runs when HAS_TMC5160_AXIS is defined.
     .tmc_mode       = {TMC5160_MODE_STEALTHCHOP, TMC5160_MODE_STEALTHCHOP,
                        TMC5160_MODE_STEALTHCHOP, TMC5160_MODE_STEALTHCHOP},
     .tmc_irun       = {20, 20, 20, 20},
@@ -127,7 +127,11 @@ static const CNC_Settings default_settings = {
     .tmc_mres       = { 4,  4,  4,  4},  // 4 = TMC5160_MRES_16 (16 microsteps)
     .tmc_tpwm_thrs  = {500, 500, 500, 500},
     .tmc_tcoolthrs  = {0, 0, 0, 0},
-#endif
+
+    // Per-axis driver type ($260-$263): seeded from compile-time board defaults.
+    // After first boot these are overridden by $260-$263 over serial and persisted.
+    .axis_driver_type = {AXIS_X_DRIVER_DEFAULT, AXIS_Y_DRIVER_DEFAULT,
+                         AXIS_Z_DRIVER_DEFAULT, AXIS_A_DRIVER_DEFAULT},
 
     .checksum = 0  // Will be calculated
 };
@@ -328,7 +332,6 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 26: settings->homing_debounce = (uint32_t)value; break;
         case 27: settings->homing_pull_off = value; break;
         
-#ifdef HAS_TMC5160_AXIS
         // TMC5160 axis mode ($200-$203)
         case 200: settings->tmc_mode[0] = (uint8_t)value; break;
         case 201: settings->tmc_mode[1] = (uint8_t)value; break;
@@ -364,7 +367,12 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 251: settings->tmc_tcoolthrs[1] = (uint32_t)value; break;
         case 252: settings->tmc_tcoolthrs[2] = (uint32_t)value; break;
         case 253: settings->tmc_tcoolthrs[3] = (uint32_t)value; break;
-#endif
+
+        // Per-axis driver type ($260-$263): 1=DRIVER_TMC5160, 2=DRIVER_DRV8825
+        case 260: settings->axis_driver_type[0] = (uint8_t)value; break;
+        case 261: settings->axis_driver_type[1] = (uint8_t)value; break;
+        case 262: settings->axis_driver_type[2] = (uint8_t)value; break;
+        case 263: settings->axis_driver_type[3] = (uint8_t)value; break;
 
         default:
             return false;  // Invalid parameter
@@ -432,7 +440,6 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         case 26: return (float)settings->homing_debounce;
         case 27: return settings->homing_pull_off;
 
-#ifdef HAS_TMC5160_AXIS
         case 200: return (float)settings->tmc_mode[0];
         case 201: return (float)settings->tmc_mode[1];
         case 202: return (float)settings->tmc_mode[2];
@@ -462,7 +469,11 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         case 251: return (float)settings->tmc_tcoolthrs[1];
         case 252: return (float)settings->tmc_tcoolthrs[2];
         case 253: return (float)settings->tmc_tcoolthrs[3];
-#endif
+
+        case 260: return (float)settings->axis_driver_type[0];
+        case 261: return (float)settings->axis_driver_type[1];
+        case 262: return (float)settings->axis_driver_type[2];
+        case 263: return (float)settings->axis_driver_type[3];
 
         default:
             return 0.0f;
@@ -537,10 +548,7 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$142=%.3f\r\n", settings->jerk[AXIS_Z]);
     len += sprintf(&settings_buffer[len], "$143=%.3f\r\n", settings->jerk[AXIS_A]);
 
-
-
-#ifdef HAS_TMC5160_AXIS
-    // TMC5160 runtime settings ($200-$253) - only shown when TMC5160 driver compiled in
+    // TMC5160 runtime settings ($200-$253) - always shown so UI can configure them
     len += sprintf(&settings_buffer[len], "$200=%u\r\n", settings->tmc_mode[0]);
     len += sprintf(&settings_buffer[len], "$201=%u\r\n", settings->tmc_mode[1]);
     len += sprintf(&settings_buffer[len], "$202=%u\r\n", settings->tmc_mode[2]);
@@ -565,7 +573,12 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$251=%lu\r\n", (unsigned long)settings->tmc_tcoolthrs[1]);
     len += sprintf(&settings_buffer[len], "$252=%lu\r\n", (unsigned long)settings->tmc_tcoolthrs[2]);
     len += sprintf(&settings_buffer[len], "$253=%lu\r\n", (unsigned long)settings->tmc_tcoolthrs[3]);
-#endif
+
+    // Per-axis driver type ($260-$263): 1=TMC5160, 2=DRV8825
+    len += sprintf(&settings_buffer[len], "$260=%u\r\n", settings->axis_driver_type[0]);
+    len += sprintf(&settings_buffer[len], "$261=%u\r\n", settings->axis_driver_type[1]);
+    len += sprintf(&settings_buffer[len], "$262=%u\r\n", settings->axis_driver_type[2]);
+    len += sprintf(&settings_buffer[len], "$263=%u\r\n", settings->axis_driver_type[3]);
 
     // ✅ GRBL protocol: blank line + ok
     len += sprintf(&settings_buffer[len], "\r\nok\r\n");

@@ -1670,6 +1670,16 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                             TMC5160_ApplySettings((E_AXIS)axis_idx, s);
                         }
                     }
+
+                    // $260-$263: per-axis driver type changed.
+                    // If an axis was just switched to TMC5160, configure its hardware now.
+                    // If switched away, no SPI action needed (axis will use step/dir only).
+                    if (param >= 260 && param <= 263) {
+                        E_AXIS axis_idx = (E_AXIS)(param - 260);
+                        if (s->axis_driver_type[axis_idx] == DRIVER_TMC5160) {
+                            TMC5160_ApplySettings(axis_idx, s);
+                        }
+                    }
 #endif
                     
                     handled = true;

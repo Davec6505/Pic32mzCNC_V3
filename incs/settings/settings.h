@@ -80,16 +80,22 @@ typedef struct {
     float g28_position[4];         // G28 stored machine position [X, Y, Z, A]
     float g30_position[4];         // G30 stored machine position [X, Y, Z, A]
     
-#ifdef HAS_TMC5160_AXIS
     // TMC5160 runtime tuning ($200-$253) — one slot per axis (0=X,1=Y,2=Z,3=A)
-    // DRV8825 axes have slots but values are unused / not sent to driver
+    // Always compiled in so the UI/serial interface can configure TMC5160 params
+    // regardless of the compile-time AXIS_x_DRIVER selection.
+    // Values are only written to hardware when HAS_TMC5160_AXIS is defined.
     uint8_t  tmc_mode[4];        // $200-$203: 1=StealthChop 2=SpreadCycle 3=Mixed 4=CoolStep
     uint8_t  tmc_irun[4];        // $210-$213: run current 0-31
     uint8_t  tmc_ihold[4];       // $220-$223: hold current 0-31
     uint8_t  tmc_mres[4];        // $230-$233: microstep resolution (TMC5160_MRES_xxx)
     uint32_t tmc_tpwm_thrs[4];   // $240-$243: Mixed mode StealthChop→SpreadCycle velocity threshold
     uint32_t tmc_tcoolthrs[4];   // $250-$253: CoolStep lower velocity threshold
-#endif
+
+    // Per-axis driver type — runtime selection exposed via serial ($260-$263)
+    // 1 = DRIVER_TMC5160 (SPI + StepDir)   2 = DRIVER_DRV8825 (StepDir only)
+    // Changing this persists to flash; a firmware rebuild may still be needed
+    // before the hardware driver code for that axis is active.
+    uint8_t  axis_driver_type[4]; // $260-$263: axis driver type per axis [X, Y, Z, A]
 
     // Startup lines ($N0 / $N1) — executed at boot after settings load
     char startup_line[2][80];
@@ -101,15 +107,9 @@ typedef struct {
 // Default settings
 #define SETTINGS_SIGNATURE 0x47524231  // "GRB1"
 // Version tracks the BINARY layout of CNC_Settings.
-// TMC5160 fields are guarded by #ifdef HAS_TMC5160_AXIS, so they only exist
-// in the struct when at least one TMC5160 axis is enabled.  Bump the version
-// only when the struct actually changes — otherwise existing flash settings
-// (written as version 2 with DRV8825-only builds) remain valid.
-#ifdef HAS_TMC5160_AXIS
-#define SETTINGS_VERSION   7  // v7: added g28_position + g30_position fields (TMC5160 build)
-#else
-#define SETTINGS_VERSION   6  // v6: added g28_position + g30_position fields (DRV8825-only build)
-#endif
+// v8: TMC5160 fields ($200-$253) and axis_driver_type ($260-$263) are now always
+//     compiled in (no #ifdef guard) so the UI/serial interface always exposes them.
+#define SETTINGS_VERSION   8
 
 // ✅ CRITICAL: Safe NVM storage location based on MikroE bootloader
 // PIC32MZ2048EFH100 Program Flash with MikroE Bootloader:

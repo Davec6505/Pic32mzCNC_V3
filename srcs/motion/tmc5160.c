@@ -222,45 +222,40 @@ void TMC5160_ConfigAxis(E_AXIS axis, const TMC5160_AxisConfig* cfg)
 
 void TMC5160_Initialize(void)
 {
+    const CNC_Settings* s = SETTINGS_GetCurrent();
     memset(g_status, 0, sizeof(g_status));
 
-    // Deassert CS lines for all configured TMC5160 axes before SPI begins
-#if (AXIS_X_DRIVER == DRIVER_TMC5160)
-    cs_deassert[AXIS_X]();
-#endif
-#if (AXIS_Y_DRIVER == DRIVER_TMC5160)
-    cs_deassert[AXIS_Y]();
-#endif
-#if (AXIS_Z_DRIVER == DRIVER_TMC5160)
-    cs_deassert[AXIS_Z]();
-#endif
-#if (AXIS_A_DRIVER == DRIVER_TMC5160)
-    cs_deassert[AXIS_A]();
-#endif
+    // Deassert CS lines for all axes that are configured as TMC5160 at runtime
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        if (s->axis_driver_type[axis] == DRIVER_TMC5160) {
+            cs_deassert[axis]();
+        }
+    }
 
     // Small settle time after power-on (TMC5160 needs ~1ms after ENN high → low)
     CORETIMER_DelayMs(2);
 
-    // Configure only the axes assigned as TMC5160, applying per-axis mode
-#if (AXIS_X_DRIVER == DRIVER_TMC5160)
-    { TMC5160_AxisConfig cfg = g_default_cfg; cfg.mode = AXIS_X_TMC_MODE; TMC5160_ConfigAxis(AXIS_X, &cfg); CORETIMER_DelayUs(10); }
-#endif
-#if (AXIS_Y_DRIVER == DRIVER_TMC5160)
-    { TMC5160_AxisConfig cfg = g_default_cfg; cfg.mode = AXIS_Y_TMC_MODE; TMC5160_ConfigAxis(AXIS_Y, &cfg); CORETIMER_DelayUs(10); }
-#endif
-#if (AXIS_Z_DRIVER == DRIVER_TMC5160)
-    { TMC5160_AxisConfig cfg = g_default_cfg; cfg.mode = AXIS_Z_TMC_MODE; TMC5160_ConfigAxis(AXIS_Z, &cfg); CORETIMER_DelayUs(10); }
-#endif
-#if (AXIS_A_DRIVER == DRIVER_TMC5160)
-    { TMC5160_AxisConfig cfg = g_default_cfg; cfg.mode = AXIS_A_TMC_MODE; TMC5160_ConfigAxis(AXIS_A, &cfg); CORETIMER_DelayUs(10); }
-#endif
+    // Configure every axis assigned as TMC5160, applying persisted settings
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        if (s->axis_driver_type[axis] == DRIVER_TMC5160) {
+            TMC5160_AxisConfig cfg = g_default_cfg;
+            cfg.mode  = s->tmc_mode[axis];
+            cfg.irun  = s->tmc_irun[axis];
+            cfg.ihold = s->tmc_ihold[axis];
+            cfg.mres  = s->tmc_mres[axis];
+            cfg.tpwm_thrs  = s->tmc_tpwm_thrs[axis];
+            cfg.tcoolthrs  = s->tmc_tcoolthrs[axis];
+            TMC5160_ConfigAxis(axis, &cfg);
+            CORETIMER_DelayUs(10);
+        }
+    }
 
     g_initialized = true;
-    UART_Printf("[TMC5160] Initialized (X=%s Y=%s Z=%s A=%s)\r\n",
-                (AXIS_X_DRIVER == DRIVER_TMC5160) ? "TMC" : "DRV",
-                (AXIS_Y_DRIVER == DRIVER_TMC5160) ? "TMC" : "DRV",
-                (AXIS_Z_DRIVER == DRIVER_TMC5160) ? "TMC" : "DRV",
-                (AXIS_A_DRIVER == DRIVER_TMC5160) ? "TMC" : "DRV");
+    UART_Printf("[TMC5160] Init X=%s Y=%s Z=%s A=%s\r\n",
+                (s->axis_driver_type[AXIS_X] == DRIVER_TMC5160) ? "TMC" : "DRV",
+                (s->axis_driver_type[AXIS_Y] == DRIVER_TMC5160) ? "TMC" : "DRV",
+                (s->axis_driver_type[AXIS_Z] == DRIVER_TMC5160) ? "TMC" : "DRV",
+                (s->axis_driver_type[AXIS_A] == DRIVER_TMC5160) ? "TMC" : "DRV");
 }
 
 /*
@@ -272,40 +267,29 @@ bool TMC5160_Tasks(void)
 {
     if (!g_initialized) return false;
 
+    const CNC_Settings* s = SETTINGS_GetCurrent();
     bool fault = false;
 
-    // Poll DRVSTATUS only for axes assigned as TMC5160
-#define POLL_TMC_AXIS(ax) \
-    { \
-        uint32_t drv = TMC5160_ReadRegister(ax, TMC5160_REG_DRVSTATUS); \
-        TMC5160_Status* s = &g_status[ax]; \
-        s->drv_status    = drv; \
-        s->overtemp      = (drv & TMC5160_DRVSTATUS_OT)    != 0; \
-        s->overtemp_warn = (drv & TMC5160_DRVSTATUS_OTPW)  != 0; \
-        s->short_gnd     = (drv & (TMC5160_DRVSTATUS_S2GA  | TMC5160_DRVSTATUS_S2GB))  != 0; \
-        s->short_vs      = (drv & (TMC5160_DRVSTATUS_S2VSA | TMC5160_DRVSTATUS_S2VSB)) != 0; \
-        s->stall         = (drv & TMC5160_DRVSTATUS_STALLGUARD) != 0; \
-        s->sg_result     = (uint16_t)(drv & TMC5160_DRVSTATUS_SG_RESULT_MASK); \
-        if (s->overtemp || s->short_gnd || s->short_vs) { \
-            fault = true; \
-            DEBUG_PRINT_MOTION("[TMC5160] FAULT axis %d: OT=%d S2G=%d S2VS=%d\r\n", \
-                               (int)(ax), (int)s->overtemp, \
-                               (int)s->short_gnd, (int)s->short_vs); \
-        } \
+    // Poll DRVSTATUS for every axis assigned as TMC5160 at runtime
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        if (s->axis_driver_type[axis] != DRIVER_TMC5160) continue;
+
+        uint32_t drv = TMC5160_ReadRegister(axis, TMC5160_REG_DRVSTATUS);
+        TMC5160_Status* st = &g_status[axis];
+        st->drv_status    = drv;
+        st->overtemp      = (drv & TMC5160_DRVSTATUS_OT)    != 0;
+        st->overtemp_warn = (drv & TMC5160_DRVSTATUS_OTPW)  != 0;
+        st->short_gnd     = (drv & (TMC5160_DRVSTATUS_S2GA  | TMC5160_DRVSTATUS_S2GB))  != 0;
+        st->short_vs      = (drv & (TMC5160_DRVSTATUS_S2VSA | TMC5160_DRVSTATUS_S2VSB)) != 0;
+        st->stall         = (drv & TMC5160_DRVSTATUS_STALLGUARD) != 0;
+        st->sg_result     = (uint16_t)(drv & TMC5160_DRVSTATUS_SG_RESULT_MASK);
+        if (st->overtemp || st->short_gnd || st->short_vs) {
+            fault = true;
+            DEBUG_PRINT_MOTION("[TMC5160] FAULT axis %d: OT=%d S2G=%d S2VS=%d\r\n",
+                               (int)axis, (int)st->overtemp,
+                               (int)st->short_gnd, (int)st->short_vs);
+        }
     }
-#if (AXIS_X_DRIVER == DRIVER_TMC5160)
-    POLL_TMC_AXIS(AXIS_X)
-#endif
-#if (AXIS_Y_DRIVER == DRIVER_TMC5160)
-    POLL_TMC_AXIS(AXIS_Y)
-#endif
-#if (AXIS_Z_DRIVER == DRIVER_TMC5160)
-    POLL_TMC_AXIS(AXIS_Z)
-#endif
-#if (AXIS_A_DRIVER == DRIVER_TMC5160)
-    POLL_TMC_AXIS(AXIS_A)
-#endif
-#undef POLL_TMC_AXIS
 
     return fault;
 }
@@ -343,8 +327,8 @@ void TMC5160_ApplySettings(E_AXIS axis, const CNC_Settings* settings)
 {
     if (!settings) return;
 
-    // Only reconfigure axes that are actually wired as TMC5160
-    if (!(TMC5160_AXIS_MASK & (1u << (uint8_t)axis))) return;
+    // Runtime check: only configure axes assigned as TMC5160 in settings ($260-$263)
+    if (settings->axis_driver_type[axis] != DRIVER_TMC5160) return;
 
     // Build the per-axis config from persisted runtime fields
     TMC5160_AxisConfig cfg;

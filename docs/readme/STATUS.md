@@ -2,7 +2,20 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 2026
+**Last Updated**: May 3, 2026
+
+---
+
+## ✅ FEATURE: Runtime per-axis driver selection — $260–$263 (May 3, 2026)
+
+See root [STATUS.md](../../STATUS.md) for full change detail.
+
+Summary:
+- `incs/common.h` — Replaced compile-time `AXIS_x_DRIVER` defines with board-capability flags (`HAS_TMC5160_AXIS`, `HAS_DRV8825_AXIS`) + factory defaults (`AXIS_x_DRIVER_DEFAULT`)
+- `incs/settings/settings.h` — Added `axis_driver_type[4]` field (`$260–$263`); TMC5160 fields ungated from `#ifdef`; `SETTINGS_VERSION = 8`
+- `srcs/settings/settings.c` — `$260–$263` SetValue/GetValue/PrintAll always compiled in
+- `srcs/motion/tmc5160.c` — All `#if (AXIS_x_DRIVER == ...)` replaced with runtime `axis_driver_type[axis]` loops
+- `srcs/gcode/gcode_parser.c` — `$260–$263` write triggers immediate `TMC5160_ApplySettings()`
 
 ---
 

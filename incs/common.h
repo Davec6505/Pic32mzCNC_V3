@@ -8,47 +8,43 @@
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║                       HARDWARE CONFIGURATION                               ║
 // ║                                                                            ║
-// ║  Per-axis stepper driver assignment.  Edit the four AXIS_x_DRIVER lines   ║
-// ║  below to match your physical wiring.  Everything else is auto-derived.   ║
+// ║  TWO LEVELS OF DRIVER SELECTION:                                           ║
 // ║                                                                            ║
-// ║  Mixing is fully supported — e.g. X+Y = TMC5160, Z+A = DRV8825.          ║
+// ║  1. BOARD CAPABILITY (compile-time) ─────────────────────────────────────  ║
+// ║     HAS_TMC5160_AXIS  — TMC5160 silicon is physically present on the PCB.  ║
+// ║     Define it here if the board has TMC5160 hardware wired up.             ║
+// ║     This gates whether tmc5160.c / SPI2 is compiled and initialised.       ║
+// ║                                                                            ║
+// ║  2. PER-AXIS RUNTIME SELECTION (settable via serial) ────────────────────  ║
+// ║     $260–$263 (settings->axis_driver_type[axis])                           ║
+// ║     1 = DRIVER_TMC5160,  2 = DRIVER_DRV8825  (add more tokens below)      ║
+// ║     Persists to NVM flash.  No firmware rebuild needed to reassign axes.   ║
+// ║     The AXIS_x_DRIVER_DEFAULT values below seed the factory defaults.      ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 
-// ── Driver type tokens (do NOT change these values) ─────────────────────────
+// ── Driver type tokens (do NOT change values — UI and serial protocol depend on them) ─
 #define DRIVER_TMC5160  1   // TMC5160 via SPI2  — shared ENN pin (active LOW)
-#define DRIVER_DRV8825  2   // DRV8825 / A4988 / TMC2208 step-dir — uses shared EnXYZA pin
+#define DRIVER_DRV8825  2   // DRV8825 / A4988 / TMC2208 step-dir — shared EnXYZA
+// Future:
+// #define DRIVER_TMC2209  3   // TMC2209 UART-based — when hardware arrives
 
-// ── Per-axis driver assignment: set each to DRIVER_TMC5160 or DRIVER_DRV8825 ─
-#define AXIS_X_DRIVER   DRIVER_DRV8825  // DRIVER_TMC5160 when TMC drivers arrive
-#define AXIS_Y_DRIVER   DRIVER_DRV8825  // DRIVER_TMC5160 when TMC drivers arrive
-#define AXIS_Z_DRIVER   DRIVER_DRV8825
-#define AXIS_A_DRIVER   DRIVER_DRV8825
+// ── Board capability flags (compile-time) — set to match PCB hardware ────────
+// Define HAS_TMC5160_AXIS if TMC5160 chips are physically wired to SPI2 on this board.
+// Leave it undefined for pure DRV8825 boards (tmc5160.c will not be compiled).
+#define HAS_TMC5160_AXIS        // This PCB has TMC5160 hardware on SPI2
+#define HAS_DRV8825_AXIS        // This PCB also has DRV8825 step-dir drivers
 
-// ── Auto-derived aggregate flags (do NOT edit) ───────────────────────────────
-// HAS_TMC5160_AXIS — defined when ≥1 axis uses TMC5160; gates all SPI / TMC code.
-#if (AXIS_X_DRIVER == DRIVER_TMC5160) || (AXIS_Y_DRIVER == DRIVER_TMC5160) || \
-    (AXIS_Z_DRIVER == DRIVER_TMC5160) || (AXIS_A_DRIVER == DRIVER_TMC5160)
-    #define HAS_TMC5160_AXIS
-#endif
+// ── Per-axis factory defaults (used to seed axis_driver_type[] in settings) ──
+// These are the POWER-ON defaults written to NVM on first boot (or after $RST=*).
+// After that, $260–$263 over serial override them without a rebuild.
+#define AXIS_X_DRIVER_DEFAULT   DRIVER_DRV8825
+#define AXIS_Y_DRIVER_DEFAULT   DRIVER_DRV8825
+#define AXIS_Z_DRIVER_DEFAULT   DRIVER_DRV8825
+#define AXIS_A_DRIVER_DEFAULT   DRIVER_DRV8825
 
-// HAS_DRV8825_AXIS — defined when ≥1 axis uses a discrete driver with per-axis EN.
-#if (AXIS_X_DRIVER == DRIVER_DRV8825) || (AXIS_Y_DRIVER == DRIVER_DRV8825) || \
-    (AXIS_Z_DRIVER == DRIVER_DRV8825) || (AXIS_A_DRIVER == DRIVER_DRV8825)
-    #define HAS_DRV8825_AXIS
-#endif
-
-#if !defined(HAS_TMC5160_AXIS) && !defined(HAS_DRV8825_AXIS)
-    #error "Hardware config: at least one AXIS_x_DRIVER must be set to DRIVER_TMC5160 or DRIVER_DRV8825"
-#endif
-
-// ── TMC5160_AXIS_MASK ─────────────────────────────────────────────────────────
-// Compile-time bitmask: bit N set means axis N is a TMC5160.  Used by the
-// mixed-driver enable inlines in utils.h.  Bit positions match E_AXIS (X=0 …).
-#define TMC5160_AXIS_MASK \
-    (((AXIS_X_DRIVER == DRIVER_TMC5160) ? (1u << 0) : 0u) | \
-     ((AXIS_Y_DRIVER == DRIVER_TMC5160) ? (1u << 1) : 0u) | \
-     ((AXIS_Z_DRIVER == DRIVER_TMC5160) ? (1u << 2) : 0u) | \
-     ((AXIS_A_DRIVER == DRIVER_TMC5160) ? (1u << 3) : 0u))
+// ── Runtime TMC5160 axis mask — derived from settings at startup, NOT compile-time ─
+// Use SETTINGS_GetTMC5160Mask() (settings.h) instead of a compile-time constant.
+// This allows $260-$263 to activate/deactivate TMC5160 per axis without a rebuild.
 
 // ── TMC5160 chopper mode tokens (only consulted for DRIVER_TMC5160 axes) ──────
 //
@@ -75,12 +71,9 @@
 #define TMC5160_MODE_MIXED        3
 #define TMC5160_MODE_COOLSTEP     4
 
-// ── Per-axis TMC5160 chopper mode: set each to a TMC5160_MODE_xxx token ───────
-// (Ignored for axes where AXIS_x_DRIVER == DRIVER_DRV8825)
-#define AXIS_X_TMC_MODE   TMC5160_MODE_STEALTHCHOP
-#define AXIS_Y_TMC_MODE   TMC5160_MODE_STEALTHCHOP
-#define AXIS_Z_TMC_MODE   TMC5160_MODE_STEALTHCHOP
-#define AXIS_A_TMC_MODE   TMC5160_MODE_STEALTHCHOP
+// Per-axis TMC5160 chopper mode is now controlled at runtime via $200-$203.
+// The compile-time AXIS_x_TMC_MODE constants are no longer used; set tmc_mode[]
+// in the default_settings initialiser in settings.c to configure factory defaults.
 
 #define NUM_OF_AXIS 4  // X, Y, Z, A
 
