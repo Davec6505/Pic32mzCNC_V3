@@ -2,9 +2,37 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: March 14, 2026
+**Last Updated**: May 3, 2026
 
 ---
+
+## ✅ FEATURE: Runtime per-axis driver selection — $260–$263 (May 3, 2026)
+
+Two-level driver architecture: board capability at compile-time; per-axis assignment at runtime via serial, persisted to NVM. No firmware rebuild required to reassign axes.
+
+### Architecture
+
+- `incs/common.h` — Removed `AXIS_X_DRIVER / AXIS_Y_DRIVER / AXIS_Z_DRIVER / AXIS_A_DRIVER` per-axis compile-time defines and auto-derived `HAS_TMC5160_AXIS` / `HAS_DRV8825_AXIS` / `TMC5160_AXIS_MASK` / `AXIS_x_TMC_MODE`. Replaced with:
+  - Explicit board-capability flags (`#define HAS_TMC5160_AXIS`, `#define HAS_DRV8825_AXIS`) — set manually to match PCB hardware; gate whether `tmc5160.c` / SPI2 is compiled
+  - Per-axis factory default macros (`AXIS_X_DRIVER_DEFAULT = DRIVER_DRV8825` etc.) — seed NVM on first boot
+  - Driver type tokens unchanged: `DRIVER_TMC5160 = 1`, `DRIVER_DRV8825 = 2`
+- `incs/settings/settings.h` — Added `uint8_t axis_driver_type[4]` field after `tmc_tcoolthrs`; removed all `#ifdef HAS_TMC5160_AXIS` guards from the TMC5160 fields (`tmc_mode`, `tmc_irun`, `tmc_ihold`, `tmc_mres`, `tmc_tpwm_thrs`, `tmc_tcoolthrs`) so they are always in the struct; bumped `SETTINGS_VERSION` to `8`
+- `srcs/settings/settings.c` — `default_settings` initializer: all TMC5160 fields always present; `axis_driver_type` seeded from `AXIS_x_DRIVER_DEFAULT`; `SETTINGS_SetValue()` / `SETTINGS_GetValue()` / `SETTINGS_PrintAll()`: cases `200–253` and `260–263` always compiled in (no `#ifdef` guards)
+- `srcs/motion/tmc5160.c` — `TMC5160_Initialize()`: replaced per-axis `#if (AXIS_x_DRIVER == DRIVER_TMC5160)` blocks with runtime loop reading `s->axis_driver_type[axis]`; `TMC5160_Tasks()`: same runtime loop replacing `POLL_TMC_AXIS` macro + `#if` blocks; `TMC5160_ApplySettings()`: guard changed from `TMC5160_AXIS_MASK` bitmask to `settings->axis_driver_type[axis] != DRIVER_TMC5160`; chopper mode now read from `s->tmc_mode[axis]` (was compile-time `AXIS_x_TMC_MODE`)
+- `srcs/gcode/gcode_parser.c` — inside `HAS_TMC5160_AXIS` block: added `$260–$263` handler that calls `TMC5160_ApplySettings(axis_idx, s)` immediately when an axis is switched to `DRIVER_TMC5160`
+
+### Serial API
+
+```
+$260=1   X → TMC5160 (configures SPI immediately)
+$261=1   Y → TMC5160
+$262=2   Z → DRV8825 (step/dir only, no SPI action)
+$263=2   A → DRV8825
+```
+
+Extending to TMC2209: add `#define DRIVER_TMC2209 3` and `#define HAS_TMC2209_AXIS` — `$260–$263` schema unchanged.
+
+
 
 ## ✅ HARDWARE VALIDATED: Full motion suite — UGS pipelined, 1:59 run (March 14, 2026)
 

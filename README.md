@@ -70,23 +70,43 @@ GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, tar
 
 ## 🔧 Driver Configuration
 
-Per-axis driver type is set at compile time in [`incs/common.h`](incs/common.h). Edit the four `AXIS_x_DRIVER` lines to match physical wiring — everything else is auto-derived.
+Driver selection is a **two-level system**:
+
+### Level 1 — Board capability (compile-time)
+
+Set in [`incs/common.h`](incs/common.h) to match the physical PCB hardware:
 
 ```c
-// ── Per-axis driver assignment ────────────────────────────────────────────────
-#define AXIS_X_DRIVER   DRIVER_DRV8825   // change to DRIVER_TMC5160 when fitted
-#define AXIS_Y_DRIVER   DRIVER_DRV8825
-#define AXIS_Z_DRIVER   DRIVER_DRV8825
-#define AXIS_A_DRIVER   DRIVER_DRV8825
+// Define if the board has TMC5160 chips wired to SPI2
+#define HAS_TMC5160_AXIS
+// Define if the board has DRV8825/A4988/TMC2208 step-dir drivers
+#define HAS_DRV8825_AXIS
 ```
 
-**Valid values**: `DRIVER_TMC5160` or `DRIVER_DRV8825`
-Mixing is fully supported (e.g. X+Y = TMC5160, Z+A = DRV8825).
+`HAS_TMC5160_AXIS` gates whether `tmc5160.c` and SPI2 are compiled and initialised. It has nothing to do with which axes are *currently assigned* to TMC5160 — that is controlled at runtime.
 
-**Auto-derived flags** (do not edit):
-- `HAS_TMC5160_AXIS` — defined when ≥1 axis is TMC5160; gates all SPI / TMC register code
-- `HAS_DRV8825_AXIS` — defined when ≥1 axis is DRV8825; gates per-axis enable arrays
-- `TMC5160_AXIS_MASK` — compile-time bitmask used by mixed-driver enable inlines
+### Level 2 — Per-axis runtime selection (no rebuild required)
+
+Each axis's active driver is stored in NVM and settable over serial via `$260–$263`:
+
+| Param | Axis | Values |
+|-------|------|--------|
+| `$260` | X | `1` = TMC5160, `2` = DRV8825 |
+| `$261` | Y | `1` = TMC5160, `2` = DRV8825 |
+| `$262` | Z | `1` = TMC5160, `2` = DRV8825 |
+| `$263` | A | `1` = TMC5160, `2` = DRV8825 |
+
+Changes take effect immediately — switching an axis to TMC5160 triggers SPI configuration in the same transaction. Factory defaults (written on first boot or `$RST=*`) are set by `AXIS_x_DRIVER_DEFAULT` in `common.h`.
+
+**Example** — assign X and Y to TMC5160, leave Z and A on DRV8825:
+```
+$260=1
+$261=1
+$262=2
+$263=2
+```
+
+**Adding a new driver type in future**: define `DRIVER_TMC2209 3` in `common.h`, add `#define HAS_TMC2209_AXIS`, write the driver module. The `$260–$263` schema and NVM layout do not change.
 
 > **PCB note**: There is **one shared EN pin** (`EnXYZA` RE6) for all axes. There are no per-axis `EnX/EnY/EnZ/EnA` GPIO macros — they do not exist in `plib_gpio.h`. All enable logic routes through `enable_all_set()` / `enable_all_clear()`.
 
@@ -116,14 +136,14 @@ main.c
   └── app.c — APP_Tasks() state machine
         ├── APP_INIT        → settings.c (register NVM callback)
         ├── APP_LOAD_SETTINGS → settings.c (read flash after peripherals ready)
-        ├── APP_CONFIG      → TMC5160_Initialize() [#ifdef HAS_TMC5160_AXIS]
+        ├── APP_CONFIG      → TMC5160_Initialize() [HAS_TMC5160_AXIS; skips DRV8825 axes at runtime]
         ├── APP_IDLE
         │     ├── gcode_parser.c — parse/dispatch G-code, flow control
         │     ├── motion_bridge.c — G-code event → trajectory move bridge
         │     ├── trajectory.c — S-curve planner, 64-slot lookahead queue
         │     ├── interpolator.c — fixed-rate DDS step generator (TMR4 ISR)
         │     ├── kinematics.c — coordinate transforms (Work ↔ Machine)
-        │     └── TMC5160_Tasks() [rate-limited 10 Hz, #ifdef HAS_TMC5160_AXIS]
+        │     └── TMC5160_Tasks() [rate-limited 10 Hz, HAS_TMC5160_AXIS; skips DRV8825 axes at runtime]
         ├── APP_HOMING      → homing.c ($H — 4-phase seek/locate/pulloff/complete)
         └── APP_ALARM       → stepper.c (emergency stop, STEPPER_DisableAll)
 
@@ -298,9 +318,20 @@ Queue drained to zero
 | $120–$123 | Acceleration (mm/s²) — X Y Z A | 200 |
 | $130–$133 | Max travel (mm) — X Y Z A | 200 |
 
-### TMC5160 Parameters ($200–$253) — active only when `HAS_TMC5160_AXIS`
+### Per-axis Driver Type ($260–$263)
 
-Applied immediately via SPI on write; persisted to NVM flash (SETTINGS_VERSION = 3).
+Persisted to NVM. No rebuild required. Takes effect immediately on write.
+
+| Param | Axis | Description | Default |
+|-------|------|-------------|---------|
+| $260 | X | Driver type: 1=TMC5160, 2=DRV8825 | 2 |
+| $261 | Y | Driver type: 1=TMC5160, 2=DRV8825 | 2 |
+| $262 | Z | Driver type: 1=TMC5160, 2=DRV8825 | 2 |
+| $263 | A | Driver type: 1=TMC5160, 2=DRV8825 | 2 |
+
+### TMC5160 Parameters ($200–$253)
+
+Always compiled into the firmware; SPI configuration is applied only for axes where `$26x=1`. Persisted to NVM flash (`SETTINGS_VERSION = 8`).
 
 | Params | Axis | Description | Default |
 |--------|------|-------------|---------|
@@ -360,7 +391,7 @@ Pic32mzCNC_V3/
 │       ├── utils.c            # GPIO abstraction (step/dir/enable/limit arrays)
 │       └── uart_utils.c       # Non-blocking UART helpers
 ├── incs/
-│   ├── common.h               # Driver selection, debug flags
+│   ├── common.h               # Board capability flags, driver tokens, debug flags
 │   ├── data_structures.h      # APP_DATA, MotionSegment, GCODE_CommandQueue
 │   ├── motion/tmc5160.h       # TMC5160 register map and API
 │   └── utils/utils.h          # Inline GPIO functions, PROBE_Get()
