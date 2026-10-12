@@ -71,7 +71,7 @@ static const CNC_Settings default_settings = {
     .acceleration = {5000.0f, 5000.0f, 200.0f, 500.0f},  // [X, Y, Z, A]
     
     // Max travel (mm) - Array-based
-    .max_travel = {300.0f, 300.0f, 100.0f, 0.0f},      // [X, Y, Z, A] (A=0 for rotary)
+    .max_travel = {300.0f, 300.0f, 100.0f, 360.0f},     // [X, Y, Z, A] ($130-$133)
     
     // Jerk control ($140-$143)
     // jerk_ramp_steps = acceleration * steps_per_mm / jerk
@@ -294,10 +294,11 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 122: settings->acceleration[AXIS_Z] = value; break;
         case 123: settings->acceleration[AXIS_A] = value; break;
         
-        // Max travel ($130-$132) - Array-based
+        // Max travel ($130-$133) - Array-based
         case 130: settings->max_travel[AXIS_X] = value; break;
         case 131: settings->max_travel[AXIS_Y] = value; break;
         case 132: settings->max_travel[AXIS_Z] = value; break;
+        case 133: settings->max_travel[AXIS_A] = value; break;
         
         // Jerk ($140-$143) - S-curve ramp aggressiveness
         case 140: settings->jerk[AXIS_X] = value; break;
@@ -416,10 +417,11 @@ float SETTINGS_GetValue(const CNC_Settings* settings, uint32_t parameter)
         case 122: return settings->acceleration[AXIS_Z];
         case 123: return settings->acceleration[AXIS_A];
         
-        // Max travel ($130-$132) - Array-based
+        // Max travel ($130-$133) - Array-based
         case 130: return settings->max_travel[AXIS_X];
         case 131: return settings->max_travel[AXIS_Y];
         case 132: return settings->max_travel[AXIS_Z];
+        case 133: return settings->max_travel[AXIS_A];
         
         // Jerk ($140-$143)
         case 140: return settings->jerk[AXIS_X];
@@ -537,10 +539,11 @@ void SETTINGS_PrintAll(const CNC_Settings* settings)
     len += sprintf(&settings_buffer[len], "$122=%.3f\r\n", settings->acceleration[AXIS_Z]);
     len += sprintf(&settings_buffer[len], "$123=%.3f\r\n", settings->acceleration[AXIS_A]);
     
-    // Max travel ($130-$132) - Array-based
+    // Max travel ($130-$133) - Array-based
     len += sprintf(&settings_buffer[len], "$130=%.3f\r\n", settings->max_travel[AXIS_X]);
     len += sprintf(&settings_buffer[len], "$131=%.3f\r\n", settings->max_travel[AXIS_Y]);
     len += sprintf(&settings_buffer[len], "$132=%.3f\r\n", settings->max_travel[AXIS_Z]);
+    len += sprintf(&settings_buffer[len], "$133=%.3f\r\n", settings->max_travel[AXIS_A]);
 
     // Jerk ($140-$143) - S-curve ramp aggressiveness
     len += sprintf(&settings_buffer[len], "$140=%.3f\r\n", settings->jerk[AXIS_X]);

@@ -14,16 +14,11 @@
 
 ## Preface
 
-This book documents every layer of the Pic32mzCNC_V3 firmware: from the moment a
-G-code character arrives over the serial link to the moment a GPIO pin fires a step
-pulse to a stepper motor driver. It is written for the engineer who wants to
-understand not just *what* the code does, but *why* each design decision was made and
-*how* the PIC32MZ hardware is specifically exploited for maximum performance.
+This book documents every layer of the Pic32mzCNC_V3 firmware: from the moment a G-code character arrives over the serial link to the moment a GPIO pin fires a step pulse to a stepper motor driver.
+It is written for the engineer who wants to understand not just *what* the code does, but *why* each design decision was made and *how* the PIC32MZ hardware is specifically exploited for maximum performance.
 
-Every code listing is exact or closely paraphrased from the real source files. Every
-timing number has been verified against the actual hardware configuration. Where the
-firmware makes a non-obvious choice — deferred `ok` flow control, inline arc retry,
-DDS step generation, S-curve jerk limiting — the reasoning is explained in full.
+Every code listing is exact or closely paraphrased from the real source files. Every timing number has been verified against the actual hardware configuration.
+Where the firmware makes a non-obvious choice — deferred `ok` flow control, inline arc retry, DDS step generation, S-curve jerk limiting — the reasoning is explained in full.
 
 ---
 
@@ -56,11 +51,8 @@ DDS step generation, S-curve jerk limiting — the reasoning is explained in ful
 
 ### 1.1 What the Firmware Does
 
-The Pic32mzCNC_V3 firmware turns a PIC32MZ microcontroller into a four-axis CNC
-motion controller. It speaks the GRBL v1.1 protocol — the same protocol understood
-by Universal G-Code Sender (UGS), Candle, and bCNC. A sender streams G-code text
-over USB serial; the firmware translates each command into precisely timed GPIO pulses
-to stepper motor drivers.
+The Pic32mzCNC_V3 firmware turns a PIC32MZ microcontroller into a four-axis CNC motion controller. It speaks the GRBL v1.1 protocol — the same protocol understood by Universal G-Code Sender (UGS), Candle, and bCNC. 
+A sender streams G-code text over USB serial; the firmware translates each command into precisely timed GPIO pulses to stepper motor drivers.
 ____________________________________________________________________________________________________
 | Capability                                    | Implementation                                    |
 |-----------------------------------------------|---------------------------------------------------|
@@ -361,7 +353,7 @@ to a single LAT register write — identical to calling `RD4_Set()` directly.
 
 GRBL v1.1 is the standard protocol for amateur and semi-professional CNC. The
 firmware claims full GRBL v1.1 compliance and has been tested with UGS, Candle,
-and bCNC in both single-step and pipelined streaming modes.
+LitePlacer and bCNC in both single-step and pipelined streaming modes.
 
 **Startup banner** — sent on power-up and every soft reset:
 
@@ -379,11 +371,10 @@ This exact string is how senders identify the controller. It is defined in
 ```
 
 > Note: The banner says **Pic32mzCNC**, not "Grbl". Senders that require the exact
-> string "Grbl" may need their detection regex loosened.
+> string "Grbl" may need their detection regex loosened or change this definition.
 
 **The ok/error handshake:**  
 Every complete line sent to the firmware receives exactly one response: `ok
-
 `
 on success, or `error:N
 
@@ -409,30 +400,31 @@ determines whether `ok` is sent immediately or deferred until the motion queue d
 
 Real-time control bytes are processed **immediately**, bypassing the line buffer and
 all queues. They may arrive at any time — even in the middle of a G-code line.
-
-| Byte  | Decimal | Action |
-|---|---|---|
-| `?`   | 63  | Send status report (no `ok`) |
-| `!`   | 33  | Feed hold — smooth deceleration ramp |
-| `~`   | 126 | Cycle start / resume from hold |
-| 0x18  | 24  | Soft reset (Ctrl+X) — full system reinitialisation |
-| 0x85  | 133 | Jog cancel — flush jog segments only |
-| 0x90  | 144 | Feed override: 100% |
-| 0x91  | 145 | Feed override: +10% |
-| 0x92  | 146 | Feed override: −10% |
-| 0x93  | 147 | Feed override: +1% |
-| 0x94  | 148 | Feed override: −1% |
-| 0x95  | 149 | Rapid override: 100% |
-| 0x96  | 150 | Rapid override: 50% |
-| 0x97  | 151 | Rapid override: 25% |
-| 0x99  | 153 | Spindle override: 100% |
-| 0x9A  | 154 | Spindle override: +10% |
-| 0x9B  | 155 | Spindle override: −10% |
-| 0x9C  | 156 | Spindle override: +1% |
-| 0x9D  | 157 | Spindle override: −1% |
+=========================================================================
+| Byte  | Decimal   | Action                                            |
+|-------|-----------|---------------------------------------------------|
+| `?`   | 63        | Send status report (no `ok`)                      |
+| `!`   | 33        | Feed hold — smooth deceleration ramp              |
+| `~`   | 126       | Cycle start / resume from hold                    |
+| 0x18  | 24        | Soft reset (Ctrl+X) — full system reinitialisation|
+| 0x85  | 133       | Jog cancel — flush jog segments only              |
+| 0x90  | 144       | Feed override: 100%                               |
+| 0x91  | 145       | Feed override: +10%                               |
+| 0x92  | 146       | Feed override: −10%                               |
+| 0x93  | 147       | Feed override: +1%                                |
+| 0x94  | 148       | Feed override: −1%                                |
+| 0x95  | 149       | Rapid override: 100%                              |
+| 0x96  | 150       | Rapid override: 50%                               |
+| 0x97  | 151       | Rapid override: 25%                               |
+| 0x99  | 153       | Spindle override: 100%                            |
+| 0x9A  | 154       | Spindle override: +10%                            |
+| 0x9B  | 155       | Spindle override: −10%                            |
+| 0x9C  | 156       | Spindle override: +1%                             |
+| 0x9D  | 157       | Spindle override: −1%                             |
+=========================================================================
 
 The predicate in `gcode_parser.c`:
-
+***“Predicate”***  a function or expression that answers a yes/no
 ```c
 static bool is_control_char(uint8_t c) {
     return (c == '?') || (c == '!') || (c == '~') || (c == 0x18) ||
@@ -453,44 +445,44 @@ arrives mid-retry.
 System commands begin with `$` and are handled directly in the parser without
 being queued to the G-code command queue.
 
-| Command | Description |
-|---|---|
-| `$$` | Print all settings (ensure TX buf ≥ 1024 bytes) |
-| `$I` | Build info: `[VER:1.1h.date]` + `[OPT:VHM,63,1023,4]` |
-| `$G` | Modal state: `[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]` |
-| `$#` | Work offsets: G54–G59, G28, G30, G92, TLO, PRB |
-| `$H` | Run homing cycle; `ok` is **deferred** until homing completes |
-| `$X` | Clear alarm state |
-| `$C` | Toggle check mode (parse without motion) |
-| `$Nn` | Read startup line N (0 or 1) |
-| `$Nn=<gcode>` | Write and persist startup line |
-| `$<n>=<v>` | Write setting n to value v |
-| `$RST=*` | Restore all defaults; `$RST=$` resets settings; `$RST=#` resets WCS |
-| `$J=G91 X10 F500` | Jog command |
-| `$SLP` | Not supported → `error:2` |
+| Command           | Description                                                           |
+|-------------------|-----------------------------------------------------------------------|
+| `$$`              | Print all settings (ensure TX buf ≥ 1024 bytes)                       |
+| `$I`              | Build info: `[VER:1.1h.date]` + `[OPT:VHM,63,1023,4]`                 |
+| `$G`              | Modal state: `[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]`             |
+| `$#`              | Work offsets: G54–G59, G28, G30, G92, TLO, PRB                        |
+| `$H`              | Run homing cycle; `ok` is **deferred** until homing completes         |
+| `$X`              | Clear alarm state                                                     |
+| `$C`              | Toggle check mode (parse without motion)                              |
+| `$Nn`             | Read startup line N (0 or 1)                                          |
+| `$Nn=<gcode>`     | Write and persist startup line                                        |
+| `$<n>=<v>`        | Write setting n to value v                                            |
+| `$RST=*`          | Restore all defaults; `$RST=$` resets settings; `$RST=#` resets WCS   |
+| `$J=G91 X10 F500` | Jog command                                                           |
+| `$SLP`            | Not supported → `error:2`                                             |
 
 ### 3.4 Supported G-Codes
 
-| G-Code | Action |
-|---|---|
-| G0 / G1 | Rapid / linear feed move |
-| G2 / G3 | CW / CCW arc (I,J,K centre; or R radius) |
-| G4 Pn | Dwell n seconds |
-| G10 L2 Pn / L20 Pn | Set / copy work coordinate system offset |
-| G17 / G18 / G19 | Plane selection (XY / XZ / YZ) |
-| G20 / G21 | Inch / millimetre units |
-| G28 / G28.1 | Rapid to stored position / save current position |
-| G30 / G30.1 | Rapid to second stored position / save |
-| G38.2 / G38.3 / G38.4 / G38.5 | Probe toward/away with/without alarm on fail |
-| G43 / G43.1 Zn | Activate TLO (stored / dynamic) |
-| G49 | Cancel TLO |
-| G54–G59 | Select work coordinate system |
-| G80 | Cancel canned cycle |
-| G81 | Simple drill canned cycle |
-| G83 Qn | Peck drill canned cycle |
-| G90 / G91 | Absolute / incremental distance mode |
-| G92 / G92.1 | Set / clear coordinate offset |
-| G98 / G99 | Canned cycle retract: initial Z / R-plane |
+| G-Code                        | Action                                            |
+|-------------------------------|---------------------------------------------------|
+| G0 / G1                       | Rapid / linear feed move                          |
+| G2 / G3                       | CW / CCW arc (I,J,K centre; or R radius)          |
+| G4 Pn                         | Dwell n seconds                                   |
+| G10 L2 Pn / L20 Pn            | Set / copy work coordinate system offset          |
+| G17 / G18 / G19               | Plane selection (XY / XZ / YZ)                    |
+| G20 / G21                     | Inch / millimetre units                           |
+| G28 / G28.1                   | Rapid to stored position / save current position  |
+| G30 / G30.1                   | Rapid to second stored position / save            |
+| G38.2 / G38.3 / G38.4 / G38.5 | Probe toward/away with/without alarm on fail      |
+| G43 / G43.1 Zn                | Activate TLO (stored / dynamic)                   |
+| G49                           | Cancel TLO                                        |
+| G54–G59                       | Select work coordinate system                     |
+| G80                           | Cancel canned cycle                               |
+| G81                           | Simple drill canned cycle                         |
+| G83 Qn                        | Peck drill canned cycle                           |
+| G90 / G91                     | Absolute / incremental distance mode              |
+| G92 / G92.1                   | Set / clear coordinate offset                     |
+| G98 / G99                     | Canned cycle retract: initial Z / R-plane         |
 
 ### 3.5 Combined Modal Splitting
 
@@ -577,7 +569,7 @@ d = sqrt( sum_i( delta_i^2 ) )    for i in {X, Y, Z, A}
 **Unit vector** (direction only, magnitude = 1):
 
 ```
-u_i = delta_i / d
+unit_vec_i = delta_i / d
 ```
 
 Every `SCurveMove` stores `unit_vec[NUM_AXIS]`. The instantaneous velocity on any
@@ -589,13 +581,24 @@ v_axis_i = v * |unit_vec_i|
 
 ### 4.2 Direct Digital Synthesis (DDS) — The Step Algorithm
 
-The ISR must produce a precise fractional number of steps per tick without floating
+The ISR must produce a precise fractional number of ***counts/steps*** per tick without floating
 point division. **Direct Digital Synthesis** achieves this with a 32-bit integer
 accumulator and an overflow threshold.
 
 **Principle:**
 - Each tick: add increment `dds_inc` to accumulator `dds_acc`
-- When accumulator ≥ threshold `DDS_SCALE`: fire one step, subtract `DDS_SCALE`
+- When ***accumulator ≥ threshold*** `DDS_SCALE`: fire one step, subtract `DDS_SCALE`
+
+This is not a "wait 1<<30 ticks before moving" scheme. `DDS_SCALE` is the fixed-point
+full-scale value of the accumulator, not a delay counter. Each interrupt tick adds a
+small amount to the running total. When the total crosses the full-scale threshold,
+exactly one step is emitted and the leftover remainder is kept in the accumulator for
+the next tick. That is how the ISR produces a precise fractional step rate using
+integer math only.
+
+For example, if the scale is 1000 and the increment is 25, then one step happens every
+40 ticks. If the increment is 10, the step happens every 100 ticks. The step interval is
+set by the ratio `dds_inc / DDS_SCALE`, not by a literal `1<<30` wait.
 
 ```c
 // interpolator.c
