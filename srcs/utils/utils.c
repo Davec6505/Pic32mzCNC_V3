@@ -384,21 +384,16 @@ uint32_t UTILS_SafeStrlen(const char* str, uint32_t max_len)
 // Prevents multiple state transitions on same edge
 typedef struct {
     bool limit_previous;      // Last limit state
-    bool rising_edge_flag;    // Set once on rising edge, cleared when limit goes LOW
-    bool falling_edge_flag;   // Set once on falling edge, cleared when limit goes HIGH
-   // uint32_t debounce_count;  // Stable state counter (prevent false edges)
+    bool rising_edge_flag;    // Consumed by UTILS_HomingLimitRisingEdge()
+    bool falling_edge_flag;   // Consumed by UTILS_HomingLimitFallingEdge()
     bool debounce_pending;
     bool debounce_candidate;
-    uint32_t debounce_start;
+    uint32_t debounce_last_sample;
+    uint64_t debounce_elapsed_ticks;
 } HomingLimitState;
 
 static HomingLimitState g_homing_limit_state[NUM_AXIS] = {0};
 static E_AXIS g_homing_current_axis = AXIS_X;  // Track which axis is currently homing
-//static uint32_t g_last_sample_time = 0;        // CoreTimer value of last sample
-
-#define HOMING_LIMIT_DEBOUNCE_COUNT 10         // Require 10 stable reads before edge
-#define HOMING_SAMPLE_INTERVAL_US 1000         // Sample every 1ms (1000 microseconds)
-#define CORE_TIMER_HZ 100000000                // 100MHz core timer (200MHz sys / 2)
 
 // Set the current axis being homed (call when switching axes)
 void UTILS_HomingSetCurrentAxis(E_AXIS axis)
@@ -409,7 +404,7 @@ void UTILS_HomingSetCurrentAxis(E_AXIS axis)
 }
 
 // Update limit state for current axis - call every iteration during homing
-// Uses CoreTimer-based sampling to prevent excessive polling
+// $26 is continuous stability time in milliseconds; $25 remains seek speed.
 void UTILS_HomingLimitUpdate(bool limit_active)
 {
     HomingLimitState* state = &g_homing_limit_state[g_homing_current_axis];
@@ -427,13 +422,15 @@ void UTILS_HomingLimitUpdate(bool limit_active)
         state->debounce_candidate != limit_active) {
         state->debounce_pending = true;
         state->debounce_candidate = limit_active;
-        state->debounce_start = now;
+        state->debounce_last_sample = now;
+        state->debounce_elapsed_ticks = 0U;
     }
 
-    uint32_t elapsed_ticks = now - state->debounce_start;
-    uint32_t elapsed_ms = elapsed_ticks / ticks_per_ms;
+    // Accumulate unsigned deltas so a stable interval can span timer wraps.
+    state->debounce_elapsed_ticks += (uint32_t)(now - state->debounce_last_sample);
+    state->debounce_last_sample = now;
 
-    if (elapsed_ms < debounce_ms) {
+    if (state->debounce_elapsed_ticks < (uint64_t)debounce_ms * ticks_per_ms) {
         return;
     }
 
@@ -447,51 +444,6 @@ void UTILS_HomingLimitUpdate(bool limit_active)
 
     state->limit_previous = state->debounce_candidate;
 }
-
-// Update limit state for current axis - call every iteration during homing
-// Uses CoreTimer-based sampling to prevent excessive polling
-/*void UTILS_HomingLimitUpdateOld(bool limit_active)
-{
-    // Timer-based sampling: only update at fixed intervals (like V1!)
-    uint32_t current_time = CORETIMER_CounterGet();
-    uint32_t ticks_per_sample = (CORE_TIMER_HZ / 1000000) * HOMING_SAMPLE_INTERVAL_US;
-    
-    // Check if sample interval has elapsed (with wraparound handling)
-    uint32_t elapsed = current_time - g_last_sample_time;
-    if (elapsed < ticks_per_sample) {
-        return;  // Not time to sample yet
-    }
-    
-    // Update sample time for next interval
-    g_last_sample_time = current_time;
-    
-    HomingLimitState* state = &g_homi ng_limit_state[g_homing_current_axis];
-    
-    // Debounce: require stable state before accepting change
-    if (limit_active != state->limit_previous) {
-        state->debounce_count++;
-        if (state->debounce_count < HOMING_LIMIT_DEBOUNCE_COUNT) {
-            return;  // Not stable yet, don't change state
-        }
-        // State is stable for 10 samples - accept the transition
-        state->debounce_count = 0;
-        
-        // Detect BOTH edges - app.c decides which to use
-        // RISING EDGE: limit goes inactive→active
-        if (limit_active && !state->limit_previous) {
-            state->rising_edge_flag = true;
-        }
-        // FALLING EDGE: limit goes active→inactive
-        else if (!limit_active && state->limit_previous) {
-            state->falling_edge_flag = true;
-        }
-        
-        // Update previous state AFTER edge detection
-        state->limit_previous = limit_active;
-    } else {
-        state->debounce_count = 0;  // Same state, reset counter
-    }
-}*/
 
 // Check for rising edge on current axis - consumes flag (one-shot pattern)
 bool UTILS_HomingLimitRisingEdge(void)
@@ -512,17 +464,6 @@ bool UTILS_HomingLimitFallingEdge(void)
 }
 
 // Reset state tracker for specific axis
-/*void UTILS_HomingLimitResetAxisOld(E_AXIS axis)
-{
-    if (axis < NUM_AXIS) {
-        g_homing_limit_state[axis].limit_previous = false;
-        g_homing_limit_state[axis].rising_edge_flag = false;
-        g_homing_limit_state[axis].falling_edge_flag = false;
-        g_homing_limit_state[axis].debounce_count = 0;
-    }
-}*/
-
-// Reset state tracker for specific axis
 void UTILS_HomingLimitResetAxis(E_AXIS axis)
 {
     if (axis < NUM_AXIS) {
@@ -531,15 +472,15 @@ void UTILS_HomingLimitResetAxis(E_AXIS axis)
         g_homing_limit_state[axis].falling_edge_flag = false;
         g_homing_limit_state[axis].debounce_pending = false;
         g_homing_limit_state[axis].debounce_candidate = false;
-        g_homing_limit_state[axis].debounce_start = 0U;
+        g_homing_limit_state[axis].debounce_last_sample = 0U;
+        g_homing_limit_state[axis].debounce_elapsed_ticks = 0U;
     }
 }
 
-// Reset state tracker for all axes (call at start of $H)
+// Reset all states without changing the selected axis (also used before re-approach).
 void UTILS_HomingLimitReset(void)
 {
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         UTILS_HomingLimitResetAxis(axis);
     }
-   // g_homing_current_axis = AXIS_X;  // Reset to first axis
 }

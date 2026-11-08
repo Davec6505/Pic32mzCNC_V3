@@ -1063,7 +1063,7 @@ $22 = 1         // Enable homing cycle
 $23 = 0         // Homing direction mask (0=negative direction)
 $24 = 500       // Homing feed rate (slow precision approach) mm/min
 $25 = 2000      // Homing seek rate (fast initial search) mm/min
-$26 = 250       // Homing debounce delay (microseconds)
+$26 = 25        // Homing debounce delay (milliseconds; 0=immediate, 10 approximates old filter)
 $27 = 2.0       // Homing pull-off distance (mm)
 $5 = 0          // Limit pins invert mask (0=active-low switches)
 ```

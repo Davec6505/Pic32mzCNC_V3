@@ -330,7 +330,17 @@ bool SETTINGS_SetValue(CNC_Settings* settings, uint32_t parameter, float value)
         case 23: settings->homing_dir_mask = (uint8_t)value; break;
         case 24: settings->homing_feed_rate = value; break;
         case 25: settings->homing_seek_rate = value; break;
-        case 26: settings->homing_debounce = (uint32_t)value; break;
+        case 26: {
+            // IEEE-754 check remains effective with the firmware's -ffast-math.
+            uint32_t bits;
+            memcpy(&bits, &value, sizeof(bits));
+            if ((bits & 0x7f800000U) == 0x7f800000U ||
+                value < 0.0f || value >= 4294967296.0f) {
+                return false;  // Parser reports error:3; leave the saved value unchanged.
+            }
+            settings->homing_debounce = (uint32_t)value;
+            break;
+        }
         case 27: settings->homing_pull_off = value; break;
         
         // TMC5160 axis mode ($200-$203)

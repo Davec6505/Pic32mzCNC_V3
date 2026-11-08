@@ -1648,9 +1648,18 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                 send_ok = false;
                 handled = true;
             } else if (*pend == '=') {
-                float val = strtof(pend + 1, NULL);
+                char* value_end;
+                float val = strtof(pend + 1, &value_end);
+                bool valid_value = true;
+                if (param == 26) {
+                    valid_value = (value_end != pend + 1);
+                    while (isspace((unsigned char)*value_end)) {
+                        value_end++;
+                    }
+                    valid_value = valid_value && (*value_end == '\0');
+                }
                 CNC_Settings* s = SETTINGS_GetCurrent();
-                if (SETTINGS_SetValue(s, (uint32_t)param, val)) {
+                if (valid_value && SETTINGS_SetValue(s, (uint32_t)param, val)) {
                     s->checksum = SETTINGS_CalculateCRC32(s);
                     
                     // ✅ Save to flash immediately so setting persists across resets
@@ -1975,5 +1984,4 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 /* Optional future advanced parsing disabled */
 #if 0
 #endif
-
 

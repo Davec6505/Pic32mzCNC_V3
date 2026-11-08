@@ -14,7 +14,7 @@ GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, tar
 
 **Branch**: `scurve_motion` (active development mainline)
 **Firmware**: `bins/CNC_V3.hex`
-**Last build**: March 14, 2026
+**Last build**: November 8, 2026 (XC32; debounce hardware retest pending)
 
 | Feature | Status |
 |---------|--------|
@@ -23,7 +23,7 @@ GRBL v1.1 compatible 4-axis CNC motion controller for the PIC32MZ2048EFH100, tar
 | S-curve velocity profiling (jerk-limited, 7-phase) | ✅ Complete |
 | GRBL-exact look-ahead planner (reverse+forward+junction) | ✅ Complete |
 | Arc interpolation G2/G3 + radius compensation | ✅ Complete |
-| Homing ($H) — 4-phase cycle | ✅ Complete |
+| Homing ($H) — 4-phase cycle | ✅ Implemented — configurable $26 debounce hardware retest pending |
 | Spindle PWM (M3/M5 via OC8/TMR6) | ✅ Complete |
 | NVM flash settings persistence | ✅ Complete |
 | Flow control — deferred "ok" | ✅ Complete |
@@ -311,12 +311,60 @@ Queue drained to zero
 | $23 | Homing direction mask | 0 |
 | $24 | Homing feed rate (mm/min) | 500 |
 | $25 | Homing seek rate (mm/min) | 2000 |
-| $26 | Homing debounce (µs) | 250 |
+| $26 | Homing switch debounce (ms; 0 = immediate) | 25 |
 | $27 | Homing pull-off (mm) | 2.0 |
 | $100–$103 | Steps/mm — X Y Z A | 80 |
 | $110–$113 | Max rate (mm/min) — X Y Z A | 5000 |
 | $120–$123 | Acceleration (mm/s²) — X Y Z A | 200 |
 | $130–$133 | Max travel (mm) — X Y Z A | 200 |
+
+### Homing debounce ($26)
+
+`$25` remains the fast homing seek rate in **mm/min**. The former hardcoded
+approximately 10 ms switch filter is now controlled by **`$26` in milliseconds**.
+The compiled default is 25 ms; existing NVM values are retained, so read `$$` or
+`$26` before testing. No settings-layout/version change is required.
+
+```gcode
+$26=10     ; Approximately the previous debounce delay
+$26=25     ; Current compiled default
+```
+
+During SEEK and LOCATE_REAPPROACH, the selected limit must remain continuously
+active for `$26` ms before a one-shot contact edge is accepted. Any observed
+bounce back to the accepted state restarts the delay. Falling edges use the same
+filter. `$26=0` accepts an observed transition immediately. Settings changes apply
+through the existing live settings pointers without a reboot and are persisted
+by the normal settings command. Negative, non-finite, out-of-range, empty and
+malformed `$26` values report `error:3` without changing the setting; valid
+fractional milliseconds truncate to an integer, as before.
+
+The Core Timer runs at 100 MHz (not the 200 MHz CPU frequency). Elapsed tick
+deltas are accumulated across its approximately 42.95-second wraps; update calls
+must remain less than one wrap apart. Resetting the tracker clears pending edges
+and timing but preserves the selected homing axis, including Z/Y re-approach.
+BACKOFF is not sampled; the existing immediate pull-off release check and normal
+hard-limit checks are unchanged.
+
+**Safety / compatibility:** GRBL parameter numbers and units are preserved, but
+this firmware filters contact **while moving**, rather than adopting stock GRBL's
+stop-and-settle homing sequence. Extra travel during the filter is approximately
+`actual_speed_mm_per_min * $26 / 60000`. At 2000 mm/min, 10 ms adds about 0.33 mm,
+25 ms about 0.83 mm, and 250 ms about 8.33 mm. Excessive delays can exceed switch
+overtravel or the finite seek/re-approach travel and produce `ALARM:9`; use the
+smallest reliable value for the actual machine.
+
+Offline regression command (requires a host GCC compiler; no serial connection):
+
+```powershell
+.\ps_commands\test_homing_debounce.ps1
+make
+```
+
+**Validation (November 8, 2026):** offline regressions and XC32 build pass.
+Board testing is pending: verify repeated XYZ homing, switch bounce, already-active
+switch entry, `$26=10`/`25`, and pull-off release at safe speeds before production.
+See [Contributing](CONTRIBUTING.md#homing-debounce-validation) for the checklist.
 
 ### Per-axis Driver Type ($260–$263)
 

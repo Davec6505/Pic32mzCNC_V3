@@ -202,7 +202,9 @@ uint32_t UTILS_SafeStrlen(const char* str, uint32_t max_len);
 
 // ===== EDGE DETECTION UTILITIES =====
 // Homing limit state change tracker (per-axis, persistent across iterations)
-// Tracks rising/falling edges with one-shot flag behavior
+// Both edges require continuous stability for $26 milliseconds (0 = immediate).
+// Call each homing loop, at least once per Core Timer wrap (~42.95s at 100MHz).
+// Flags persist until consumed; resets clear pending timing and preserve axis selection.
 void UTILS_HomingSetCurrentAxis(E_AXIS axis);   // Set which axis is currently homing
 void UTILS_HomingLimitUpdate(bool limit_active);
 bool UTILS_HomingLimitRisingEdge(void);         // Returns true once on limit trigger

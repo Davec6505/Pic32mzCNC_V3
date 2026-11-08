@@ -136,6 +136,47 @@ If your change touches `srcs/motion/interpolator.c`, `srcs/motion/trajectory.c`,
 `TIMER_4_InterruptHandler`, run the stress test (`08_arc_cw_ccw_stress.gcode`) **twice** in a row
 without resetting the machine. A single pass is not conclusive for timing regressions.
 
+### Homing debounce validation
+
+The homing switch filter uses **`$26` in milliseconds**, not `$25` (seek speed
+in mm/min). The compiled default is 25 ms; `$26=10` approximates the former
+hardcoded filter. Do not reset all settings just to change the debounce.
+
+First run offline tests and the firmware build from the repository root:
+
+```powershell
+.\ps_commands\test_homing_debounce.ps1
+make
+```
+
+The host tests require GCC, compile the actual production tracker/settings/parser
+code with `-ffast-math`, and mock time and input pins. They cover timing thresholds,
+zero delay, bounce on both edges, one-shot consumption, resets and axis selection,
+live settings changes, timer wrap and long delays, `$23` direction / `$5`
+inversion, numeric validation and malformed `$26` input. They never open a serial
+port or move hardware.
+
+Before hardware testing, record `$$` and check available switch overtravel.
+Motion continues while the switch is being filtered; approximate extra travel
+is `actual_rate_mm_per_min * $26 / 60000` mm. Large persisted values can be unsafe.
+Do not run unattended or intentionally test long delays on the machine.
+
+With the board connected and mechanically safe:
+
+1. Test `$26=10` and `$26=25` at conservative `$24`/`$25` speeds.
+2. Home XYZ repeatedly, confirming Z/Y/X selection, backoff, re-approach,
+   pull-off and the final deferred `ok`; verify position repeatability.
+3. Verify an already-active switch enters backoff, then re-approaches correctly.
+4. Check bounce does not produce premature or repeated phase transitions.
+5. Verify normal pull-off release and the existing `ALARM:8` still-active check.
+6. Verify `ALARM:9` for an absent switch only on a safe fixture with sufficient
+   travel, then check `$X`/soft-reset recovery.
+7. Confirm `$26` reads back and survives a power cycle; restore the recorded
+   settings after testing.
+
+As of November 8, 2026, the offline tests and XC32 build pass; the changed
+debounce behavior has **not** been board-validated.
+
 ---
 
 ## Submitting a Pull Request

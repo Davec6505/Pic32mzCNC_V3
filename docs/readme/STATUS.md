@@ -2,7 +2,37 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: May 3, 2026
+**Last Updated**: November 8, 2026
+
+---
+
+## FIX: Configurable homing debounce ($26) — hardware retest pending (November 8, 2026)
+
+See root [STATUS.md](../../STATUS.md) for file/line/function details and validation.
+
+- `$25` remains seek speed (mm/min); `$26` controls switch stability (ms).
+  Compiled default: 25 ms; `$26=10` approximates the previous fixed filter.
+  Existing NVM values and layout/version are retained.
+- `srcs/utils/utils.c:408` — `UTILS_HomingLimitUpdate()` — accumulate timer deltas
+  across 100 MHz Core Timer wraps; preserve both-edge bounce filtering and zero delay.
+- `srcs/utils/utils.c:481` — `UTILS_HomingLimitReset()` — preserve selected axis
+  across seek/re-approach resets.
+- `srcs/settings/settings.c:333` — `SETTINGS_SetValue()` — reject invalid `$26`
+  numeric conversions, including NaN/Inf with `-ffast-math`.
+- `srcs/gcode/gcode_parser.c:1651` — `GCODE_Tasks()` — reject empty/malformed
+  `$26` writes with existing `error:3`, leaving other settings parsing unchanged.
+- `srcs/motion/homing.c:360` — `HOMING_LimitTriggered()` — use shared tracker;
+  obsolete independent state removed from `incs/motion/homing.h:40`.
+- `ps_commands/test_homing_debounce.ps1:1` / `tests/homing_debounce_test.c:58` —
+  offline actual-source regressions: **412 checks, 0 failures**.
+- `make` and `make -B`: **PASS** with XC32 v4.60; full build has only the existing
+  MikroE bootloader startup warning. No serial connection, flashing or motion.
+- README, firmware book, CONTRIBUTING, event diagram and debounce-unit guidance updated.
+
+Motion continues during filtering: larger `$26` values require more physical
+switch overtravel and can cause `ALARM:9`. This retains GRBL numbering/units, not
+stock GRBL's stop-and-settle sequence. Physical homing and repeatability tests
+remain pending; follow [the hardware checklist](../../CONTRIBUTING.md#homing-debounce-validation).
 
 ---
 

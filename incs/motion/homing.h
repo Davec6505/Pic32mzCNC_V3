@@ -43,10 +43,6 @@ typedef struct {
     uint32_t axes_to_home;      // Bitmask of axes to home (bit 0=X, 1=Y, 2=Z, 3=A)
     uint32_t axes_homed;        // Bitmask of completed axes
     
-    // Timing
-    uint32_t debounce_start;    // CoreTimer value when limit triggered
-    bool debouncing;            // True during debounce delay
-    
     // Motion tracking
     bool motion_active;         // True when homing move in progress
     uint32_t alarm_code;        // Non-zero if homing failed
@@ -133,8 +129,9 @@ void HOMING_StartPulloff(APP_DATA* appData);
 
 /**
  * @brief Check if limit switch triggered for current axis
- * Respects invert mask and debounce delay
- * @return true if limit triggered and debounced
+ * Uses the shared $26 millisecond edge tracker, $23 direction and $5 inversion.
+ * Do not mix this consumer with UTILS_HomingLimitRisingEdge() in the same phase.
+ * @return true once when the active limit has remained stable for $26 ms
  */
 bool HOMING_LimitTriggered(void);
 

@@ -54,7 +54,6 @@ bool HOMING_Start(APP_DATA* appData, uint32_t axes_mask) {
     // Initialize homing control
     g_homing.axes_to_home = enabled_axes;  // Use filtered mask
     g_homing.axes_homed = 0;
-    g_homing.debouncing = false;
     g_homing.motion_active = false;
     g_homing.alarm_code = 0;
     
@@ -359,78 +358,8 @@ void HOMING_StartPulloff(APP_DATA* appData) {
 }
 
 bool HOMING_LimitTriggered(void) {
-    // Get settings
-    CNC_Settings* settings = SETTINGS_GetCurrent();
-    
-    // Determine which limit to check based on homing direction from $23 ONLY
-    // $23=0 → check MIN switch
-    // $23=1 → check MAX switch
-    // NOTE: $3 (step_direction_invert) only inverts GPIO pin, doesn't change which switch to check
-    bool home_positive = (*g_homing_settings[g_homing.current_axis].homing_dir_mask >> g_homing.current_axis) & 0x01;
-    
-    // Get raw limit pin state
-    bool limit_min = LIMIT_GetMin(g_homing.current_axis);
-    bool limit_max = LIMIT_GetMax(g_homing.current_axis);
-    bool limit_state = home_positive ? limit_max : limit_min;
-    
-    DEBUG_EXEC_MOTION({
-        static uint32_t debug_counter = 0;
-        if (debug_counter++ % 50000 == 0) {  // Print occasionally to reduce spam
-            DEBUG_PRINT_MOTION("[LIMIT_CHECK] axis=%d, checking %s, MIN=%d, MAX=%d, selected=%d\r\n",
-                              g_homing.current_axis, home_positive ? "MAX" : "MIN", 
-                              limit_min, limit_max, limit_state);
-        }
-    });
-    
-    // Apply invert mask from settings ($5)
-    // Current simplified model: One invert bit per axis applies to BOTH Min and Max
-    // GRBL standard: Separate bits for Min (axis*2) and Max (axis*2+1)
-    bool inverted = (settings->limit_pins_invert >> g_homing.current_axis) & 0x01;
-    
-    // XOR inverts the trigger logic:
-    // NO switch ($5 bit=0): Pin HIGH (1) triggers → 1^0=1 (alarm)
-    // NC switch ($5 bit=1): Pin LOW (0) triggers → 0^1=1 (alarm)
-    DEBUG_EXEC_MOTION({
-        bool raw_state = limit_state;
-        limit_state ^= inverted;
-        
-        static uint32_t debug_xor = 0;
-        if (debug_xor++ % 50000 == 0) {
-            DEBUG_PRINT_MOTION("[LIMIT_XOR] raw=%d, inverted=%d, final=%d\r\n",
-                              raw_state, inverted, limit_state);
-        }
-    });
-    
-    // Apply inversion (must be outside DEBUG block for Release builds)
-    limit_state ^= inverted;
-    
-    // Check for limit trigger
-    if (limit_state && !g_homing.debouncing) {
-        // Limit just triggered - start debounce
-        g_homing.debounce_start = CORETIMER_CounterGet();
-        g_homing.debouncing = true;
-        return false;  // Not confirmed yet
-        
-    } else if (limit_state && g_homing.debouncing) {
-        // Check if debounce delay elapsed
-        uint32_t now = CORETIMER_CounterGet();
-        uint32_t elapsed_ticks = now - g_homing.debounce_start;
-        
-        // Convert debounce microseconds to core timer ticks (200MHz = 5ns per tick)
-        uint32_t debounce_ticks = (*g_homing_settings[g_homing.current_axis].homing_debounce * 200) / 1000;  // μs to ticks
-        
-        if (elapsed_ticks >= debounce_ticks) {
-            // Debounce complete - limit confirmed
-            g_homing.debouncing = false;
-            return true;
-        }
-        return false;  // Still debouncing
-        
-    } else {
-        // Limit not triggered - reset debounce
-        g_homing.debouncing = false;
-        return false;
-    }
+    UTILS_HomingLimitUpdate(HOMING_IsLimitActiveNow());
+    return UTILS_HomingLimitRisingEdge();
 }
 
 // Read instantaneous (non-debounced) limit state for the current homing axis.

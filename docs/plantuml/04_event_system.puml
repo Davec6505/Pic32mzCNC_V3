@@ -67,7 +67,14 @@ PARSER -> BRIDGE : HOME event {axes_mask from $22}
 BRIDGE -> INTERP : INTERPOLATOR_Stop() — flush current motion
 BRIDGE -> TRAJ : TRAJECTORY_Reset() — clear ring
 BRIDGE -> HOMING : HOMING_Start(axes_mask)
-HOMING -> HOMING : For each enabled axis:\n  Phase 1 SEEK    — move at $25 until limit triggers\n  Phase 2 BACK-OFF — brief retract so switch releases\n  Phase 3 LOCATE  — move at $24 for precise trigger\n  Phase 4 PULL-OFF — retract $27 mm; machine pos = 0
+HOMING -> HOMING : For each enabled axis:\n  Phase 1 SEEK    — move at $25 until limit stable for $26 ms\n  Phase 2 BACK-OFF — brief retract so switch releases\n  Phase 3 LOCATE  — move at $24 until limit stable for $26 ms\n  Phase 4 PULL-OFF — retract $27 mm; machine pos = 0
+note right of HOMING
+  $25 = seek speed (mm/min); $26 = debounce (ms), default 25.
+  Shared per-axis edge tracker uses the 100 MHz Core Timer.
+  Bounce restarts stability timing; $26=0 accepts immediately.
+  Motion continues during filtering; allow for switch overtravel.
+  Reset preserves the selected axis. Hardware retest pending.
+end note
 HOMING -> BRIDGE : HOMING_COMPLETE → resume IDLE\n  ALARM:8 on homing failure\n  ALARM:9 on switch not found within max_travel
 
 == Probing (G38.x) ==

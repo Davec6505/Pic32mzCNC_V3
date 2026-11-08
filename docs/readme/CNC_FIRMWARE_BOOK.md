@@ -1748,32 +1748,65 @@ Each axis goes through four phases:
 
 ```
 SEEK        Fast move toward limit switch at $25 (homing_seek_rate mm/min)
-            until limit pin triggers
+            until the active limit is stable for $26 ms
             ↓
 BACKOFF     Short reverse move to clear the switch
             ↓
 LOCATE      Slow move back toward switch at $24 (homing_feed_rate mm/min)
-            until switch triggers again (precise location)
+            until the active limit is stable again for $26 ms (precise location)
             ↓
 PULLOFF     Move away by $27 (homing_pull_off mm)
             — machine position set to 0.0 on this axis at this point
 ```
 
-Debounce timing uses the PIC32MZ Core Timer:
+Debounce is handled by the per-axis edge tracker in `srcs/utils/utils.c`,
+called by `app.c` during SEEK and LOCATE_REAPPROACH. There is no separate
+`HOMING_DEBOUNCE` state. `$25` is seek speed in mm/min; **`$26` is debounce in ms**.
+The Core Timer frequency is 100 MHz (CPU/2), not 200 MHz.
+
+The tracker replaces the old approximately 10 ms fixed filter with continuous
+stability timing. Its central elapsed-time calculation is:
+
 ```c
-// homing.c
-static uint32_t debounce_start;
-
-// On switch trigger:
-debounce_start = CORETIMER_CounterGet();
-homing_state = HOMING_DEBOUNCE;
-
-// In HOMING_DEBOUNCE state:
-uint32_t elapsed = CORETIMER_CounterGet() - debounce_start;
-if (elapsed >= (uint32_t)(settings.homing_debounce * 1000UL)) {
-    // Debounce period expired, advance to next phase
+// utils.c, after starting or continuing a candidate transition:
+state->debounce_elapsed_ticks += (uint32_t)(now - state->debounce_last_sample);
+state->debounce_last_sample = now;
+if (state->debounce_elapsed_ticks < (uint64_t)debounce_ms * ticks_per_ms) {
+    return;
 }
 ```
+
+An observed return to the accepted state cancels the candidate; the next change
+starts a full new delay. Both rising and falling transitions are filtered, and
+edge flags remain latched until consumed or reset. `$26=0` accepts transitions
+immediately. Reset clears all timing and flags without changing the selected
+axis: Z and Y must remain selected across seek and re-approach resets.
+`HOMING_LimitTriggered()` delegates to this same one-shot tracker rather than
+maintaining a second filter with different units; do not consume its edge and
+`UTILS_HomingLimitRisingEdge()` separately in the same phase.
+
+The 64-bit accumulator supports intervals spanning multiple Core Timer wraps,
+including persisted 32-bit debounce values. Calls must occur less than one
+42.95-second timer wrap apart. No timer, ISR, GPIO or NVM layout is changed.
+The compiled default is **25 ms**, not 250 ms; existing NVM values are preserved.
+`$26=10` gives approximately the old timing. Runtime changes are read through the
+live settings pointers without a reboot. Valid fractional values truncate;
+negative, non-finite, values at/above 2^32 ms and malformed/empty serial values
+are rejected with `error:3`, leaving the setting unchanged.
+
+**Mechanical safety:** motion continues during this filter. GRBL numbering and
+units are retained, but this is not stock GRBL's stop-and-settle implementation.
+Additional travel is approximately `actual_rate * debounce_ms / 60000` mm:
+at 2000 mm/min, 10/25/250 ms correspond to 0.33/0.83/8.33 mm.
+Use a value within the switch's overtravel and the finite seek/locate travel.
+An excessive setting can cause a collision or `ALARM:9` before acceptance.
+BACKOFF remains unsampled, and the existing raw pull-off release check (`ALARM:8`)
+and non-homing hard-limit handling are unaffected.
+
+**Validation:** `.\ps_commands\test_homing_debounce.ps1` runs actual-source host
+regressions without opening a serial port; `make` builds with XC32 from the root.
+Both pass as of November 8, 2026. Physical homing and switch-repeatability tests
+remain pending; see [the hardware checklist](../../CONTRIBUTING.md#homing-debounce-validation).
 
 #### 11.3.3 The $22 Setting
 
@@ -2275,7 +2308,7 @@ All settings persist to NVM flash. Read with `$$`. Write with `$N=value`.
 | $23 | homing_dir | 0 | mask | Homing seek direction (bit=1: seek positive) |
 | $24 | homing_feed_rate | 100 | mm/min | Slow locate rate |
 | $25 | homing_seek_rate | 2000 | mm/min | Fast seek rate |
-| $26 | homing_debounce | 250 | ms | Limit switch debounce time |
+| $26 | homing_debounce | 25 | ms | Continuous switch stability time; 0 = immediate |
 | $27 | homing_pull_off | 1.0 | mm | Pull-off distance after homing |
 | $30 | max_spindle_speed | 12000 | RPM | Speed at 100% PWM duty |
 | $31 | min_spindle_speed | 0 | RPM | Minimum non-zero speed |
@@ -2494,4 +2527,3 @@ Tests run in both UGS single-step and pipelined streaming modes.
 ---
 
 *End of Pic32mzCNC_V3 Firmware Reference*
-

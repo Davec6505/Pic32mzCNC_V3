@@ -2,7 +2,98 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: May 3, 2026
+**Last Updated**: November 8, 2026
+
+---
+
+## FIX: Configurable homing debounce ($26) — offline validated, hardware pending (November 8, 2026)
+
+The November 8 commit message mentions `$25`, but the code correctly reads
+`homing_debounce`, which is **$26 in milliseconds**. `$25` remains homing seek
+speed in mm/min. Do not remap either parameter. The existing compiled default
+is 25 ms; `$26=10` approximates the old fixed filter, and persisted settings are
+retained without an NVM layout/version change.
+
+### Findings and corrections
+
+- A single 32-bit start-time subtraction cannot complete debounce intervals
+  longer than one Core Timer wrap (~42.95 s at 100 MHz). Reproduced offline;
+  elapsed unsigned deltas now accumulate in 64 bits across wraps.
+- `$26` previously converted negative, non-finite and oversized floats to
+  `uint32_t` without validation. Reproduced offline; these now return the
+  existing `error:3` and leave settings unchanged. Empty/malformed serial input
+  is also rejected specifically for `$26`; other setting parsing is preserved.
+- The unused `HOMING_LimitTriggered()` had conflicting microsecond conversion
+  and debug-dependent inversion. It now delegates to the same tracker/raw
+  limit reader as the active application path, with one-shot semantics.
+- All-axis reset must preserve the selected axis: seek and re-approach call it
+  after Z/Y selection. This behavior is retained and regression-tested.
+
+### Code changes (file, line, function)
+
+- `srcs/utils/utils.c:385` — `HomingLimitState` — replace start-only timing with
+  last-sample/64-bit elapsed state; remove commented-out old filter and constants.
+- `srcs/utils/utils.c:408` — `UTILS_HomingLimitUpdate()` — use live `$26` ms,
+  continuous stability on both edges, unsigned wrap-safe deltas and no division.
+- `srcs/utils/utils.c:467` — `UTILS_HomingLimitResetAxis()` — clear all new timing,
+  candidate and one-shot state.
+- `srcs/utils/utils.c:481` — `UTILS_HomingLimitReset()` — clear all trackers while
+  preserving the selected homing axis.
+- `srcs/settings/settings.c:333` — `SETTINGS_SetValue()` — validate `$26` before
+  integer conversion; IEEE-754 non-finite check remains effective with `-ffast-math`;
+  preserve valid fractional truncation and zero-delay support.
+- `srcs/gcode/gcode_parser.c:1651` — `GCODE_Tasks()` settings-command branch —
+  narrowly validate that `$26` has a complete numeric value before modifying or
+  saving settings; reuse existing `error:3` handling. This necessary parser change
+  is scoped to the newly active debounce setting.
+- `srcs/motion/homing.c:35` — `HOMING_Start()` — remove initialization of obsolete
+  independent debounce state.
+- `srcs/motion/homing.c:360` — `HOMING_LimitTriggered()` — use
+  `HOMING_IsLimitActiveNow()` and shared one-shot debounce, eliminating duplicate logic.
+- `incs/motion/homing.h:40` — `HomingControl` — remove unused independent debounce
+  fields; all firmware consumers fully rebuilt.
+- `incs/motion/homing.h:136` — `HOMING_LimitTriggered()` — document shared `$26`
+  millisecond / one-shot semantics and exclusive edge consumption.
+- `incs/utils/utils.h:205` — homing tracker API — document units, timer-wrap polling
+  requirement, latched flags and reset axis preservation.
+- `ps_commands/test_homing_debounce.ps1:1` — regression runner / `Extract-Source()` —
+  compile actual production source with mocked time/GPIO; fail explicitly on
+  extraction, compilation or assertion errors; clean temporary output; no serial I/O.
+- `tests/homing_debounce_test.c:58` — `test_thresholds()` and regression functions —
+  cover X/Y/Z/A, exact 1/10/25/250/2000 ms thresholds, both edges, bounce,
+  one-shot consumption, reset/re-approach, live changes, zero delay, timer wrap,
+  50-second and maximum stored delays, `$25`/`$26` mapping, malformed/numeric
+  validation, and `$23` direction / `$5` inversion through the actual limit reader.
+
+### Documentation
+
+Updated root README feature/build status and settings reference; firmware book
+homing algorithm and Appendix A; CONTRIBUTING hardware checklist; event-system
+diagram; repository debounce-unit guidance; and this status tracker plus its
+docs/readme summary. Removed incorrect microsecond units/250 default and the
+fictional HOMING_DEBOUNCE-state example.
+
+### Validation and safety
+
+- Before correction: `.\ps_commands\test_homing_debounce.ps1` reproduced
+  12 failures in 275 checks (long timer intervals and invalid setting conversion).
+- After correction: `.\ps_commands\test_homing_debounce.ps1` —
+  **PASS: 412 checks, 0 failures**, GCC C99, `-ffast-math -Wall -Wextra -Werror`.
+- `make` — **PASS**, XC32 v4.60 incremental compile/link/HEX generation.
+- `make -B` — **PASS**, full rebuild of all header/structure consumers.
+  Only the existing startup.S "Startup set for MIKROE bootloader" warning appears.
+- Build regenerated `bins/CNC_V3`, `bins/CNC_V3.hex` and `other/memoryfile.xml`;
+  binaries are build outputs, not evidence of physical validation.
+- No board connected: **not flashed or hardware-tested**. No serial ports opened.
+  Repeated homing, contact repeatability and alarm/recovery require the checklist
+  in [CONTRIBUTING.md](CONTRIBUTING.md#homing-debounce-validation).
+
+GRBL numbering and units are retained, but this firmware filters contacts while
+moving, not stock GRBL's stop-and-settle sequence. Added travel is approximately
+`actual_speed_mm_per_min * $26 / 60000` mm. Excessive delays can exceed switch
+overtravel or finite seek/re-approach travel (`ALARM:9`); do not test long delays
+on the machine. BACKOFF sampling, raw pull-off release (`ALARM:8`), normal hard
+limits, ISR timing, GPIO and motion generation are unchanged.
 
 ---
 
