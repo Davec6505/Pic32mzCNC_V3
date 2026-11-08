@@ -386,12 +386,15 @@ typedef struct {
     bool limit_previous;      // Last limit state
     bool rising_edge_flag;    // Set once on rising edge, cleared when limit goes LOW
     bool falling_edge_flag;   // Set once on falling edge, cleared when limit goes HIGH
-    uint32_t debounce_count;  // Stable state counter (prevent false edges)
+   // uint32_t debounce_count;  // Stable state counter (prevent false edges)
+    bool debounce_pending;
+    bool debounce_candidate;
+    uint32_t debounce_start;
 } HomingLimitState;
 
 static HomingLimitState g_homing_limit_state[NUM_AXIS] = {0};
 static E_AXIS g_homing_current_axis = AXIS_X;  // Track which axis is currently homing
-static uint32_t g_last_sample_time = 0;        // CoreTimer value of last sample
+//static uint32_t g_last_sample_time = 0;        // CoreTimer value of last sample
 
 #define HOMING_LIMIT_DEBOUNCE_COUNT 10         // Require 10 stable reads before edge
 #define HOMING_SAMPLE_INTERVAL_US 1000         // Sample every 1ms (1000 microseconds)
@@ -409,6 +412,46 @@ void UTILS_HomingSetCurrentAxis(E_AXIS axis)
 // Uses CoreTimer-based sampling to prevent excessive polling
 void UTILS_HomingLimitUpdate(bool limit_active)
 {
+    HomingLimitState* state = &g_homing_limit_state[g_homing_current_axis];
+    uint32_t now = CORETIMER_CounterGet();
+    uint32_t ticks_per_ms = CORETIMER_FrequencyGet() / 1000U;
+    uint32_t debounce_ms =
+        *g_homing_settings[g_homing_current_axis].homing_debounce;
+
+    if (limit_active == state->limit_previous) {
+        state->debounce_pending = false;
+        return;
+    }
+
+    if (!state->debounce_pending ||
+        state->debounce_candidate != limit_active) {
+        state->debounce_pending = true;
+        state->debounce_candidate = limit_active;
+        state->debounce_start = now;
+    }
+
+    uint32_t elapsed_ticks = now - state->debounce_start;
+    uint32_t elapsed_ms = elapsed_ticks / ticks_per_ms;
+
+    if (elapsed_ms < debounce_ms) {
+        return;
+    }
+
+    state->debounce_pending = false;
+
+    if (state->debounce_candidate && !state->limit_previous) {
+        state->rising_edge_flag = true;
+    } else if (!state->debounce_candidate && state->limit_previous) {
+        state->falling_edge_flag = true;
+    }
+
+    state->limit_previous = state->debounce_candidate;
+}
+
+// Update limit state for current axis - call every iteration during homing
+// Uses CoreTimer-based sampling to prevent excessive polling
+/*void UTILS_HomingLimitUpdateOld(bool limit_active)
+{
     // Timer-based sampling: only update at fixed intervals (like V1!)
     uint32_t current_time = CORETIMER_CounterGet();
     uint32_t ticks_per_sample = (CORE_TIMER_HZ / 1000000) * HOMING_SAMPLE_INTERVAL_US;
@@ -422,7 +465,7 @@ void UTILS_HomingLimitUpdate(bool limit_active)
     // Update sample time for next interval
     g_last_sample_time = current_time;
     
-    HomingLimitState* state = &g_homing_limit_state[g_homing_current_axis];
+    HomingLimitState* state = &g_homi ng_limit_state[g_homing_current_axis];
     
     // Debounce: require stable state before accepting change
     if (limit_active != state->limit_previous) {
@@ -448,7 +491,7 @@ void UTILS_HomingLimitUpdate(bool limit_active)
     } else {
         state->debounce_count = 0;  // Same state, reset counter
     }
-}
+}*/
 
 // Check for rising edge on current axis - consumes flag (one-shot pattern)
 bool UTILS_HomingLimitRisingEdge(void)
@@ -469,13 +512,26 @@ bool UTILS_HomingLimitFallingEdge(void)
 }
 
 // Reset state tracker for specific axis
-void UTILS_HomingLimitResetAxis(E_AXIS axis)
+/*void UTILS_HomingLimitResetAxisOld(E_AXIS axis)
 {
     if (axis < NUM_AXIS) {
         g_homing_limit_state[axis].limit_previous = false;
         g_homing_limit_state[axis].rising_edge_flag = false;
         g_homing_limit_state[axis].falling_edge_flag = false;
         g_homing_limit_state[axis].debounce_count = 0;
+    }
+}*/
+
+// Reset state tracker for specific axis
+void UTILS_HomingLimitResetAxis(E_AXIS axis)
+{
+    if (axis < NUM_AXIS) {
+        g_homing_limit_state[axis].limit_previous = false;
+        g_homing_limit_state[axis].rising_edge_flag = false;
+        g_homing_limit_state[axis].falling_edge_flag = false;
+        g_homing_limit_state[axis].debounce_pending = false;
+        g_homing_limit_state[axis].debounce_candidate = false;
+        g_homing_limit_state[axis].debounce_start = 0U;
     }
 }
 
@@ -485,5 +541,5 @@ void UTILS_HomingLimitReset(void)
     for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
         UTILS_HomingLimitResetAxis(axis);
     }
-    g_homing_current_axis = AXIS_X;  // Reset to first axis
+   // g_homing_current_axis = AXIS_X;  // Reset to first axis
 }
