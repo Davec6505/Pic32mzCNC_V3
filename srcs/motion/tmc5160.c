@@ -323,6 +323,7 @@ void TMC5160_SetHoldCurrent(E_AXIS axis, uint8_t ihold)
  * @param axis     Target axis (AXIS_X .. AXIS_A)
  * @param settings Pointer to current CNC_Settings (read-only)
  */
+
 void TMC5160_ApplySettings(E_AXIS axis, const CNC_Settings* settings)
 {
     if (!settings) return;
