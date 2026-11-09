@@ -237,9 +237,9 @@ Queue drained to zero
 | Code | Description |
 |------|-------------|
 | G0, G1 | Rapid / linear move |
-| G2, G3 | Arc (CW / CCW), helical, all planes |
+| G2, G3 | CW / CCW arcs; I/J/K-center or signed-R format, helical, selected plane |
 | G4 | Dwell (P seconds) |
-| G17, G18, G19 | Plane selection |
+| G17, G18, G19 | Select XY, XZ, or YZ arc plane |
 | G20, G21 | Inches / mm |
 | G28, G30 | Go to predefined position |
 | G38.2–G38.5 | Probe toward / away (Z-Max pin RE1) |
@@ -248,10 +248,18 @@ Queue drained to zero
 | G80 | Cancel canned cycle |
 | G81 | Drill canned cycle |
 | G83 | Peck drill canned cycle |
-| G90, G91 | Absolute / incremental |
+| G90, G91 | Absolute / incremental positioning for linear and arc endpoints |
 | G92 | Set current position |
 | G98, G99 | Retract to initial Z / R-plane |
 | G10 L2, L20 | Set work coordinate offset (all P0–P6) |
+
+For R-format arcs, positive R selects the minor arc and negative R selects the
+major arc. R cannot be combined with I/J/K center offsets; use I/J/K for full
+circles or when the endpoints are identical.
+
+Arc center offsets follow the selected plane: G17 uses I/J, G18 uses I/K,
+and G19 uses J/K. The axis normal to the selected plane is interpolated for
+helical moves.
 
 ### Supported M-Codes
 

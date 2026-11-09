@@ -124,6 +124,131 @@ static bool        s_cc_g98         = true;   // true=G98 (initial Z), false=G99
 static float       s_cc_dx          = 0.0f;   // X increment per hole (G91 mode)
 static float       s_cc_dy          = 0.0f;   // Y increment per hole (G91 mode)
 
+// Ordered plane axes preserve the right-handed arc direction convention:
+// G17: XY about +Z, G18: ZX about +Y, G19: YZ about +X.
+static const E_AXIS s_arc_plane_axes[3][3] = {
+    { AXIS_X, AXIS_Y, AXIS_Z },
+    { AXIS_Z, AXIS_X, AXIS_Y },
+    { AXIS_Y, AXIS_Z, AXIS_X }
+};
+
+static bool arc_sweep_contains(float start, float candidate, bool clockwise, float sweep)
+{
+    const float two_pi = 6.2831853071795864769f;
+    float delta = clockwise ? start - candidate : candidate - start;
+    delta = fmodf(delta, two_pi);
+    if (delta < 0.0f) delta += two_pi;
+    return delta <= sweep + 1e-6f;
+}
+
+static bool arc_center_from_radius(float start_0,
+                                   float start_1,
+                                   float end_0,
+                                   float end_1,
+                                   float signed_radius,
+                                   bool clockwise,
+                                   float *center_0,
+                                   float *center_1,
+                                   float *radius,
+                                   float *theta_start,
+                                   float *theta_end,
+                                   float *sweep)
+{
+    const float pi = 3.1415926535897932385f;
+    float chord_0 = end_0 - start_0;
+    float chord_1 = end_1 - start_1;
+    float chord = sqrtf(chord_0 * chord_0 + chord_1 * chord_1);
+    float requested_radius = fabsf(signed_radius);
+
+    if (!isfinite(signed_radius) || requested_radius < 0.001f ||
+        chord < 0.001f || chord > 2.0f * requested_radius) {
+        return false;
+    }
+
+    float half_chord = chord * 0.5f;
+    float height = sqrtf(requested_radius * requested_radius -
+                         half_chord * half_chord);
+    float midpoint_0 = (start_0 + end_0) * 0.5f;
+    float midpoint_1 = (start_1 + end_1) * 0.5f;
+    float perpendicular_0 = -chord_1 / chord;
+    float perpendicular_1 =  chord_0 / chord;
+    bool want_major_arc = signed_radius < 0.0f;
+
+    for (int side = -1; side <= 1; side += 2) {
+        float candidate_0 = midpoint_0 + (float)side * height * perpendicular_0;
+        float candidate_1 = midpoint_1 + (float)side * height * perpendicular_1;
+        float candidate_start = atan2f(start_1 - candidate_1,
+                                       start_0 - candidate_0);
+        float candidate_end = atan2f(end_1 - candidate_1,
+                                     end_0 - candidate_0);
+        float candidate_sweep = clockwise
+            ? candidate_start - candidate_end
+            : candidate_end - candidate_start;
+        if (candidate_sweep <= 0.0f) candidate_sweep += 2.0f * pi;
+
+        bool is_major = candidate_sweep > pi + 1e-6f;
+        if (is_major != want_major_arc) continue;
+
+        *center_0 = candidate_0;
+        *center_1 = candidate_1;
+        *radius = requested_radius;
+        *theta_start = candidate_start;
+        *theta_end = candidate_end;
+        *sweep = candidate_sweep;
+        return true;
+    }
+    return false;
+}
+
+static bool arc_path_within_soft_limits(const CoordinatePoint *start,
+                                        const CoordinatePoint *end,
+                                        const CoordinatePoint *center,
+                                        E_AXIS axis_0,
+                                        E_AXIS axis_1,
+                                        float radius,
+                                        float theta_start,
+                                        bool clockwise,
+                                        float sweep,
+                                        const CNC_Settings *settings)
+{
+    float path_min[NUM_AXIS];
+    float path_max[NUM_AXIS];
+
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        float start_pos = start->coordinate[axis];
+        float end_pos = end->coordinate[axis];
+        path_min[axis] = fminf(start_pos, end_pos);
+        path_max[axis] = fmaxf(start_pos, end_pos);
+    }
+
+    const float extrema_angles[] = {
+        0.0f,
+        1.5707963267948966192f,
+        3.1415926535897932385f,
+        4.7123889803846898577f
+    };
+    for (size_t i = 0; i < 4u; i++) {
+        float angle = extrema_angles[i];
+        if (!arc_sweep_contains(theta_start, angle, clockwise, sweep)) continue;
+
+        float position_0 = center->coordinate[axis_0] + radius * cosf(angle);
+        float position_1 = center->coordinate[axis_1] + radius * sinf(angle);
+        path_min[axis_0] = fminf(path_min[axis_0], position_0);
+        path_max[axis_0] = fmaxf(path_max[axis_0], position_0);
+        path_min[axis_1] = fminf(path_min[axis_1], position_1);
+        path_max[axis_1] = fmaxf(path_max[axis_1], position_1);
+    }
+
+    for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+        float travel = settings->max_travel[axis];
+        if (travel <= 0.0f) continue;
+        if (path_min[axis] < -0.001f || path_max[axis] > travel + 0.001f) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Queue one work-space move and kick the interpolator if idle.
 // Returns false if the trajectory queue is too full to accept the move (caller
 // retries next iteration after MOTION_Tasks() drains a slot).
@@ -349,10 +474,13 @@ void MOTION_Tasks(APP_DATA *appData)
 void MOTION_Arc(APP_DATA *appData)
 {
     if (appData == NULL || appData->arcGenState != ARC_GEN_ACTIVE) return;
+    if (appData->arcPlane > 2u) return;
 
     // Back off if trajectory queue is almost full (leave 2 slots headroom)
     if (TRAJECTORY_QueueCount() >= (uint32_t)(TRAJ_QUEUE_SIZE - 2)) return;
 
+    E_AXIS axis_0 = s_arc_plane_axes[appData->arcPlane][0];
+    E_AXIS axis_1 = s_arc_plane_axes[appData->arcPlane][1];
     // Advance segment counter; determine whether this is the final segment
     appData->arcSegmentCurrent++;
     bool is_last = (appData->arcSegmentCurrent >= appData->arcSegmentTotal);
@@ -363,29 +491,29 @@ void MOTION_Arc(APP_DATA *appData)
         // Use the exact programmed end point to avoid accumulated rounding error
         next = appData->arcEndPoint;
     } else {
-        // Advance angle and compute new XY position
+        // Advance angle and compute the two in-plane coordinates
         appData->arcTheta += appData->arcThetaIncrement;
-        float cx = appData->arcCenter.coordinate[AXIS_X];
-        float cy = appData->arcCenter.coordinate[AXIS_Y];
-        next.coordinate[AXIS_X] = cx + appData->arcRadius * cosf(appData->arcTheta);
-        next.coordinate[AXIS_Y] = cy + appData->arcRadius * sinf(appData->arcTheta);
+        float c0 = appData->arcCenter.coordinate[axis_0];
+        float c1 = appData->arcCenter.coordinate[axis_1];
+        next.coordinate[axis_0] = c0 + appData->arcRadius * cosf(appData->arcTheta);
+        next.coordinate[axis_1] = c1 + appData->arcRadius * sinf(appData->arcTheta);
 
-        // Linear interpolation for Z and A axes (helical / 4-axis motion)
+        // Interpolate the axis normal to the plane and the rotary A axis.
         float progress = (float)appData->arcSegmentCurrent / (float)appData->arcSegmentTotal;
-        float sz = appData->arcStartPoint.coordinate[AXIS_Z];
-        float ez = appData->arcEndPoint.coordinate[AXIS_Z];
-        float sa = appData->arcStartPoint.coordinate[AXIS_A];
-        float ea = appData->arcEndPoint.coordinate[AXIS_A];
-        next.coordinate[AXIS_Z] = sz + (ez - sz) * progress;
-        next.coordinate[AXIS_A] = sa + (ea - sa) * progress;
+        for (E_AXIS axis = AXIS_X; axis < NUM_AXIS; axis++) {
+            if (axis == axis_0 || axis == axis_1) continue;
+            float start = appData->arcStartPoint.coordinate[axis];
+            float end = appData->arcEndPoint.coordinate[axis];
+            next.coordinate[axis] = start + (end - start) * progress;
+        }
     }
 
     // DEBUG: Log first segment only (compile-time controlled)
     if (appData->arcSegmentCurrent == 1) {
         DEBUG_PRINT_MOTION("[SEG1] n=%lu f=(%.2f,%.2f) t=(%.2f,%.2f)\r\n",
             (unsigned long)appData->arcSegmentTotal,
-            appData->arcCurrent.coordinate[AXIS_X], appData->arcCurrent.coordinate[AXIS_Y],
-            next.coordinate[AXIS_X], next.coordinate[AXIS_Y]);
+            appData->arcCurrent.coordinate[axis_0], appData->arcCurrent.coordinate[axis_1],
+            next.coordinate[axis_0], next.coordinate[axis_1]);
     }
 
     // Attempt to add the segment to the trajectory queue
@@ -397,11 +525,12 @@ void MOTION_Arc(APP_DATA *appData)
 
         if (is_last) {
             appData->arcGenState = ARC_GEN_IDLE;
-            DEBUG_PRINT_MOTION("[ARC_DONE] n=%lu traj=%lu interpActive=%d DONE:(%.2f,%.2f)\r\n",
+            DEBUG_PRINT_MOTION("[ARC_DONE] G%d n=%lu traj=%lu interpActive=%d DONE:(%.2f,%.2f)\r\n",
+                17 + appData->arcPlane,
                 (unsigned long)appData->arcSegmentTotal,
                 (unsigned long)TRAJECTORY_QueueCount(),
                 (int)INTERPOLATOR_IsActive(),
-                next.coordinate[AXIS_X], next.coordinate[AXIS_Y]);
+                next.coordinate[axis_0], next.coordinate[axis_1]);
         }
 
         // Pre-fill gate: only release the interpolator once the queue is deep enough
@@ -564,10 +693,14 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             float ey = event->data.linearMove.y;
             float ez = event->data.linearMove.z;
             float ea = event->data.linearMove.a;
-            if (!isnan(ex)) end_work.coordinate[AXIS_X] = ex;
-            if (!isnan(ey)) end_work.coordinate[AXIS_Y] = ey;
-            if (!isnan(ez)) end_work.coordinate[AXIS_Z] = ez;
-            if (!isnan(ea)) end_work.coordinate[AXIS_A] = ea;
+            if (!isnan(ex)) end_work.coordinate[AXIS_X] = appData->absoluteMode
+                ? ex : start_work.coordinate[AXIS_X] + ex;
+            if (!isnan(ey)) end_work.coordinate[AXIS_Y] = appData->absoluteMode
+                ? ey : start_work.coordinate[AXIS_Y] + ey;
+            if (!isnan(ez)) end_work.coordinate[AXIS_Z] = appData->absoluteMode
+                ? ez : start_work.coordinate[AXIS_Z] + ez;
+            if (!isnan(ea)) end_work.coordinate[AXIS_A] = appData->absoluteMode
+                ? ea : start_work.coordinate[AXIS_A] + ea;
 
             // Convert work-space end to machine space
             CoordinatePoint end = KINEMATICS_WorkToMachine(end_work);
@@ -645,6 +778,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
         case GCODE_EVENT_ARC_MOVE: {
             // Guard: only one arc at a time
             if (appData->arcGenState == ARC_GEN_ACTIVE) return false;
+            if (appData->modalPlane > 2u) return false;
 
             // Use planned position (same logic as LINEAR_MOVE) so arcs chained
             // after queued linear moves start from the correct position.
@@ -659,80 +793,110 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
                 s_planned_position_valid = false;
             }
 
-            // Center in absolute coordinates (I/J are always relative to start per GRBL)
-            float cx = start.coordinate[AXIS_X] + event->data.arcMove.centerX;
-            float cy = start.coordinate[AXIS_Y] + event->data.arcMove.centerY;
+            E_AXIS axis_0 = s_arc_plane_axes[appData->modalPlane][0];
+            E_AXIS axis_1 = s_arc_plane_axes[appData->modalPlane][1];
+            const float center_offsets[NUM_AXIS] = {
+                event->data.arcMove.centerI,
+                event->data.arcMove.centerJ,
+                event->data.arcMove.centerK,
+                0.0f
+            };
+            CoordinatePoint center = start;
 
             // Absolute end point coordinates are optional (default to current position on that axis).
-            
-           // ✅ Fix: convert to machine space before use
             CoordinatePoint end_work;
             CoordinatePoint start_work = KINEMATICS_MachineToWork(start);
             end_work = start_work;  // default unspecified axes to current work position
-            if (!isnan(event->data.arcMove.x)) end_work.coordinate[AXIS_X] = event->data.arcMove.x;
-            if (!isnan(event->data.arcMove.y)) end_work.coordinate[AXIS_Y] = event->data.arcMove.y;
-            if (!isnan(event->data.arcMove.z)) end_work.coordinate[AXIS_Z] = event->data.arcMove.z;
-            if (!isnan(event->data.arcMove.a)) end_work.coordinate[AXIS_A] = event->data.arcMove.a;
+            if (!isnan(event->data.arcMove.x)) end_work.coordinate[AXIS_X] =
+                appData->absoluteMode ? event->data.arcMove.x
+                    : start_work.coordinate[AXIS_X] + event->data.arcMove.x;
+            if (!isnan(event->data.arcMove.y)) end_work.coordinate[AXIS_Y] =
+                appData->absoluteMode ? event->data.arcMove.y
+                    : start_work.coordinate[AXIS_Y] + event->data.arcMove.y;
+            if (!isnan(event->data.arcMove.z)) end_work.coordinate[AXIS_Z] =
+                appData->absoluteMode ? event->data.arcMove.z
+                    : start_work.coordinate[AXIS_Z] + event->data.arcMove.z;
+            if (!isnan(event->data.arcMove.a)) end_work.coordinate[AXIS_A] =
+                appData->absoluteMode ? event->data.arcMove.a
+                    : start_work.coordinate[AXIS_A] + event->data.arcMove.a;
             CoordinatePoint end_m = KINEMATICS_WorkToMachine(end_work);
-
-            float ex = end_m.coordinate[AXIS_X];
-            float ey = end_m.coordinate[AXIS_Y];
-            float ez = end_m.coordinate[AXIS_Z];
-            float ea = end_m.coordinate[AXIS_A];
-
-            // Soft limit check on arc endpoint
-            if (s->soft_limits_enable && appData->machine_homed) {
-                for (int axis = 0; axis < NUM_AXIS; axis++) {
-                    float pos    = end_m.coordinate[axis];
-                    float travel = s->max_travel[axis];
-                    if (travel <= 0.0f) continue;  // skip unconfigured / rotary axes
-                    if (pos < -0.001f || pos > travel + 0.001f) {
-                        UART_SendAlarm(2);   // Soft limit exceeded
-                        STEPPER_StopMotion();
-                        appData->state    = APP_ALARM;
-                        appData->alarmCode = 2;
-                        return false;
-                    }
-                }
-            }
 
             float fr = event->data.arcMove.feedrate;
             if (fr < 1.0f && s_modal_feedrate_mm_min >= 1.0f)
                 fr = s_modal_feedrate_mm_min;   // use modal feedrate (e.g. from prior G1 F1200)
             if (fr < 1.0f) fr = s->max_rate[AXIS_X];  // absolute fallback
 
-            // Radius from start to center
-            float dx_s = start.coordinate[AXIS_X] - cx;
-            float dy_s = start.coordinate[AXIS_Y] - cy;
-            float radius = sqrtf(dx_s * dx_s + dy_s * dy_s);
-            if (radius < 0.001f) return false; // Degenerate arc
+            bool cw = event->data.arcMove.clockwise;
+            float radius;
+            float theta_start;
+            float theta_end;
+            float sweep;
+            if (event->data.arcMove.radiusFormat) {
+                if (event->data.arcMove.centerOffsetsPresent ||
+                    !arc_center_from_radius(
+                        start.coordinate[axis_0], start.coordinate[axis_1],
+                        end_m.coordinate[axis_0], end_m.coordinate[axis_1],
+                        event->data.arcMove.radius, cw,
+                        &center.coordinate[axis_0], &center.coordinate[axis_1],
+                        &radius, &theta_start, &theta_end, &sweep)) {
+                    UART_SendError(33u);  // Invalid or ambiguous R-format arc
+                    DEBUG_PRINT_MOTION("[ARC] Rejected invalid R-format arc\r\n");
+                    return true;  // Permanent rejection: consume, do not retry
+                }
+            } else {
+                // I/J/K center offsets stay relative to the start point.
+                center.coordinate[axis_0] += center_offsets[axis_0];
+                center.coordinate[axis_1] += center_offsets[axis_1];
 
-            // Angular sweep in the correct direction
-            float theta_start = atan2f(dy_s, dx_s);
-            float dx_e = ex - cx;
-            float dy_e = ey - cy;
-            float theta_end = atan2f(dy_e, dx_e);
+                float dx_s = start.coordinate[axis_0] - center.coordinate[axis_0];
+                float dy_s = start.coordinate[axis_1] - center.coordinate[axis_1];
+                radius = sqrtf(dx_s * dx_s + dy_s * dy_s);
+                if (radius < 0.001f) {
+                    UART_SendError(33u);  // Invalid target: arc center equals start
+                    DEBUG_PRINT_MOTION("[ARC] Rejected degenerate arc (radius=%.6f)\r\n",
+                                       (double)radius);
+                    return true;  // Permanent rejection: consume, do not retry this command
+                }
 
-            // Verify end-point radius matches start-point radius (GRBL ALARM:4)
-            float r_end = sqrtf(dx_e * dx_e + dy_e * dy_e);
-            if (fabsf(r_end - radius) > 0.002f) {
-                UART_SendAlarm(4);   // Arc radius tolerance exceeded
+                theta_start = atan2f(dy_s, dx_s);
+                float dx_e = end_m.coordinate[axis_0] - center.coordinate[axis_0];
+                float dy_e = end_m.coordinate[axis_1] - center.coordinate[axis_1];
+                theta_end = atan2f(dy_e, dx_e);
+
+                // Keep the established I/J/K endpoint-radius validation unchanged.
+                float r_end = sqrtf(dx_e * dx_e + dy_e * dy_e);
+                if (fabsf(r_end - radius) > 0.002f) {
+                    UART_SendAlarm(4);   // Arc radius tolerance exceeded
+                    STEPPER_StopMotion();
+                    appData->state     = APP_ALARM;
+                    appData->alarmCode = 4;
+                    return false;
+                }
+
+                if (cw) {
+                    sweep = theta_start - theta_end;
+                    if (sweep <= 0.0f) sweep += 2.0f * 3.14159265358979f;
+                } else {
+                    sweep = theta_end - theta_start;
+                    if (sweep <= 0.0f) sweep += 2.0f * 3.14159265358979f;
+                }
+            }
+
+            // Check the whole planned path, including in-sweep circle extrema.
+            // The plane-normal and A axes are linear, so their endpoints bound them.
+            if (s->soft_limits_enable && appData->machine_homed &&
+                !arc_path_within_soft_limits(&start, &end_m, &center,
+                                             axis_0, axis_1, radius,
+                                             theta_start, cw, sweep, s)) {
+                UART_SendAlarm(2);   // Soft limit exceeded
                 STEPPER_StopMotion();
-                appData->state    = APP_ALARM;
-                appData->alarmCode = 4;
+                appData->state     = APP_ALARM;
+                appData->alarmCode = 2;
                 return false;
             }
 
-            bool cw = event->data.arcMove.clockwise;
-            float sweep;
-            if (cw) {
-                // G2 clockwise: angle decreases
-                sweep = theta_start - theta_end;
-                if (sweep <= 0.0f) sweep += 2.0f * 3.14159265358979f;
-            } else {
-                // G3 counter-clockwise: angle increases
-                sweep = theta_end - theta_start;
-                if (sweep <= 0.0f) sweep += 2.0f * 3.14159265358979f;
+            if (event->data.arcMove.feedrate >= 1.0f) {
+                s_modal_feedrate_mm_min = event->data.arcMove.feedrate;
             }
 
             // Number of linear segments — GRBL-compatible chord-deviation formula.
@@ -766,29 +930,31 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             // DEBUG: compact arc summary (compile-time controlled — silent in Release)
             static uint32_t s_arc_seq = 0;
             s_arc_seq++;
-            DEBUG_PRINT_MOTION("A%lu:%s st=(%.2f,%.2f) c=(%.2f,%.2f) e=(%.2f,%.2f) r=%.2f n=%lu\r\n",
+            DEBUG_PRINT_MOTION("A%lu:%s G%d st=(%.2f,%.2f) c=(%.2f,%.2f) e=(%.2f,%.2f) r=%.2f n=%lu\r\n",
                 (unsigned long)s_arc_seq,
                 used_planned ? "P" : "S",
-                start.coordinate[AXIS_X], start.coordinate[AXIS_Y],
-                cx, cy, ex, ey, radius, (unsigned long)n_seg);
+                17 + appData->modalPlane,
+                start.coordinate[axis_0], start.coordinate[axis_1],
+                center.coordinate[axis_0], center.coordinate[axis_1],
+                end_m.coordinate[axis_0], end_m.coordinate[axis_1],
+                radius, (unsigned long)n_seg);
             (void)used_planned;  // suppress unused-variable warning in Release builds
 
             // Store arc state into APP_DATA — MOTION_Arc() will consume it
-            appData->arcCenter.coordinate[AXIS_X]    = cx;
-            appData->arcCenter.coordinate[AXIS_Y]    = cy;
-            appData->arcCenter.coordinate[AXIS_Z]    = start.coordinate[AXIS_Z];
-            appData->arcCenter.coordinate[AXIS_A]    = start.coordinate[AXIS_A];
+            appData->arcCenter = center;
             appData->arcCurrent                      = start;
             appData->arcStartPoint                   = start;
-            appData->arcEndPoint.coordinate[AXIS_X]  = ex;
-            appData->arcEndPoint.coordinate[AXIS_Y]  = ey;
-            // Z and A are optional in arc commands. NAN means "same as start"
+            appData->arcEndPoint = end_m;
+            // The plane-normal and A axes are optional. NAN means "same as start"
             // (no helical motion). Replace NAN now so MOTION_Arc() never passes
             // NAN into TRAJECTORY_AddMove, which would corrupt dist/millimeters.
-            appData->arcEndPoint.coordinate[AXIS_Z]  = isnan(ez) ? start.coordinate[AXIS_Z] : ez;
-            appData->arcEndPoint.coordinate[AXIS_A]  = isnan(ea) ? start.coordinate[AXIS_A] : ea;
+            if (isnan(event->data.arcMove.z))
+                appData->arcEndPoint.coordinate[AXIS_Z] = start.coordinate[AXIS_Z];
+            if (isnan(event->data.arcMove.a))
+                appData->arcEndPoint.coordinate[AXIS_A] = start.coordinate[AXIS_A];
             appData->arcRadius                       = radius;
             appData->arcClockwise                    = cw;
+            appData->arcPlane                        = appData->modalPlane;
             appData->arcFeedrate                     = fr;
             appData->arcTheta                        = theta_start;
             appData->arcThetaStart                   = theta_start;
@@ -802,10 +968,7 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
 
             // Advance planned position to arc end so the next queued command
             // chains from the correct position even before MOTION_Arc() runs.
-            s_planned_position.coordinate[AXIS_X] = ex;
-            s_planned_position.coordinate[AXIS_Y] = ey;
-            s_planned_position.coordinate[AXIS_Z] = appData->arcEndPoint.coordinate[AXIS_Z];
-            s_planned_position.coordinate[AXIS_A] = appData->arcEndPoint.coordinate[AXIS_A];
+            s_planned_position = appData->arcEndPoint;
             s_planned_position_valid = true;
 
             return true;
@@ -928,10 +1091,19 @@ bool MOTION_ProcessGcodeEvent(APP_DATA *appData, GCODE_Event *event)
             return true;
         }
 
-        // ── Purely modal — parser already applied these, no physical effect.
+        case GCODE_EVENT_SET_PLANE:
+            if (event->data.setPlane.plane > 2u) return false;
+            appData->modalPlane = event->data.setPlane.plane;
+            return true;
+
+        // ── Purely modal — apply at event-processing time to preserve stream order.
         // Consume immediately without stalling the queue.
         case GCODE_EVENT_SET_ABSOLUTE:
+            appData->absoluteMode = true;
+            return true;
         case GCODE_EVENT_SET_RELATIVE:
+            appData->absoluteMode = false;
+            return true;
         case GCODE_EVENT_SET_SPINDLE_SPEED:
         case GCODE_EVENT_SET_TOOL:
             return true;

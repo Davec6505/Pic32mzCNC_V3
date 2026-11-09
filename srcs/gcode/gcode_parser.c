@@ -428,6 +428,13 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         if (gnum == 20) { unitsInches = true;  ev->type = GCODE_EVENT_NONE; return true; }
         if (gnum == 21) { unitsInches = false; ev->type = GCODE_EVENT_NONE; return true; }
 
+        // G17/G18/G19 - Arc plane selection
+        if (gnum >= 17 && gnum <= 19) {
+            ev->type = GCODE_EVENT_SET_PLANE;
+            ev->data.setPlane.plane = (uint8_t)(gnum - 17);
+            return true;
+        }
+
         // G98/G99 - Canned cycle return mode (modal, no event)
         if (gnum == 98) { s_canned_g98 = true;  ev->type = GCODE_EVENT_NONE; return true; }
         if (gnum == 99) { s_canned_g98 = false; ev->type = GCODE_EVENT_NONE; return true; }
@@ -717,20 +724,31 @@ static bool parse_command_to_event(const char* cmd, GCODE_Event* ev)
         } else if (ev->type == GCODE_EVENT_ARC_MOVE) {
             char* pI = find_char((char*)cmd, 'I');
             char* pJ = find_char((char*)cmd, 'J');
+            char* pK = find_char((char*)cmd, 'K');
+            char* pR = find_char((char*)cmd, 'R');
             float i = pI ? parse_float_after(pI) : 0.0f;
             float j = pJ ? parse_float_after(pJ) : 0.0f;
+            float k = pK ? parse_float_after(pK) : 0.0f;
+            float r = pR ? parse_float_after(pR) : 0.0f;
             float f = pF ? parse_float_after(pF) : 0.0f;
             // Event structure still uses hardcoded members (future refactoring opportunity)
             ev->data.arcMove.x = !isnan(axis_values[AXIS_X]) ? axis_values[AXIS_X] * unit_scale : NAN;
             ev->data.arcMove.y = !isnan(axis_values[AXIS_Y]) ? axis_values[AXIS_Y] * unit_scale : NAN;
             ev->data.arcMove.z = !isnan(axis_values[AXIS_Z]) ? axis_values[AXIS_Z] * unit_scale : NAN;
             ev->data.arcMove.a = !isnan(axis_values[AXIS_A]) ? axis_values[AXIS_A] * unit_scale : NAN;
-            ev->data.arcMove.centerX = i * unit_scale;
-            ev->data.arcMove.centerY = j * unit_scale;
+            ev->data.arcMove.centerI = i * unit_scale;
+            ev->data.arcMove.centerJ = j * unit_scale;
+            ev->data.arcMove.centerK = k * unit_scale;
+            ev->data.arcMove.radiusFormat = (pR != NULL);
+            ev->data.arcMove.centerOffsetsPresent =
+                (pI != NULL) || (pJ != NULL) || (pK != NULL);
+            ev->data.arcMove.radius = r * unit_scale;
             ev->data.arcMove.feedrate = (f > 0.0f) ? (f * unit_scale) : 0.0f;
-            DEBUG_PRINT_GCODE("[PARSE] Arc params: X=%.2f Y=%.2f I=%.2f J=%.2f F=%.1f\r\n",
+            DEBUG_PRINT_GCODE("[PARSE] Arc params: X=%.2f Y=%.2f Z=%.2f I=%.2f J=%.2f K=%.2f R=%.2f F=%.1f\r\n",
                              ev->data.arcMove.x, ev->data.arcMove.y, 
-                             ev->data.arcMove.centerX, ev->data.arcMove.centerY, 
+                             ev->data.arcMove.z,
+                             ev->data.arcMove.centerI, ev->data.arcMove.centerJ,
+                             ev->data.arcMove.centerK, ev->data.arcMove.radius,
                              ev->data.arcMove.feedrate);
             return true;
         }
@@ -1984,4 +2002,3 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
 /* Optional future advanced parsing disabled */
 #if 0
 #endif
-

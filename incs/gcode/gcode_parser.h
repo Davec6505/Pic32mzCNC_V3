@@ -38,6 +38,7 @@ typedef enum {
     GCODE_EVENT_NONE,
     GCODE_EVENT_LINEAR_MOVE,
     GCODE_EVENT_ARC_MOVE,
+    GCODE_EVENT_SET_PLANE,
     GCODE_EVENT_DWELL,
     GCODE_EVENT_SPINDLE_ON,
     GCODE_EVENT_SPINDLE_OFF,
@@ -77,11 +78,18 @@ typedef struct {
         } linearMove;
         
         struct {
-            float centerX, centerY;  // Arc center relative to start
+            float centerI, centerJ, centerK; // Arc center offsets from start
             float x, y, z, a;        // Target coordinates  
             bool clockwise;          // Direction
+            bool radiusFormat;       // true = R format, false = I/J/K center format
+            bool centerOffsetsPresent;
+            float radius;            // Signed R-format radius
             float feedrate;          // Feed rate
         } arcMove;
+
+        struct {
+            uint8_t plane;          // 0=G17 (XY), 1=G18 (XZ), 2=G19 (YZ)
+        } setPlane;
         
         struct {
             float seconds;           // Dwell time

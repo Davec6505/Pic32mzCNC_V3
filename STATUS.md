@@ -6,6 +6,130 @@
 
 ---
 
+## R-format arcs (November 9, 2026)
+
+Added an isolated signed-R arc-center solver for G2/G3 in the selected plane.
+Positive R selects the minor sweep and negative R the major sweep. The solver
+rejects zero-radius, impossible-chord, same-endpoint, and mixed R/I/J/K inputs
+with `error:33`; accepted arcs then use the existing soft-limit and incremental
+segment-generation path. The established I/J/K center and radius-validation
+path is kept separate and unchanged. Build and offline geometry checks pass;
+hardware validation remains required.
+
+### Code changes (file, line, function)
+
+- `incs/gcode/gcode_parser.h:84-86` — `GCODE_Event` — add R-format and
+  center-word presence fields without replacing I/J/K offsets.
+- `srcs/gcode/gcode_parser.c:724-752` — `parse_command_to_event()` — parse
+  signed R, convert units, and retain whether I/J/K words were supplied.
+- `srcs/motion/motion_bridge.c:144` — `arc_center_from_radius()` — calculate
+  the two possible centers and select by direction and signed-R minor/major intent.
+- `srcs/motion/motion_bridge.c:778` — `MOTION_ProcessGcodeEvent()` — route R
+  arcs through the isolated solver, then share existing path checks and queueing.
+- `README.md:240,256` — document signed-R selection and format restrictions.
+- `bins/CNC_V3`, `other/memoryfile.xml` — updated by the firmware build.
+
+---
+
+## Arc feed rate modal persistence (November 9, 2026)
+
+A valid arc with an explicit positive F word now updates the modal feed rate
+used by later linear and arc moves that omit F. Arcs without an F word still
+use the previous modal feed, and invalid or soft-limit-rejected arcs do not
+change it.
+
+### Code changes (file, line, function)
+
+- `srcs/motion/motion_bridge.c` — `MOTION_ProcessGcodeEvent()` — persist the
+  explicit arc feed after geometry and soft-limit validation.
+- `bins/CNC_V3`, `other/memoryfile.xml` — updated by the firmware build.
+
+---
+
+## Degenerate arc command handling (November 9, 2026)
+
+An arc whose center coincides with its start (radius < 0.001 mm) now reports
+GRBL `error:33` (invalid target) and is consumed instead of being retried
+indefinitely. This path is rejected before trajectory generation and does not
+raise an alarm or stop any earlier motion already in progress.
+
+### Code changes (file, line, function)
+
+- `srcs/motion/motion_bridge.c` — `MOTION_ProcessGcodeEvent()` — report the
+  invalid target and return consumed for zero-radius arcs; keep `false` reserved
+  for temporary backpressure/retry.
+- `bins/CNC_V3`, `other/memoryfile.xml` — updated by the firmware build.
+
+---
+
+## G90/G91 positioning mode (November 9, 2026)
+
+G90 now selects absolute endpoint coordinates and G91 selects incremental
+endpoint distances for linear and arc moves. Modal state is applied when its
+event is processed, preserving command-stream order. Arc I/J/K center offsets
+remain incremental from the arc start in either mode, and canned cycles
+continue using the same `absoluteMode` state as before.
+
+### Code changes (file, line, function)
+
+- `srcs/motion/motion_bridge.c:602` — `MOTION_ProcessGcodeEvent()` — resolve
+  linear endpoints relative to the planned work position in G91.
+- `srcs/motion/motion_bridge.c:719` — `MOTION_ProcessGcodeEvent()` — resolve
+  arc endpoints relative to the planned work position in G91; keep I/J/K
+  offsets incremental in both modes.
+- `srcs/motion/motion_bridge.c:1021` — `MOTION_ProcessGcodeEvent()` — apply
+  G90/G91 mode changes in event order.
+- `README.md` — clarify that G90/G91 apply to linear and arc endpoints.
+- `bins/CNC_V3`, `other/memoryfile.xml` — updated by the firmware build.
+
+---
+
+## Arc soft-limit path validation (November 9, 2026)
+
+Arc soft limits now validate the complete planned path before arc generation
+starts. The check includes start/end positions, in-sweep extrema on both arc
+axes, and endpoint bounds on the linearly interpolated plane-normal and A axes.
+Existing behavior is preserved: it runs only when soft limits are enabled and
+the machine has been homed, and violations raise ALARM:2.
+Build and offline geometry checks pass; hardware validation remains required.
+
+### Code changes (file, line, function)
+
+- `srcs/motion/motion_bridge.c` — `arc_sweep_contains()` — test whether an
+  extremum angle lies inside the directed CW/CCW sweep.
+- `srcs/motion/motion_bridge.c` — `arc_path_within_soft_limits()` —
+  compute per-axis path bounds from endpoints and in-sweep circle extrema.
+  Iterate the fixed four-entry extrema list without a `sizeof` division.
+- `srcs/motion/motion_bridge.c` — `MOTION_ProcessGcodeEvent()` — reject arcs
+  that exceed configured travel before setting arc generation active.
+- `bins/CNC_V3`, `other/memoryfile.xml` — updated by the firmware build.
+
+---
+
+## G17/G18/G19 arc-plane support (November 9, 2026)
+
+Implemented modal XY, XZ, and YZ plane selection and generalized G2/G3 arc
+center, radius, endpoint, and incremental segment calculations to the selected
+plane. Arc center offsets use I/J for G17, I/K for G18, and J/K for G19; the
+axis normal to the plane and rotary A are interpolated during helical moves.
+G17 remains the power-on default.
+Build succeeds; arc motion in all three planes still needs hardware validation.
+
+### Code changes (file, line, function)
+
+- `incs/gcode/gcode_parser.h:41,81` — `GCODE_EventType` / `GCODE_Event` — add the
+  plane-selection event and I/J/K arc offsets.
+- `srcs/gcode/gcode_parser.c:431` — `parse_command_to_event()` — recognize
+  G17/G18/G19; line 737 parses I/J/K center offsets for arcs.
+- `srcs/motion/motion_bridge.c:129` — arc plane-axis mapping;
+  line 357, `MOTION_Arc()` — generate points and helical interpolation in
+  the selected plane; lines 657 and 947, `MOTION_ProcessGcodeEvent()` — plan
+  arcs using plane-specific axes and apply plane-selection events.
+- `README.md:240,242,256` — document plane selection and arc offset words.
+- `bins/CNC_V3`, `other/memoryfile.xml` — updated by the successful firmware build.
+
+---
+
 ## FIX: Configurable homing debounce ($26) — offline validated, hardware pending (November 8, 2026)
 
 The November 8 commit message mentions `$25`, but the code correctly reads
