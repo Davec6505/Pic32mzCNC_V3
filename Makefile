@@ -14,10 +14,10 @@ DEVICE     := 32MZ2048EFH100
 
 # Build with dependency tracking enabled
 # This enables automatic tracking of header file dependencies
-# Usage: make all                    (disabled by default)
+# Usage: make all                    (enabled by default)
 #        make all DEP_TRACKING=0    (disable dependency tracking)
 #        make all DEP_TRACKING=1    (enable dependency tracking)
-DEP_TRACKING ?= 0
+DEP_TRACKING ?= 1
 
 # Optimization level control (optional override)
 # Usage: make OPT_LEVEL=2    (use -O2 instead of default -O1)

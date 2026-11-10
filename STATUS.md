@@ -2,7 +2,67 @@
 **PINOUT**: `Enable pin needs to be controlled by setting direction bit.
 
 **Branch**: `scurve_motion`
-**Last Updated**: November 8, 2026
+**Last Updated**: November 10, 2026
+
+---
+
+## UGS alarm reporting and line acknowledgments (November 10, 2026)
+
+- `srcs/gcode/gcode_parser.c:133` - `GCODE_HasAlarm()` - use application,
+  hard-limit and parser alarms consistently for status and command locking.
+- `srcs/gcode/gcode_parser.c:138` - `consume_command_line()` - share line
+  consumption across content, system, G-code and error paths; retain a pending
+  LF after CR across UART reads and preserve subsequent real blank lines.
+- `srcs/gcode/gcode_parser.c:173,287` - `GCODE_SoftReset()` and
+  `GCODE_USART_Initialize()` - clear pending CRLF state on reset/initialization.
+- `srcs/gcode/gcode_parser.c:1002` - `service_realtime_byte()` - report Alarm
+  for application alarms instead of incorrectly reporting Idle.
+- `srcs/gcode/gcode_parser.c:1212` - `GCODE_Tasks()` - reject G-code/jog with
+  error:9 while alarm-locked; failed $X returns error:9, successful $X clears
+  application alarm state only after the existing live limit check.
+- `tests/gcode_protocol_test.c:1` - `main()` and protocol tests - exercise
+  production parser tasks with mocked hardware: fragmented line endings,
+  acknowledgment counts, backpressure, alarm status, reset and recovery.
+- `ps_commands/test_gcode_protocol.ps1:1` - compile/run extracted production
+  parser paths using the existing host-GCC regression pattern.
+- `Makefile:19` - `DEP_TRACKING` - enable header dependencies by default;
+  the initial incremental build reused objects predating G-code header changes.
+  A full rebuild was performed to eliminate mixed-version objects.
+- `README.md:280` - document alarm locking, line-ending credits, host tests
+  and dependency-enabled build migration.
+- `bins/CNC_V3`, `other/memoryfile.xml` - rebuilt firmware outputs.
+
+Validation: 637 protocol checks and 412 homing-debounce checks pass. XC32
+`make` and `make all DEP_TRACKING=1` build successfully. The latter rebuilds
+all C/assembly objects; the existing Windows clean recipe emits directory
+removal prompts in noninteractive mode, but object removal and recompilation
+were verified. Existing bootloader assembly warning remains.
+
+The user initially reported no heartbeat; both the updated and unchanged
+committed images were unresponsive after upload. After the user recovered the
+board and reflashed the updated image, heartbeat and COM3 responses returned.
+The cause of the temporary boot/upload failure was not established.
+
+Board validation (COM3, 115200 baud; board disconnected from machine):
+- Full `gcode_tests/01_simple_square.gcode` with CRLF: 24 lines, exactly 24
+  acknowledgments, completed in approximately 21 seconds; final X/Y were
+  0.013/0.013 mm, with Idle status and all 64 planner slots free.
+- Fragmented CR then LF: no duplicate response. System-command and comment
+  CRLF handling preserves genuine following blank-line acknowledgments.
+- Active limit input: $X returns its diagnostic plus error:9 and no ok.
+  G-code/jog are rejected with error:9; status reports Alarm.
+- Reset during simulated motion: ALARM:3, then Alarm status; the next G-code
+  returns error:9 instead of being accepted into a stalled pipeline.
+- G18 XZ-plane CW/CCW semicircles (1 mm radius, I/K offsets, F60): both
+  completed; Y stayed at 0.000 mm, final X/Z were 0.000/-0.001 mm.
+  G17/G90 restored. This verifies plane execution, not circular accuracy:
+  the small arcs were coarsely segmented at the unchanged $12=0.5.
+- Stationary soft reset used the existing temporary hard-limit suppression
+  behavior to permit the disconnected-board sample; this does not validate
+  physical limit operation. Final board Idle, queue empty, COM3 closed.
+
+Debounce, ISR timing and settings are unchanged ($21=1, $26=25).
+Unrelated concurrent packet-log edits are left untouched.
 
 ---
 

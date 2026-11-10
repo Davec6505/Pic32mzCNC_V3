@@ -112,6 +112,7 @@ static int  s_boot_inject_idx = -1; /* -1 = idle; 0/1 = injecting line[0/1] */
 static bool unitsInches  = false;           /* false=mm (G21), true=inches (G20) */
 static bool s_canned_g98 = true;            /* true=G98 (return initial Z), false=G99 (return R) */
 static char s_last_cmd_terminator = '\n';  /* terminator char NUL'd in IDLE — '\r' means CRLF, so GCODE_COMMAND skips the LF */
+static bool s_skip_lf = false;  /* CR consumed before its paired LF arrived */
 
 /* ✅ REMOVED: Startup deferral variables (caused UGS stalling) */
 
@@ -129,6 +130,24 @@ static inline bool is_control_char(uint8_t c){
             (c >= 0x90u && c <= 0x9Du) ||
             c == 0x11 || c == 0x13); 
 }
+static bool GCODE_HasAlarm(const APP_DATA* appData)
+{
+    return grblAlarm || g_hard_limit_alarm || appData->state == APP_ALARM;
+}
+
+static void consume_command_line(uint32_t length)
+{
+    uint32_t skip = length + 1u;
+    s_skip_lf = (s_last_cmd_terminator == '\r');
+    if (s_skip_lf && skip < nBytesRead && rxBuffer[skip] == '\n') {
+        skip++;
+        s_skip_lf = false;
+    }
+    nBytesRead -= skip;
+    memmove(rxBuffer, &rxBuffer[skip], nBytesRead);
+    rxBuffer[nBytesRead] = '\0';
+}
+
 GCODE_CommandQueue* Extract_CommandLineFrom_Buffer(uint8_t* buffer, uint32_t length, GCODE_CommandQueue* commandQueue);
 
 
@@ -186,6 +205,7 @@ void GCODE_SoftReset(APP_DATA* appData, GCODE_CommandQueue* cmdQueue)
 
         /* 10. Clear RX buffer */
     nBytesRead = 0;
+    s_skip_lf = false;
     memset(rxBuffer, 0, sizeof(rxBuffer));
 
     /* 3. Reset motion queue count */
@@ -275,6 +295,7 @@ void GCODE_USART_Initialize(uint32_t RD_thresholds)
 #endif
 
     nBytesRead = 0;
+    s_skip_lf = false;
     memset(rxBuffer, 0, sizeof(rxBuffer));
     okPendingCount = 0;       // Clear all deferred ok responses
     s_rxHasPushback = false;  // Clear any pending push-back byte
@@ -991,7 +1012,7 @@ static void service_realtime_byte(APP_DATA* appData, uint8_t c)
                 wpos[axis] = mpos[axis] - GET_COORDINATE_AXIS(&wcs->offset, axis);
             }
             const char* state = "Idle";
-            if (grblAlarm)                         { state = "Alarm"; }
+            if (GCODE_HasAlarm(appData))            { state = "Alarm"; }
             else if (g_feed_hold_pending)           { state = "Hold:1"; }
             else if (g_feed_hold_active)            { state = "Hold:0"; }
             else if (MOTION_IsJogging())            { state = "Jog"; }
@@ -1250,6 +1271,15 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             }
         }
 
+        if (s_skip_lf && nBytesRead > 0 && !is_control_char(rxBuffer[0])) {
+            s_skip_lf = false;
+            if (rxBuffer[0] == '\n') {
+                nBytesRead--;
+                memmove(rxBuffer, &rxBuffer[1], nBytesRead);
+                rxBuffer[nBytesRead] = '\0';
+            }
+        }
+
         if (nBytesRead == 0) {
             break;  // No data in buffer, exit IDLE state
         }
@@ -1276,6 +1306,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             }
             if (!has_terminator) break;
             char saved_terminator = rxBuffer[terminator_pos]; // save for queue-full retry
+            s_last_cmd_terminator = saved_terminator;
             rxBuffer[terminator_pos] = '\0';
 
             // ✅ Check for control chars AFTER termination (handles '?' with newline)
@@ -1288,7 +1319,6 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                        rxBuffer[0] == 'F' || rxBuffer[0] == 'f' ||
                        rxBuffer[0] == 'T' || rxBuffer[0] == 't' ||
                        rxBuffer[0] == 'S' || rxBuffer[0] == 's') {
-                s_last_cmd_terminator = saved_terminator;  /* needed by GCODE_COMMAND skip */
                 gcodeData.state = GCODE_STATE_GCODE_COMMAND;
             } else {
                 // Determine if line contains G-code content (ignore pure comments / whitespace)
@@ -1310,7 +1340,9 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                         has_content = true;
                     }
                 }
-                if (has_content) {
+                if (has_content && GCODE_HasAlarm(appData)) {
+                    UART_Printf("error:9\r\n");
+                } else if (has_content) {
                     DEBUG_PRINT_GCODE("[IDLE] Processing line: '%s'\r\n", rxBuffer);
                     uint32_t count_before_idle = cmdQueue->count;
                     cmdQueue = Extract_CommandLineFrom_Buffer(rxBuffer, terminator_pos, cmdQueue);
@@ -1334,21 +1366,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
                         DEBUG_PRINT_GCODE("[IDLE] Blank/comment ok deferred (tx full)\r\n");
                     }
                 }
-                uint32_t skip_pos = terminator_pos + 1;
-                /* Only consume the LF of a \r\n pair — any further \n are blank lines
-                 * that IDLE must process on the next iteration so they each get an ok. */
-                if (saved_terminator == '\r' && skip_pos < nBytesRead && rxBuffer[skip_pos] == '\n') {
-                    skip_pos++;
-                }
-                uint32_t remaining_bytes = nBytesRead - skip_pos;
-                if (remaining_bytes > 0) {
-                    memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
-                    nBytesRead = remaining_bytes;
-                    rxBuffer[nBytesRead] = '\0';
-                } else {
-                    nBytesRead = 0;
-                    memset(rxBuffer, 0, sizeof(rxBuffer));
-                }
+                consume_command_line(terminator_pos);
                 break;
             }
         }
@@ -1594,21 +1612,16 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             handled = true;
         }
         else if (len >= 2 && cmd[0] == '$' && cmd[1] == 'X') {
-            grblAlarm = false;
-            
-            // ✅ Clear hard limit alarm flag (set by stepper ISR)
-            // g_hard_limit_alarm declared in stepper.h (already included at top)
-            g_hard_limit_alarm = false;
-            
             // ✅ CRITICAL FIX: Clear hard limit suppression flag
             // This allows recovery after moving off limit switch
             // User must physically move off limit before $X will work
             CNC_Settings* settings = SETTINGS_GetCurrent();
             if (!MOTION_UTILS_CheckHardLimits(settings->limit_pins_invert)) {
                 // Limits are clear - allow recovery
+                grblAlarm = false;
+                g_hard_limit_alarm = false;
                 g_suppress_hard_limits = false;
-                // Clear non-hard-limit alarms (ALARM:3 motion abort, ALARM:6 homing abort, etc.)
-                if (appData->state == APP_ALARM && appData->alarmCode != 1) {
+                if (appData->state == APP_ALARM) {
                     appData->state = APP_IDLE;
                     appData->alarmCode = 0;
                 }
@@ -1616,6 +1629,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             } else {
                 // Still on limit - cannot clear alarm
                 UART_Printf("[MSG:Cannot clear alarm - move off limit switch first]\r\n");
+                UART_Printf("error:9\r\n");
                 g_hard_limit_alarm = true;  // Keep alarm active
                 grblAlarm = true;
                 send_ok = false;  // Don't send ok for failed $X
@@ -1747,8 +1761,8 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         else if (len >= 3 && cmd[0] == '$' && cmd[1] == 'J' && cmd[2] == '=') {
             // $J= jog command — parsed and submitted directly (bypasses command queue).
             // GRBL v1.1: sends "ok" on acceptance; error on alarm, bad syntax, or queue full.
-            if (grblAlarm) {
-                UART3_Write((uint8_t*)"error:2\r\n", 9);
+            if (GCODE_HasAlarm(appData)) {
+                UART_Printf("error:9\r\n");
                 send_ok = false;
             } else {
                 const char *p = &cmd[3];
@@ -1860,20 +1874,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             UART3_Write((uint8_t*)"error:4\r\n", 10);
         }
 
-        {
-            uint32_t skip_pos = (uint32_t)len + 1u;
-            while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
-                skip_pos++;
-            uint32_t remaining_bytes = nBytesRead - skip_pos;
-            if (remaining_bytes > 0) {
-                memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
-                nBytesRead = remaining_bytes;
-                rxBuffer[nBytesRead] = '\0';
-            } else {
-                nBytesRead = 0;
-                memset(rxBuffer, 0, sizeof(rxBuffer));
-            }
-        }
+        consume_command_line((uint32_t)len);
         gcodeData.state = GCODE_STATE_IDLE;
         break;
     }
@@ -1883,6 +1884,12 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
         uint32_t cmd_end = 0;
         for (uint32_t i = 0; i < nBytesRead; i++) {
             if (rxBuffer[i] == '\0') { cmd_end = i; break; }
+        }
+        if (GCODE_HasAlarm(appData)) {
+            UART_Printf("error:9\r\n");
+            consume_command_line(cmd_end);
+            gcodeData.state = GCODE_STATE_IDLE;
+            break;
         }
         // Inline dispatch: parse every event in this line and try to send each
         // directly to the motion bridge (trajectory).  If the bridge rejects any
@@ -1950,23 +1957,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
             DEBUG_PRINT_GCODE("[GCODE_CMD] Probe command — ok withheld until completion\r\n");
         }
 
-        {
-            uint32_t skip_pos = cmd_end + 1u;
-            /* Only consume the LF of a \r\n pair — any further \n are blank lines
-             * that must stay in rxBuffer for IDLE to process and send ok for. */
-            if (s_last_cmd_terminator == '\r' && skip_pos < nBytesRead && rxBuffer[skip_pos] == '\n') {
-                skip_pos++;
-            }
-            uint32_t remaining_bytes = nBytesRead - skip_pos;
-            if (remaining_bytes > 0) {
-                memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
-                nBytesRead = remaining_bytes;
-                rxBuffer[nBytesRead] = '\0';
-            } else {
-                nBytesRead = 0;
-                memset(rxBuffer, 0, sizeof(rxBuffer));
-            }
-        }
+        consume_command_line(cmd_end);
         gcodeData.state = GCODE_STATE_IDLE;
         break;
     }
@@ -1975,21 +1966,7 @@ void GCODE_Tasks(APP_DATA* appData, GCODE_CommandQueue* commandQueue)
     {
         uint32_t error_len = (uint32_t)sprintf((char*)txBuffer, "error:1\r\n");
         UART3_Write(txBuffer, error_len);
-        {
-            uint32_t err_cmd_len = (uint32_t)strlen((char*)rxBuffer);
-            uint32_t skip_pos = err_cmd_len + 1u;
-            while (skip_pos < nBytesRead && (rxBuffer[skip_pos] == '\r' || rxBuffer[skip_pos] == '\n'))
-                skip_pos++;
-            uint32_t remaining_bytes = nBytesRead - skip_pos;
-            if (remaining_bytes > 0) {
-                memmove(rxBuffer, &rxBuffer[skip_pos], remaining_bytes);
-                nBytesRead = remaining_bytes;
-                rxBuffer[nBytesRead] = '\0';
-            } else {
-                nBytesRead = 0;
-                memset(rxBuffer, 0, sizeof(rxBuffer));
-            }
-        }
+        consume_command_line((uint32_t)strlen((char*)rxBuffer));
         gcodeData.state = GCODE_STATE_IDLE;
         break;
     }

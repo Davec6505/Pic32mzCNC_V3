@@ -277,6 +277,34 @@ helical moves.
 | `~` | Resume from Hold:0 or cancel pending Hold:1 drain |
 | Ctrl+X | Soft reset + GRBL banner |
 
+Status reports use `Alarm` whenever the application or limit alarm is latched,
+including reset-during-motion (`ALARM:3`) and reset-during-homing (`ALARM:6`).
+G-code and jog commands are rejected with `error:9` while alarm-locked; status
+and diagnostic queries remain available. `$X` succeeds only when limit inputs
+are clear; otherwise it returns a message and `error:9`, without an `ok`.
+
+LF, CR and CRLF line endings are supported. Each accepted line receives one
+`ok` (including blank/comment lines); a CRLF pair is one terminator even when
+its bytes arrive in different UART reads. Additional blank lines retain their
+own acknowledgments.
+
+Offline protocol regressions (host GCC, no serial connection):
+
+```powershell
+.\ps_commands\test_gcode_protocol.ps1
+```
+
+**Board validation (November 10, 2026):** disconnected-board COM3 tests passed:
+the square sample completed with exactly 24 acknowledgments for 24 CRLF lines;
+split CR/LF produced no duplicate acknowledgment. Reset-during-motion reported
+`ALARM:3` and `Alarm` status, and subsequent motion returned `error:9`.
+Debounce and limit settings were unchanged. Physical limit operation and UGS
+end-to-end streaming still require validation.
+
+Header dependency tracking is enabled by default for root `make` builds.
+After switching from an older build without dependencies, run
+`make all DEP_TRACKING=1` once to rebuild all objects before flashing.
+
 ### System Commands
 
 | Command | Description |
